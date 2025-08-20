@@ -154,23 +154,30 @@ def grab_upcoming_rainfall_and_temperature(location, hours):
 
 def grab_current_temperature_openweather(location, apikey, units):
     current_temp = None
+    retries = WEATHER_RETRIES
 
-    try:
-        request = urllib.request.Request(
-            OPENWEATHER_API_URL
-            + "weather?q="
-            + location
-            + "&appid="
-            + apikey
-            + "&units="
-            + units
-        )
-        raw_data = urllib.request.urlopen(request).read()
-        content = json.loads(raw_data.decode("utf-8"))
-        current_temp = content["main"]["temp"]
-
-    except:
-        pass
+    while retries:
+        try:
+            request = urllib.request.Request(
+                OPENWEATHER_API_URL
+                + "weather?q="
+                + location
+                + "&appid="
+                + apikey
+                + "&units="
+                + units
+            )
+            raw_data = urllib.request.urlopen(request, timeout=3).read()
+            content = json.loads(raw_data.decode("utf-8"))
+            current_temp = content["main"]["temp"]
+            break
+        except Exception as e:
+            retries -= 1
+    else:
+        raise WeatherError(
+            f"Failed to fetch current temperature for '{location}' "
+            f"after {WEATHER_RETRIES} retries"
+        ) from e
 
     return current_temp
 
@@ -322,14 +329,22 @@ class WeatherScene(object):
 
         if not (count % TEMPERATURE_REFRESH_SECONDS):
 
-            if OPENWEATHER_API_KEY:
-                self.current_temperature = grab_current_temperature_openweather(
-                    WEATHER_LOCATION, OPENWEATHER_API_KEY, TEMPERATURE_UNITS
-                )
-            else:
-                self.current_temperature = grab_current_temperature(
-                    WEATHER_LOCATION, TEMPERATURE_UNITS
-                )
+            # Attempt to grab the current temperature. If OpenWeather API key is available, use it
+            # as the primary source. Otherwise fallback to the taps-aff server
+            weather_providers = [
+                *( [lambda: grab_current_temperature_openweather(
+                        WEATHER_LOCATION, OPENWEATHER_API_KEY, TEMPERATURE_UNITS
+                    )] if OPENWEATHER_API_KEY else [] ),
+                lambda: grab_current_temperature(WEATHER_LOCATION, TEMPERATURE_UNITS)
+            ]
+
+            self.current_temperature = None
+            for provider in weather_providers:
+                try:
+                    self.current_temperature = provider()
+                    break
+                except WeatherError:
+                    continue
 
         if self._last_temperature_str is not None:
             # Undraw old temperature
