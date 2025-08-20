@@ -189,6 +189,15 @@ class WeatherScene(object):
         self._last_temperature = None
         self._last_temperature_str = None
 
+        # Attempt to grab the current temperature using OPENWEATHER if a key
+        # is provided otherwise fallback on the taps-aff service
+        self._temperature_providers = [
+            *( [lambda: grab_current_temperature_openweather(
+                    WEATHER_LOCATION, OPENWEATHER_API_KEY, TEMPERATURE_UNITS
+                )] if OPENWEATHER_API_KEY else [] ),
+            lambda: grab_current_temperature(WEATHER_LOCATION, TEMPERATURE_UNITS)
+        ]
+
     def colour_gradient(self, colour_A, colour_B, ratio):
         return graphics.Color(
             colour_A.red + ((colour_B.red - colour_A.red) * ratio),
@@ -328,18 +337,8 @@ class WeatherScene(object):
             return
 
         if not (count % TEMPERATURE_REFRESH_SECONDS):
-
-            # Attempt to grab the current temperature. If OpenWeather API key is available, use it
-            # as the primary source. Otherwise fallback to the taps-aff server
-            temperature_providers = [
-                *( [lambda: grab_current_temperature_openweather(
-                        WEATHER_LOCATION, OPENWEATHER_API_KEY, TEMPERATURE_UNITS
-                    )] if OPENWEATHER_API_KEY else [] ),
-                lambda: grab_current_temperature(WEATHER_LOCATION, TEMPERATURE_UNITS)
-            ]
-
             self.current_temperature = None
-            for temperature in temperature_providers:
+            for temperature in self._temperature_providers:
                 try:
                     self.current_temperature = temperature()
                     break
