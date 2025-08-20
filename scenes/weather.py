@@ -42,6 +42,7 @@ if TEMPERATURE_UNITS != "metric" and TEMPERATURE_UNITS != "imperial":
 # Weather API
 WEATHER_API_URL = "https://taps-aff.co.uk/api/"
 OPENWEATHER_API_URL = "https://api.openweathermap.org/data/2.5/"
+WEATHER_RETRIES = 3
 
 
 # Scene Setup
@@ -68,13 +69,31 @@ TEMPERATURE_COLOURS = (
 )
 
 # Cache grabbing weather data
+class WeatherError(Exception):
+    """Raised when weather data cannot be retrieved after all retries."""
+    pass
+
+
 @lru_cache()
 def grab_weather(location, ttl_hash=None):
-    del ttl_hash  # to emphasize we don't use
+    del ttl_hash  # not used directly, just part of the cache key
 
-    request = urllib.request.Request(WEATHER_API_URL + location)
-    raw_data = urllib.request.urlopen(request).read()
-    content = json.loads(raw_data.decode("utf-8"))
+    content = None
+    retries = WEATHER_RETRIES
+
+    while retries:
+        try:
+            request = urllib.request.Request(WEATHER_API_URL + location)
+            raw_data = urllib.request.urlopen(request, timeout=3).read()
+            content = json.loads(raw_data.decode("utf-8"))
+            break
+        except Exception as e:
+            retries -= 1
+    else:
+        # We've ran out of retries without getting new weather data
+        raise WeatherError(
+            f"Failed to fetch weather data for '{location}' after {WEATHER_RETRIES} retries"
+        ) from e
 
     return content
 
@@ -91,8 +110,8 @@ def grab_current_temperature(location, units="metric"):
         weather = grab_weather(location, ttl_hash=get_ttl_hash())
         current_temp = weather["temp_c"]
 
-    except:
-        pass
+    except WeatherError:
+        grab_weather.cache_clear()
 
     if units == "imperial":
         current_temp = (current_temp * (9.0 / 5.0)) + 32
@@ -127,8 +146,8 @@ def grab_upcoming_rainfall_and_temperature(location, hours):
             current_hour : current_hour + hours
         ]
 
-    except:
-        pass
+    except WeatherError:
+        grab_weather.cache_clear()
 
     return up_coming_rainfall_and_temperature
 
