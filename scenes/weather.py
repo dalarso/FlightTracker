@@ -331,7 +331,7 @@ class WeatherScene(object):
 
             # Attempt to grab the current temperature. If OpenWeather API key is available, use it
             # as the primary source. Otherwise fallback to the taps-aff server
-            weather_providers = [
+            temperature_providers = [
                 *( [lambda: grab_current_temperature_openweather(
                         WEATHER_LOCATION, OPENWEATHER_API_KEY, TEMPERATURE_UNITS
                     )] if OPENWEATHER_API_KEY else [] ),
@@ -339,9 +339,9 @@ class WeatherScene(object):
             ]
 
             self.current_temperature = None
-            for provider in weather_providers:
+            for temperature in temperature_providers:
                 try:
-                    self.current_temperature = provider()
+                    self.current_temperature = temperature()
                     break
                 except WeatherError:
                     continue
