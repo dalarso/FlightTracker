@@ -93,7 +93,7 @@ def grab_weather(location, ttl_hash=None):
         # We've ran out of retries without getting new weather data
         raise WeatherError(
             f"Failed to fetch weather data for '{location}' after {WEATHER_RETRIES} retries"
-        ) from e
+        )
 
     return content
 
@@ -177,7 +177,7 @@ def grab_current_temperature_openweather(location, apikey, units):
         raise WeatherError(
             f"Failed to fetch current temperature for '{location}' "
             f"after {WEATHER_RETRIES} retries"
-        ) from e
+        )
 
     return current_temp
 
