@@ -1,6 +1,6 @@
 # RBG Matrix Flight Tracker
 
-[📖 Blog article about this project](https://blog.colinwaddell.com/flight-tracker/)
+[📖 Blog post about this project](https://blog.colinwaddell.com/flight-tracker/)
 
 [☢️ Why you should **avoid** buying this pre-built from Flight Tracker LED](https://colinwaddell.com/articles/flight-tracker-led-ripoff-part-2-its-so-much-worse)
 
