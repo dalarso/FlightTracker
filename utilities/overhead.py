@@ -192,11 +192,14 @@ class Overhead:
         data = []
 
         try:
-            flights = fetch_flights()
-            flights = [
-                f for f in flights
-                if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)
-            ]
+            all_flights = fetch_flights()
+            print(f"[overhead] feed: {len(all_flights)} aircraft", flush=True)
+            for f in all_flights:
+                in_z = in_zone(f)
+                alt_ok = MIN_ALTITUDE < f.altitude < MAX_ALTITUDE
+                print(f"[overhead]   {f.callsign or '?':10} alt={f.altitude:6} in_zone={in_z} alt_ok={alt_ok}", flush=True)
+
+            flights = [f for f in all_flights if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)]
             flights = sorted(flights, key=distance_from_flight_to_home)
 
             for flight in flights[:MAX_FLIGHT_LOOKUP]:
