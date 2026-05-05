@@ -38,7 +38,8 @@ except (ModuleNotFoundError, NameError, ImportError):
 # fr24feed flights.json is tried first; dump1090 aircraft.json is the fallback
 FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
 DUMP1090_URL = f"http://{RECEIVER_HOST}:8080/data/aircraft.json"
-ADSBDB_URL = "https://api.adsbdb.com/v0/callsign/{}"
+ADSBDB_CALLSIGN_URL = "https://api.adsbdb.com/v0/callsign/{}"
+ADSBDB_AIRCRAFT_URL = "https://api.adsbdb.com/v0/aircraft/{}"
 
 # fr24feed flights.json field indices
 # {hex: [hex, lat, lon, heading, alt_ft, speed, squawk, ?, type, reg, timestamp, origin, dest, ?, on_ground, vert_rate, callsign]}
@@ -54,18 +55,20 @@ EARTH_RADIUS_KM = 6371
 BLANK_FIELDS = ["", "N/A", "NONE"]
 
 _route_cache = {}
+_aircraft_cache = {}
 
 
 class Flight:
-    def __init__(self, lat, lon, altitude, vertical_speed, callsign):
+    def __init__(self, lat, lon, altitude, vertical_speed, callsign, hex_code=""):
         self.latitude = lat
         self.longitude = lon
         self.altitude = altitude
         self.vertical_speed = vertical_speed
         self.callsign = callsign
+        self.hex_code = hex_code
 
     @classmethod
-    def from_fr24(cls, entry):
+    def from_fr24(cls, hex_code, entry):
         """Parse one value from fr24feed flights.json (a list)."""
         try:
             lat = entry[FR24_LAT]
@@ -80,6 +83,7 @@ class Flight:
                 altitude=alt,
                 vertical_speed=entry[FR24_VERT] if isinstance(entry[FR24_VERT], (int, float)) else 0,
                 callsign=(entry[FR24_CALLSIGN] or "").strip(),
+                hex_code=hex_code,
             )
         except (IndexError, TypeError):
             return None
@@ -94,6 +98,7 @@ class Flight:
             altitude=alt if isinstance(alt, (int, float)) else 0,
             vertical_speed=ac.get("baro_rate", ac.get("geom_rate", 0)) or 0,
             callsign=(ac.get("flight") or "").strip(),
+            hex_code=ac.get("hex", ""),
         )
 
 
@@ -104,9 +109,9 @@ def fetch_flights():
         if r.status_code == 200:
             data = r.json()
             flights = []
-            for entry in data.values():
+            for hex_code, entry in data.items():
                 if isinstance(entry, list) and len(entry) > FR24_CALLSIGN:
-                    f = Flight.from_fr24(entry)
+                    f = Flight.from_fr24(hex_code, entry)
                     if f:
                         flights.append(f)
             return flights
@@ -161,7 +166,7 @@ def get_route(callsign):
     if callsign in _route_cache:
         return _route_cache[callsign]
     try:
-        r = requests.get(ADSBDB_URL.format(callsign), timeout=5)
+        r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
         if r.status_code == 200:
             route = r.json().get("response", {}).get("flightroute", {})
             origin = (route.get("origin") or {}).get("iata_code", "") or ""
@@ -172,6 +177,26 @@ def get_route(callsign):
         pass
     _route_cache[callsign] = ("", "")
     return "", ""
+
+
+def get_aircraft_type(hex_code):
+    if not hex_code:
+        return ""
+    if hex_code in _aircraft_cache:
+        return _aircraft_cache[hex_code]
+    try:
+        r = requests.get(ADSBDB_AIRCRAFT_URL.format(hex_code), timeout=5)
+        if r.status_code == 200:
+            ac = r.json().get("response", {}).get("aircraft", {})
+            manufacturer = ac.get("manufacturer", "") or ""
+            type_name = ac.get("type", "") or ""
+            plane = f"{manufacturer} {type_name}".strip()
+            _aircraft_cache[hex_code] = plane
+            return plane
+    except Exception:
+        pass
+    _aircraft_cache[hex_code] = ""
+    return ""
 
 
 class Overhead:
@@ -206,14 +231,18 @@ class Overhead:
                 sleep(RATE_LIMIT_DELAY)
 
                 origin, destination = get_route(flight.callsign)
+                plane = get_aircraft_type(flight.hex_code)
 
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
                 origin = origin if origin.upper() not in BLANK_FIELDS else ""
                 destination = destination if destination.upper() not in BLANK_FIELDS else ""
+                plane = plane if plane.upper() not in BLANK_FIELDS else ""
+
+                print(f"[overhead]   -> {callsign} plane='{plane}' {origin}->{destination}", flush=True)
 
                 data.append(
                     {
-                        "plane": "",
+                        "plane": plane,
                         "origin": origin,
                         "destination": destination,
                         "vertical_speed": flight.vertical_speed,
