@@ -1,4 +1,10 @@
 import math
+import os
+import sys
+
+# Allow running standalone: ensure project root is on the path for config imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 import requests
 from threading import Thread, Lock
 from time import sleep
@@ -58,11 +64,15 @@ class Flight:
     def from_fr24(cls, entry):
         """Parse one value from fr24feed flights.json (a list)."""
         try:
+            lat = entry[FR24_LAT]
+            lon = entry[FR24_LON]
+            if not lat or not lon:
+                return None
             alt = entry[FR24_ALT]
             alt = alt if isinstance(alt, (int, float)) else 0
             return cls(
-                lat=entry[FR24_LAT],
-                lon=entry[FR24_LON],
+                lat=lat,
+                lon=lon,
                 altitude=alt,
                 vertical_speed=entry[FR24_VERT] if isinstance(entry[FR24_VERT], (int, float)) else 0,
                 callsign=(entry[FR24_CALLSIGN] or "").strip(),
