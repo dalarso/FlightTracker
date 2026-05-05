@@ -42,10 +42,12 @@ except (ModuleNotFoundError, NameError, ImportError):
     LOCAL_AIRPORT = ""
 
 try:
-    from config import OPENSKY_USER, OPENSKY_PASS
-    OPENSKY_AUTH = (OPENSKY_USER, OPENSKY_PASS)
+    from config import OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET
 except (ModuleNotFoundError, NameError, ImportError):
-    OPENSKY_AUTH = None
+    OPENSKY_CLIENT_ID = None
+    OPENSKY_CLIENT_SECRET = None
+
+OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 
 # Data source URLs
 FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
@@ -71,6 +73,32 @@ OPENSKY_CACHE_TTL = 3600  # re-query OpenSky after 1 hour
 
 _route_cache = {}    # hex_code -> (origin, destination, timestamp)
 _aircraft_cache = {} # hex_code -> type string
+_opensky_token = {"value": None, "expires_at": 0}
+
+
+def _get_opensky_token():
+    """Fetch or return cached OAuth2 Bearer token for OpenSky."""
+    now = time.time()
+    if _opensky_token["value"] and now < _opensky_token["expires_at"] - 30:
+        return _opensky_token["value"]
+    try:
+        r = requests.post(
+            OPENSKY_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": OPENSKY_CLIENT_ID,
+                "client_secret": OPENSKY_CLIENT_SECRET,
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            _opensky_token["value"] = data["access_token"]
+            _opensky_token["expires_at"] = now + data.get("expires_in", 300)
+            return _opensky_token["value"]
+    except Exception:
+        pass
+    return None
 
 
 def icao_to_iata(code):
@@ -190,26 +218,28 @@ def get_route(hex_code, callsign, vertical_speed):
     origin, destination = "", ""
 
     # 1. OpenSky
-    if OPENSKY_AUTH and hex_code:
+    if OPENSKY_CLIENT_ID and hex_code:
         now = int(time.time())
         cached = _route_cache.get(hex_code)
         if cached and now - cached[2] < OPENSKY_CACHE_TTL:
             origin, destination = cached[0], cached[1]
         else:
-            try:
-                r = requests.get(
-                    OPENSKY_FLIGHTS_URL,
-                    params={"icao24": hex_code.lower(), "begin": now - 86400, "end": now},
-                    auth=OPENSKY_AUTH,
-                    timeout=10,
-                )
-                if r.status_code == 200 and r.json():
-                    flight = max(r.json(), key=lambda f: f.get("firstSeen", 0))
-                    origin = icao_to_iata(flight.get("estDepartureAirport") or "")
-                    destination = icao_to_iata(flight.get("estArrivalAirport") or "")
-                    _route_cache[hex_code] = (origin, destination, now)
-            except Exception:
-                pass
+            token = _get_opensky_token()
+            if token:
+                try:
+                    r = requests.get(
+                        OPENSKY_FLIGHTS_URL,
+                        params={"icao24": hex_code.lower(), "begin": now - 86400, "end": now},
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=10,
+                    )
+                    if r.status_code == 200 and r.json():
+                        flight = max(r.json(), key=lambda f: f.get("firstSeen", 0))
+                        origin = icao_to_iata(flight.get("estDepartureAirport") or "")
+                        destination = icao_to_iata(flight.get("estArrivalAirport") or "")
+                        _route_cache[hex_code] = (origin, destination, now)
+                except Exception:
+                    pass
 
     # 2. adsbdb callsign fallback
     if not origin and not destination and callsign:
