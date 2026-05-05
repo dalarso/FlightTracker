@@ -1,6 +1,7 @@
 import math
 import os
 import sys
+import time
 
 # Allow running standalone: ensure project root is on the path for config imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -35,9 +36,22 @@ except (ModuleNotFoundError, NameError, ImportError):
     except (ModuleNotFoundError, NameError, ImportError):
         RECEIVER_HOST = "localhost"
 
-# fr24feed flights.json is tried first; dump1090 aircraft.json is the fallback
+try:
+    from config import LOCAL_AIRPORT
+except (ModuleNotFoundError, NameError, ImportError):
+    LOCAL_AIRPORT = ""
+
+try:
+    from config import OPENSKY_USER, OPENSKY_PASS
+    OPENSKY_AUTH = (OPENSKY_USER, OPENSKY_PASS)
+except (ModuleNotFoundError, NameError, ImportError):
+    OPENSKY_AUTH = None
+
+# Data source URLs
 FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
 DUMP1090_URL = f"http://{RECEIVER_HOST}:8080/data/aircraft.json"
+AIRPLANESLIVE_URL = "https://api.airplanes.live/v2/hex/{}"
+OPENSKY_FLIGHTS_URL = "https://opensky-network.org/api/flights/aircraft"
 ADSBDB_CALLSIGN_URL = "https://api.adsbdb.com/v0/callsign/{}"
 ADSBDB_AIRCRAFT_URL = "https://api.adsbdb.com/v0/aircraft/{}"
 
@@ -53,9 +67,21 @@ RATE_LIMIT_DELAY = 1
 MAX_FLIGHT_LOOKUP = 5
 EARTH_RADIUS_KM = 6371
 BLANK_FIELDS = ["", "N/A", "NONE"]
+OPENSKY_CACHE_TTL = 3600  # re-query OpenSky after 1 hour
 
-_route_cache = {}
-_aircraft_cache = {}
+_route_cache = {}    # hex_code -> (origin, destination, timestamp)
+_aircraft_cache = {} # hex_code -> type string
+
+
+def icao_to_iata(code):
+    """Best-effort ICAO→IATA: strip leading region letter for common prefixes."""
+    if not code or len(code) != 4:
+        return code
+    if code[0] in ("K", "P"):   # US/Alaska
+        return code[1:]
+    if code[:2] == "CY":        # Canada
+        return code[2:]
+    return code                  # everything else: return as-is (4 chars won't fit well but better than nothing)
 
 
 class Flight:
@@ -69,7 +95,6 @@ class Flight:
 
     @classmethod
     def from_fr24(cls, hex_code, entry):
-        """Parse one value from fr24feed flights.json (a list)."""
         try:
             lat = entry[FR24_LAT]
             lon = entry[FR24_LON]
@@ -90,7 +115,6 @@ class Flight:
 
     @classmethod
     def from_dump1090(cls, ac):
-        """Parse one entry from dump1090 aircraft.json."""
         alt = ac.get("alt_baro", 0)
         return cls(
             lat=ac.get("lat", 0),
@@ -103,13 +127,12 @@ class Flight:
 
 
 def fetch_flights():
-    """Return a list of Flight objects from fr24feed or dump1090."""
+    """Return Flight objects from fr24feed (preferred) or dump1090 (fallback)."""
     try:
         r = requests.get(FR24FEED_URL, timeout=5)
         if r.status_code == 200:
-            data = r.json()
             flights = []
-            for hex_code, entry in data.items():
+            for hex_code, entry in r.json().items():
                 if isinstance(entry, list) and len(entry) > FR24_CALLSIGN:
                     f = Flight.from_fr24(hex_code, entry)
                     if f:
@@ -118,7 +141,6 @@ def fetch_flights():
     except Exception:
         pass
 
-    # Fallback: dump1090
     r = requests.get(DUMP1090_URL, timeout=5)
     aircraft_list = r.json().get("aircraft", [])
     return [
@@ -138,13 +160,11 @@ def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
         ]
 
     def feet_to_meters_plus_earth(altitude_ft):
-        altitude_km = 0.0003048 * altitude_ft
-        return altitude_km + EARTH_RADIUS_KM
+        return 0.0003048 * altitude_ft + EARTH_RADIUS_KM
 
     try:
         (x0, y0, z0) = polar_to_cartesian(
-            flight.latitude,
-            flight.longitude,
+            flight.latitude, flight.longitude,
             feet_to_meters_plus_earth(flight.altitude),
         )
         (x1, y1, z1) = polar_to_cartesian(*home)
@@ -160,30 +180,90 @@ def in_zone(flight, zone=ZONE_DEFAULT):
     )
 
 
-def get_route(callsign):
-    if not callsign or callsign.upper() in BLANK_FIELDS:
-        return "", ""
-    if callsign in _route_cache:
-        return _route_cache[callsign]
-    try:
-        r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
-        if r.status_code == 200:
-            route = r.json().get("response", {}).get("flightroute", {})
-            origin = (route.get("origin") or {}).get("iata_code", "") or ""
-            destination = (route.get("destination") or {}).get("iata_code", "") or ""
-            _route_cache[callsign] = (origin, destination)
-            return origin, destination
-    except Exception:
-        pass
-    _route_cache[callsign] = ("", "")
-    return "", ""
+def get_route(hex_code, callsign, vertical_speed):
+    """
+    Route lookup priority:
+      1. OpenSky by hex (real-time actual departure/arrival)
+      2. adsbdb by callsign (static fallback)
+      3. LOCAL_AIRPORT heuristic (fill whichever end is missing based on climb/descent)
+    """
+    origin, destination = "", ""
+
+    # 1. OpenSky
+    if OPENSKY_AUTH and hex_code:
+        now = int(time.time())
+        cached = _route_cache.get(hex_code)
+        if cached and now - cached[2] < OPENSKY_CACHE_TTL:
+            origin, destination = cached[0], cached[1]
+        else:
+            try:
+                r = requests.get(
+                    OPENSKY_FLIGHTS_URL,
+                    params={"icao24": hex_code.lower(), "begin": now - 86400, "end": now},
+                    auth=OPENSKY_AUTH,
+                    timeout=10,
+                )
+                if r.status_code == 200 and r.json():
+                    flight = max(r.json(), key=lambda f: f.get("firstSeen", 0))
+                    origin = icao_to_iata(flight.get("estDepartureAirport") or "")
+                    destination = icao_to_iata(flight.get("estArrivalAirport") or "")
+                    _route_cache[hex_code] = (origin, destination, now)
+            except Exception:
+                pass
+
+    # 2. adsbdb callsign fallback
+    if not origin and not destination and callsign:
+        try:
+            r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
+            if r.status_code == 200:
+                route = r.json().get("response", {}).get("flightroute", {})
+                origin = (route.get("origin") or {}).get("iata_code", "") or ""
+                destination = (route.get("destination") or {}).get("iata_code", "") or ""
+        except Exception:
+            pass
+
+    # 3. LOCAL_AIRPORT heuristic
+    if LOCAL_AIRPORT:
+        departing = vertical_speed > 0
+        if departing and not origin:
+            origin = LOCAL_AIRPORT
+        elif not departing and not destination:
+            destination = LOCAL_AIRPORT
+
+    origin = origin if origin.upper() not in BLANK_FIELDS else ""
+    destination = destination if destination.upper() not in BLANK_FIELDS else ""
+    return origin, destination
 
 
 def get_aircraft_type(hex_code):
+    """
+    Aircraft type lookup priority:
+      1. airplanes.live (best coverage, has desc field)
+      2. adsbdb (fallback)
+    """
     if not hex_code:
         return ""
     if hex_code in _aircraft_cache:
         return _aircraft_cache[hex_code]
+
+    # 1. airplanes.live
+    try:
+        r = requests.get(AIRPLANESLIVE_URL.format(hex_code.upper()), timeout=5)
+        if r.status_code == 200:
+            ac_list = r.json().get("ac", [])
+            if ac_list:
+                ac = ac_list[0]
+                plane = ac.get("desc", "") or ""
+                if not plane:
+                    t = ac.get("t", "") or ""
+                    plane = t
+                if plane:
+                    _aircraft_cache[hex_code] = plane
+                    return plane
+    except Exception:
+        pass
+
+    # 2. adsbdb
     try:
         r = requests.get(ADSBDB_AIRCRAFT_URL.format(hex_code), timeout=5)
         if r.status_code == 200:
@@ -191,10 +271,12 @@ def get_aircraft_type(hex_code):
             manufacturer = ac.get("manufacturer", "") or ""
             type_name = ac.get("type", "") or ""
             plane = f"{manufacturer} {type_name}".strip()
-            _aircraft_cache[hex_code] = plane
-            return plane
+            if plane:
+                _aircraft_cache[hex_code] = plane
+                return plane
     except Exception:
         pass
+
     _aircraft_cache[hex_code] = ""
     return ""
 
@@ -230,13 +312,10 @@ class Overhead:
             for flight in flights[:MAX_FLIGHT_LOOKUP]:
                 sleep(RATE_LIMIT_DELAY)
 
-                origin, destination = get_route(flight.callsign)
+                origin, destination = get_route(flight.hex_code, flight.callsign, flight.vertical_speed)
                 plane = get_aircraft_type(flight.hex_code)
-
-                callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
-                origin = origin if origin.upper() not in BLANK_FIELDS else ""
-                destination = destination if destination.upper() not in BLANK_FIELDS else ""
                 plane = plane if plane.upper() not in BLANK_FIELDS else ""
+                callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
                 print(f"[overhead]   -> {callsign} plane='{plane}' {origin}->{destination}", flush=True)
 
