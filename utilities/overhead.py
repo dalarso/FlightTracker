@@ -1,19 +1,32 @@
-from FlightRadar24.api import FlightRadar24API
+import math
+import requests
 from threading import Thread, Lock
 from time import sleep
-import math
 
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import NewConnectionError
 from urllib3.exceptions import MaxRetryError
 
 try:
-    # Attempt to load config data
     from config import MIN_ALTITUDE
-
 except (ModuleNotFoundError, NameError, ImportError):
-    # If there's no config data
     MIN_ALTITUDE = 0  # feet
+
+try:
+    from config import ZONE_HOME, LOCATION_HOME
+    ZONE_DEFAULT = ZONE_HOME
+    LOCATION_DEFAULT = LOCATION_HOME
+except (ModuleNotFoundError, NameError, ImportError):
+    ZONE_DEFAULT = {"tl_y": 62.61, "tl_x": -13.07, "br_y": 49.71, "br_x": 3.46}
+    LOCATION_DEFAULT = [51.509865, -0.118092, 6371]
+
+try:
+    from config import DUMP1090_HOST
+except (ModuleNotFoundError, NameError, ImportError):
+    DUMP1090_HOST = "localhost"
+
+DUMP1090_URL = f"http://{DUMP1090_HOST}:8080/data/aircraft.json"
+ADSBDB_URL = "https://api.adsbdb.com/v0/callsign/{}"
 
 RETRIES = 3
 RATE_LIMIT_DELAY = 1
@@ -22,17 +35,18 @@ MAX_ALTITUDE = 10000  # feet
 EARTH_RADIUS_KM = 6371
 BLANK_FIELDS = ["", "N/A", "NONE"]
 
-try:
-    # Attempt to load config data
-    from config import ZONE_HOME, LOCATION_HOME
+_route_cache = {}
 
-    ZONE_DEFAULT = ZONE_HOME
-    LOCATION_DEFAULT = LOCATION_HOME
 
-except (ModuleNotFoundError, NameError, ImportError):
-    # If there's no config data
-    ZONE_DEFAULT = {"tl_y": 62.61, "tl_x": -13.07, "br_y": 49.71, "br_x": 3.46}
-    LOCATION_DEFAULT = [51.509865, -0.118092, EARTH_RADIUS_KM]
+class Flight:
+    def __init__(self, ac):
+        self.latitude = ac.get("lat", 0)
+        self.longitude = ac.get("lon", 0)
+        alt = ac.get("alt_baro", 0)
+        self.altitude = alt if isinstance(alt, (int, float)) else 0
+        self.vertical_speed = ac.get("baro_rate", ac.get("geom_rate", 0)) or 0
+        self.callsign = (ac.get("flight") or "").strip()
+        self.plane_type = (ac.get("t") or "").strip()
 
 
 def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
@@ -66,9 +80,34 @@ def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
         return 1e6
 
 
+def in_zone(flight, zone=ZONE_DEFAULT):
+    return (
+        zone["br_y"] <= flight.latitude <= zone["tl_y"]
+        and zone["tl_x"] <= flight.longitude <= zone["br_x"]
+    )
+
+
+def get_route(callsign):
+    if not callsign or callsign.upper() in BLANK_FIELDS:
+        return "", ""
+    if callsign in _route_cache:
+        return _route_cache[callsign]
+    try:
+        r = requests.get(ADSBDB_URL.format(callsign), timeout=5)
+        if r.status_code == 200:
+            route = r.json().get("response", {}).get("flightroute", {})
+            origin = (route.get("origin") or {}).get("iata_code", "") or ""
+            destination = (route.get("destination") or {}).get("iata_code", "") or ""
+            _route_cache[callsign] = (origin, destination)
+            return origin, destination
+    except Exception:
+        pass
+    _route_cache[callsign] = ("", "")
+    return "", ""
+
+
 class Overhead:
     def __init__(self):
-        self._api = FlightRadar24API()
         self._lock = Lock()
         self._data = []
         self._new_data = False
@@ -78,78 +117,43 @@ class Overhead:
         Thread(target=self._grab_data).start()
 
     def _grab_data(self):
-        # Mark data as old
         with self._lock:
             self._new_data = False
             self._processing = True
 
         data = []
 
-        # Grab flight details
         try:
-            bounds = self._api.get_bounds(ZONE_DEFAULT)
-            flights = self._api.get_flights(bounds=bounds)
+            response = requests.get(DUMP1090_URL, timeout=5)
+            aircraft_list = response.json().get("aircraft", [])
 
-            # Sort flights by closest first
+            flights = [Flight(ac) for ac in aircraft_list if "lat" in ac and "lon" in ac]
             flights = [
-                f
-                for f in flights
-                if f.altitude < MAX_ALTITUDE and f.altitude > MIN_ALTITUDE
+                f for f in flights
+                if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)
             ]
-            flights = sorted(flights, key=lambda f: distance_from_flight_to_home(f))
+            flights = sorted(flights, key=distance_from_flight_to_home)
 
             for flight in flights[:MAX_FLIGHT_LOOKUP]:
-                retries = RETRIES
+                sleep(RATE_LIMIT_DELAY)
 
-                while retries:
-                    # Rate limit protection
-                    sleep(RATE_LIMIT_DELAY)
+                origin, destination = get_route(flight.callsign)
 
-                    # Grab and store details
-                    try:
-                        details = self._api.get_flight_details(flight)
+                plane = flight.plane_type if flight.plane_type.upper() not in BLANK_FIELDS else ""
+                callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
+                origin = origin if origin.upper() not in BLANK_FIELDS else ""
+                destination = destination if destination.upper() not in BLANK_FIELDS else ""
 
-                        # Get plane type
-                        try:
-                            plane = details["aircraft"]["model"]["text"]
-                        except (KeyError, TypeError):
-                            plane = ""
-
-                        # Tidy up what we pass along
-                        plane = plane if not (plane.upper() in BLANK_FIELDS) else ""
-
-                        origin = (
-                            flight.origin_airport_iata
-                            if not (flight.origin_airport_iata.upper() in BLANK_FIELDS)
-                            else ""
-                        )
-
-                        destination = (
-                            flight.destination_airport_iata
-                            if not (flight.destination_airport_iata.upper() in BLANK_FIELDS)
-                            else ""
-                        )
-
-                        callsign = (
-                            flight.callsign
-                            if not (flight.callsign.upper() in BLANK_FIELDS)
-                            else ""
-                        )
-
-                        data.append(
-                            {
-                                "plane": plane,
-                                "origin": origin,
-                                "destination": destination,
-                                "vertical_speed": flight.vertical_speed,
-                                "altitude": flight.altitude,
-                                "callsign": callsign,
-                            }
-                        )
-                        break
-
-                    except (KeyError, AttributeError):
-                        retries -= 1
+                data.append(
+                    {
+                        "plane": plane,
+                        "origin": origin,
+                        "destination": destination,
+                        "vertical_speed": flight.vertical_speed,
+                        "altitude": flight.altitude,
+                        "callsign": callsign,
+                    }
+                )
 
             with self._lock:
                 self._new_data = True

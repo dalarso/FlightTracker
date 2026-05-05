@@ -26,7 +26,7 @@ class DateScene(object):
             # If there's no data to display
             # then draw the date
             now = datetime.now()
-            current_date = now.strftime("%-d-%-m-%Y")
+            current_date = now.strftime("%-m-%-d-%Y")
 
             # Only draw if date needs updated
             if self._last_date != current_date:

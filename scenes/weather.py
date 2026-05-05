@@ -56,16 +56,16 @@ RAINFALL_MAX_VALUE = 3  # mm
 RAINFALL_OVERSPILL_FLASH_ENABLED = True
 
 TEMPERATURE_REFRESH_SECONDS = 60
-TEMPERATURE_FONT = fonts.extrasmall
+TEMPERATURE_FONT = fonts.small
 TEMPERATURE_FONT_HEIGHT = 5
-TEMPERATURE_POSITION = (48, TEMPERATURE_FONT_HEIGHT + 1)
+TEMPERATURE_POSITION = (43, TEMPERATURE_FONT_HEIGHT + 2)
 
 TEMPERATURE_COLOURS = (
     (0, colours.WHITE),
-    (1, colours.BLUE_LIGHT),
-    (8, colours.PINK_DARK),
-    (18, colours.YELLOW),
-    (30, colours.ORANGE),
+    (40, colours.BLUE_LIGHT),
+    (60, colours.PINK_DARK),
+    (80, colours.YELLOW),
+    (100, colours.ORANGE),
 )
 
 # Cache grabbing weather data

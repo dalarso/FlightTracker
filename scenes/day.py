@@ -8,7 +8,7 @@ from rgbmatrix import graphics
 # Setup
 DAY_COLOUR = colours.PINK_DARK
 DAY_FONT = fonts.small
-DAY_POSITION = (2, 23)
+DAY_POSITION = (0, 23)
 
 
 class DayScene(object):
