@@ -160,9 +160,13 @@ class Overhead:
                 self._processing = False
                 self._data = data
 
-        except (ConnectionError, NewConnectionError, MaxRetryError):
-            self._new_data = False
+        except Exception:
+            pass
+
+        with self._lock:
+            self._new_data = True
             self._processing = False
+            self._data = data
 
     @property
     def new_data(self):
