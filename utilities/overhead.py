@@ -15,6 +15,11 @@ except (ModuleNotFoundError, NameError, ImportError):
     MIN_ALTITUDE = 0  # feet
 
 try:
+    from config import MAX_ALTITUDE
+except (ModuleNotFoundError, NameError, ImportError):
+    MAX_ALTITUDE = 10000  # feet
+
+try:
     from config import ZONE_HOME, LOCATION_HOME
     ZONE_DEFAULT = ZONE_HOME
     LOCATION_DEFAULT = LOCATION_HOME
@@ -45,7 +50,6 @@ FR24_CALLSIGN = 16
 
 RATE_LIMIT_DELAY = 1
 MAX_FLIGHT_LOOKUP = 5
-MAX_ALTITUDE = 10000  # feet
 EARTH_RADIUS_KM = 6371
 BLANK_FIELDS = ["", "N/A", "NONE"]
 
