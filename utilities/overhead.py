@@ -3,10 +3,6 @@ import requests
 from threading import Thread, Lock
 from time import sleep
 
-from requests.exceptions import ConnectionError
-from urllib3.exceptions import NewConnectionError
-from urllib3.exceptions import MaxRetryError
-
 try:
     from config import MIN_ALTITUDE
 except (ModuleNotFoundError, NameError, ImportError):
@@ -21,14 +17,26 @@ except (ModuleNotFoundError, NameError, ImportError):
     LOCATION_DEFAULT = [51.509865, -0.118092, 6371]
 
 try:
-    from config import DUMP1090_HOST
+    from config import RECEIVER_HOST
 except (ModuleNotFoundError, NameError, ImportError):
-    DUMP1090_HOST = "localhost"
+    try:
+        from config import DUMP1090_HOST as RECEIVER_HOST
+    except (ModuleNotFoundError, NameError, ImportError):
+        RECEIVER_HOST = "localhost"
 
-DUMP1090_URL = f"http://{DUMP1090_HOST}:8080/data/aircraft.json"
+# fr24feed flights.json is tried first; dump1090 aircraft.json is the fallback
+FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
+DUMP1090_URL = f"http://{RECEIVER_HOST}:8080/data/aircraft.json"
 ADSBDB_URL = "https://api.adsbdb.com/v0/callsign/{}"
 
-RETRIES = 3
+# fr24feed flights.json field indices
+# {hex: [hex, lat, lon, heading, alt_ft, speed, squawk, ?, type, reg, timestamp, origin, dest, ?, on_ground, vert_rate, callsign]}
+FR24_LAT = 1
+FR24_LON = 2
+FR24_ALT = 4
+FR24_VERT = 15
+FR24_CALLSIGN = 16
+
 RATE_LIMIT_DELAY = 1
 MAX_FLIGHT_LOOKUP = 5
 MAX_ALTITUDE = 10000  # feet
@@ -39,14 +47,66 @@ _route_cache = {}
 
 
 class Flight:
-    def __init__(self, ac):
-        self.latitude = ac.get("lat", 0)
-        self.longitude = ac.get("lon", 0)
+    def __init__(self, lat, lon, altitude, vertical_speed, callsign):
+        self.latitude = lat
+        self.longitude = lon
+        self.altitude = altitude
+        self.vertical_speed = vertical_speed
+        self.callsign = callsign
+
+    @classmethod
+    def from_fr24(cls, entry):
+        """Parse one value from fr24feed flights.json (a list)."""
+        try:
+            alt = entry[FR24_ALT]
+            alt = alt if isinstance(alt, (int, float)) else 0
+            return cls(
+                lat=entry[FR24_LAT],
+                lon=entry[FR24_LON],
+                altitude=alt,
+                vertical_speed=entry[FR24_VERT] if isinstance(entry[FR24_VERT], (int, float)) else 0,
+                callsign=(entry[FR24_CALLSIGN] or "").strip(),
+            )
+        except (IndexError, TypeError):
+            return None
+
+    @classmethod
+    def from_dump1090(cls, ac):
+        """Parse one entry from dump1090 aircraft.json."""
         alt = ac.get("alt_baro", 0)
-        self.altitude = alt if isinstance(alt, (int, float)) else 0
-        self.vertical_speed = ac.get("baro_rate", ac.get("geom_rate", 0)) or 0
-        self.callsign = (ac.get("flight") or "").strip()
-        self.plane_type = (ac.get("t") or "").strip()
+        return cls(
+            lat=ac.get("lat", 0),
+            lon=ac.get("lon", 0),
+            altitude=alt if isinstance(alt, (int, float)) else 0,
+            vertical_speed=ac.get("baro_rate", ac.get("geom_rate", 0)) or 0,
+            callsign=(ac.get("flight") or "").strip(),
+        )
+
+
+def fetch_flights():
+    """Return a list of Flight objects from fr24feed or dump1090."""
+    try:
+        r = requests.get(FR24FEED_URL, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            flights = []
+            for entry in data.values():
+                if isinstance(entry, list) and len(entry) > FR24_CALLSIGN:
+                    f = Flight.from_fr24(entry)
+                    if f:
+                        flights.append(f)
+            return flights
+    except Exception:
+        pass
+
+    # Fallback: dump1090
+    r = requests.get(DUMP1090_URL, timeout=5)
+    aircraft_list = r.json().get("aircraft", [])
+    return [
+        Flight.from_dump1090(ac)
+        for ac in aircraft_list
+        if "lat" in ac and "lon" in ac
+    ]
 
 
 def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
@@ -68,15 +128,9 @@ def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
             flight.longitude,
             feet_to_meters_plus_earth(flight.altitude),
         )
-
         (x1, y1, z1) = polar_to_cartesian(*home)
-
-        dist = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2)
-
-        return dist
-
+        return math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2)
     except AttributeError:
-        # on error say it's far away
         return 1e6
 
 
@@ -124,10 +178,7 @@ class Overhead:
         data = []
 
         try:
-            response = requests.get(DUMP1090_URL, timeout=5)
-            aircraft_list = response.json().get("aircraft", [])
-
-            flights = [Flight(ac) for ac in aircraft_list if "lat" in ac and "lon" in ac]
+            flights = fetch_flights()
             flights = [
                 f for f in flights
                 if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)
@@ -139,14 +190,13 @@ class Overhead:
 
                 origin, destination = get_route(flight.callsign)
 
-                plane = flight.plane_type if flight.plane_type.upper() not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
                 origin = origin if origin.upper() not in BLANK_FIELDS else ""
                 destination = destination if destination.upper() not in BLANK_FIELDS else ""
 
                 data.append(
                     {
-                        "plane": plane,
+                        "plane": "",
                         "origin": origin,
                         "destination": destination,
                         "vertical_speed": flight.vertical_speed,
@@ -154,11 +204,6 @@ class Overhead:
                         "callsign": callsign,
                     }
                 )
-
-            with self._lock:
-                self._new_data = True
-                self._processing = False
-                self._data = data
 
         except Exception:
             pass
