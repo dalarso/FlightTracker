@@ -105,7 +105,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 
 <header>
   <h1>✈ Flight<span>Tracker</span></h1>
-  <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Toggle LED display on/off">
+  <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Toggle LED display on/off" style="visibility:hidden">
     <div class="dot"></div>
     <span id="display-label">Display On</span>
   </div>
@@ -304,6 +304,7 @@ async function checkDisplayStatus() {
     const d = await r.json();
     updateDisplayBtn(!d.paused);
   } catch(e) {}
+  document.getElementById('display-toggle').style.visibility = 'visible';
 }
 
 function updateDisplayBtn(on) {
