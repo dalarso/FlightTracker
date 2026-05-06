@@ -283,7 +283,6 @@ let config = {};
 let altUnit = 'ft';
 let displayOn = true;
 let map, zoneRect, homeMarker, cornerMarkers = [];
-let logLineCount = 0;
 let evtSource = null;
 
 // ── Tabs ───────────────────────────────────────────────────────
@@ -315,12 +314,15 @@ function updateDisplayBtn(on) {
 }
 
 async function toggleDisplay() {
+  const el = document.getElementById('display-toggle');
+  el.style.pointerEvents = 'none';
   const endpoint = displayOn ? '/api/display/off' : '/api/display/on';
   try {
     const r = await fetch(endpoint, { method: 'POST' });
     const d = await r.json();
     if (d.ok) updateDisplayBtn(!displayOn);
   } catch(e) {}
+  el.style.pointerEvents = '';
 }
 
 // ── Unit Conversion ────────────────────────────────────────────
@@ -355,7 +357,7 @@ function setAltUnit(unit, btn) {
   document.getElementById('loc-alt-label').textContent = `Antenna Altitude (${unit} ASL)`;
   document.querySelectorAll('.unit-label').forEach(el => el.textContent = unit);
   document.querySelectorAll('.unit-btn').forEach(b => {
-    b.classList.toggle('active', b.textContent === unit);
+    b.classList.toggle('active', b.textContent.trim() === unit);
   });
 }
 
@@ -379,8 +381,15 @@ function toggleEye(id, btn) {
 
 // ── Config ─────────────────────────────────────────────────────
 async function loadConfig() {
-  const r = await fetch('/api/config');
-  config = await r.json();
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    config = await r.json();
+    if (!config.ZONE_HOME || !Array.isArray(config.LOCATION_HOME)) throw new Error('Unexpected config shape');
+  } catch(e) {
+    showToast('Failed to load config: ' + e.message, 'err');
+    return;
+  }
   document.getElementById('zone_tl_y').value = config.ZONE_HOME.tl_y;
   document.getElementById('zone_tl_x').value = config.ZONE_HOME.tl_x;
   document.getElementById('zone_br_y').value = config.ZONE_HOME.br_y;
@@ -557,7 +566,7 @@ function initLog() {
   fetch('/api/log/history').then(r => r.json()).then(d => {
     d.lines.forEach(appendLog);
     scrollLog();
-  });
+  }).catch(() => {});
   evtSource = new EventSource('/api/log/stream');
   evtSource.onmessage = e => {
     appendLog(e.data);
@@ -566,6 +575,8 @@ function initLog() {
   evtSource.onerror = () => {
     document.getElementById('log-status').textContent = '● DISCONNECTED';
     document.getElementById('log-status').className = 'chip red';
+    evtSource.close();
+    evtSource = null; // allow re-init on next tab visit
   };
 }
 
@@ -576,8 +587,7 @@ function appendLog(line) {
   const out = document.getElementById('log-output');
   out.appendChild(el);
   while (out.children.length > 2000) out.removeChild(out.firstChild);
-  logLineCount++;
-  document.getElementById('log-stats').textContent = logLineCount + ' lines';
+  document.getElementById('log-stats').textContent = out.children.length + ' lines';
 }
 
 function classifyLine(line) {
@@ -589,7 +599,7 @@ function classifyLine(line) {
 }
 
 function scrollLog() { const o = document.getElementById('log-output'); o.scrollTop = o.scrollHeight; }
-function clearLog() { document.getElementById('log-output').innerHTML = ''; logLineCount = 0; document.getElementById('log-stats').textContent = '0 lines'; }
+function clearLog() { document.getElementById('log-output').innerHTML = ''; document.getElementById('log-stats').textContent = '0 lines'; }
 
 // ── Init ───────────────────────────────────────────────────────
 loadConfig();
