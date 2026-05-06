@@ -611,7 +611,7 @@ function classifyLine(line) {
   if (/error|exception/i.test(line))   return 'error';
   if (line.includes(':cached]'))       return 'cached';
   if (line.includes(':miss]'))         return 'miss';
-  if (/^\[(route|type):/.test(line))   return 'api';
+  if (line.includes('[route:') || line.includes('[type:')) return 'api';
   return '';
 }
 

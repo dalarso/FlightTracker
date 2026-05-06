@@ -3,6 +3,14 @@ import os
 import sys
 import time
 import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+def _log(msg):
+    ts = datetime.now(_PACIFIC).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 # Allow running standalone: ensure project root is on the path for config imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -458,16 +466,14 @@ class Overhead:
                 if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)
             ]
             out_count = len(all_flights) - len(in_zone_flights)
-            print(
+            _log(
                 f"[overhead] feed: {len(all_flights)} aircraft "
-                f"({len(in_zone_flights)} in zone, {out_count} out)",
-                flush=True
+                f"({len(in_zone_flights)} in zone, {out_count} out)"
             )
             for f in in_zone_flights:
-                print(
+                _log(
                     f"[overhead]   {f.callsign or '?':10} "
-                    f"alt={f.altitude:6} in_zone=True alt_ok=True",
-                    flush=True
+                    f"alt={f.altitude:6} in_zone=True alt_ok=True"
                 )
 
             flights = sorted(in_zone_flights, key=distance_from_flight_to_home)
@@ -480,9 +486,9 @@ class Overhead:
                 plane, type_src = get_aircraft_type(flight.hex_code)
                 plane = plane if plane.upper() not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
-                print(f"[route:{route_src}] {callsign} {origin}->{destination}", flush=True)
-                print(f"[type:{type_src}] {callsign} '{plane}'", flush=True)
-                print(f"[overhead]   -> {callsign} plane='{plane}' {origin}->{destination}", flush=True)
+                _log(f"[route:{route_src}] {callsign} {origin}->{destination}")
+                _log(f"[type:{type_src}] {callsign} '{plane}'")
+                _log(f"[overhead]   -> {callsign} plane='{plane}' {origin}->{destination}")
                 data.append({
                     "plane": plane,
                     "origin": origin,
@@ -492,7 +498,7 @@ class Overhead:
                     "callsign": callsign,
                 })
         except Exception:
-            print(f"[overhead] error in _grab_data:\n{traceback.format_exc()}", flush=True)
+            _log(f"[overhead] error in _grab_data:\n{traceback.format_exc()}")
         finally:
             with self._lock:
                 self._new_data = True
