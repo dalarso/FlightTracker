@@ -7,6 +7,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, Response, stream_with_context
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 BASE_DIR = Path(__file__).parent.parent
 CONFIG_PATH = BASE_DIR / "config.py"

@@ -453,9 +453,14 @@ function initMap() {
   homeMarker = L.circleMarker([config.LOCATION_HOME[0], config.LOCATION_HOME[1]],
     { radius: 8, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 0.8, weight: 2 }).addTo(map).bindTooltip('Home');
   const corners = [[z.tl_y, z.tl_x],[z.tl_y, z.br_x],[z.br_y, z.br_x],[z.br_y, z.tl_x]];
-  const handleIcon = L.divIcon({ className: '', html: '<div style="width:14px;height:14px;background:#58a6ff;border:2px solid #fff;border-radius:3px;cursor:grab;margin:-7px 0 0 -7px"></div>' });
+  const handleIcon = L.divIcon({
+    className: '',
+    html: '<div style="width:16px;height:16px;background:#58a6ff;border:2px solid #fff;border-radius:4px;cursor:grab;box-sizing:border-box;"></div>',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8]
+  });
   corners.forEach(pos => {
-    const m = L.marker(pos, { icon: handleIcon, draggable: true }).addTo(map);
+    const m = L.marker(pos, { icon: handleIcon, draggable: true, zIndexOffset: 1000 }).addTo(map);
     m.on('drag', updateRectFromCorners);
     m.on('dragend', snapCornersToRect);
     cornerMarkers.push(m);
