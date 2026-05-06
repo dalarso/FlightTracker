@@ -35,7 +35,7 @@ try:
         HAT_PWM_ENABLED
     )
 
-except (ModuleNotFoundError, NameError):
+except (ImportError, NameError):
     # If there's no config data
     BRIGHTNESS = 100
     GPIO_SLOWDOWN = 1

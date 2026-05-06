@@ -35,7 +35,6 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
   header h1 { font-size: 15px; }
   nav { width: 100%; justify-content: space-around; border-top: 1px solid var(--border); padding-top: 4px; margin-left: 0; }
   nav button { padding: 6px 8px; font-size: 12px; }
-  .display-toggle span { display: none; }
 }
 
 /* TABS */
@@ -465,7 +464,8 @@ async function saveConfig(restart) {
     const r = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const data = await r.json();
     if (data.ok) {
-      config = payload;
+      const { restart: _, ...savedConfig } = payload;
+      config = savedConfig;
       const msg = restart ? '✓ Saved — restarting display…' : '✓ Saved';
       status.textContent = msg; status.className = 'save-status ok';
       showToast(msg, 'ok');
@@ -587,7 +587,10 @@ function initLog() {
     document.getElementById('log-status').textContent = '● DISCONNECTED';
     document.getElementById('log-status').className = 'chip red';
     evtSource.close();
-    evtSource = null; // allow re-init on next tab visit
+    evtSource = null;
+    setTimeout(() => {
+      if (document.getElementById('log-tab').classList.contains('active')) initLog();
+    }, 5000);
   };
 }
 

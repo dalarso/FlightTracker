@@ -109,7 +109,7 @@ def post_config():
             return jsonify({"error": "Invalid payload"}), 400
         write_config(data)
         if data.get("restart"):
-            subprocess.Popen(["sudo", "systemctl", "restart", "FlightTracker"])
+            subprocess.Popen(["/usr/bin/systemctl", "restart", "FlightTracker"])
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -138,6 +138,8 @@ def log_history():
         result = subprocess.run(
             ["tail", "-n", "500", str(LOG_PATH)], capture_output=True, text=True
         )
+        if result.returncode != 0:
+            return jsonify({"lines": [], "error": result.stderr or "tail failed"})
         return jsonify({"lines": result.stdout.splitlines()})
     except Exception as e:
         return jsonify({"lines": [], "error": str(e)})

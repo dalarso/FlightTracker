@@ -2,6 +2,7 @@ import math
 import os
 import sys
 import time
+import traceback
 
 # Allow running standalone: ensure project root is on the path for config imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -12,44 +13,44 @@ from time import sleep
 
 try:
     from config import MIN_ALTITUDE
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     MIN_ALTITUDE = 0  # feet
 
 try:
     from config import MAX_ALTITUDE
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     MAX_ALTITUDE = 10000  # feet
 
 try:
     from config import ZONE_HOME, LOCATION_HOME
     ZONE_DEFAULT = ZONE_HOME
     LOCATION_DEFAULT = LOCATION_HOME
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     ZONE_DEFAULT = {"tl_y": 62.61, "tl_x": -13.07, "br_y": 49.71, "br_x": 3.46}
     LOCATION_DEFAULT = [51.509865, -0.118092, 6371]
 
 try:
     from config import RECEIVER_HOST
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     try:
         from config import DUMP1090_HOST as RECEIVER_HOST
-    except (ModuleNotFoundError, NameError, ImportError):
+    except (ImportError, NameError):
         RECEIVER_HOST = "localhost"
 
 try:
     from config import LOCAL_AIRPORT
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     LOCAL_AIRPORT = ""
 
 try:
     from config import OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     OPENSKY_CLIENT_ID = None
     OPENSKY_CLIENT_SECRET = None
 
 try:
     from config import FLIGHTAWARE_API_KEY
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     FLIGHTAWARE_API_KEY = None
 
 OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
@@ -65,10 +66,10 @@ ADSBDB_AIRCRAFT_URL = "https://api.adsbdb.com/v0/aircraft/{}"
 
 # fr24feed flights.json field indices
 # {hex: [hex, lat, lon, heading, alt_ft, speed, squawk, ?, type, reg, timestamp, origin, dest, ?, on_ground, vert_rate, callsign]}
-FR24_LAT = 1
-FR24_LON = 2
-FR24_ALT = 4
-FR24_VERT = 15
+FR24_LAT      = 1
+FR24_LON      = 2
+FR24_ALT      = 4
+FR24_VERT     = 15
 FR24_CALLSIGN = 16
 
 RATE_LIMIT_DELAY = 1
@@ -76,23 +77,27 @@ MAX_FLIGHT_LOOKUP = 5
 EARTH_RADIUS_KM = 6371
 BLANK_FIELDS = ["", "N/A", "NONE"]
 
-AEROAPI_CACHE_TTL  = 3600  # routes don't change mid-flight
-OPENSKY_CACHE_TTL  = 3600  # re-query OpenSky after 1 hour
-AIRCRAFT_CACHE_TTL = 86400 # aircraft type is static; 24 hr TTL
-CACHE_MAX_SIZE     = 500   # evict oldest entries beyond this
+AEROAPI_CACHE_TTL  = 3600   # routes don't change mid-flight
+OPENSKY_CACHE_TTL  = 3600   # re-query OpenSky after 1 hour
+AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
+CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
 
-# Module-level lock protecting all shared caches and the OpenSky token
-_cache_lock = Lock()
-_route_cache    = {}  # hex_code  -> (origin, destination, timestamp)
-_aeroapi_cache  = {}  # callsign  -> (origin, destination, timestamp)
-_aircraft_cache = {}  # hex_code  -> (type_string, timestamp)
-_opensky_token  = {"value": None, "expires_at": 0}
+# All caches store tuples where the LAST element is always the timestamp,
+# making _prune_cache's v[-1] access safe and consistent:
+#   _route_cache    : (origin, destination, timestamp)
+#   _aeroapi_cache  : (origin, destination, timestamp)
+#   _aircraft_cache : (type_string, source_label, timestamp)
+_cache_lock     = Lock()
+_route_cache    = {}
+_aeroapi_cache  = {}
+_aircraft_cache = {}
+_opensky_token  = {"value": None, "expires_at": 0, "fetching": False}
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 def _prune_cache(cache, ttl):
-    """Remove entries older than ttl. Also evict oldest if over CACHE_MAX_SIZE."""
+    """Remove stale entries and enforce CACHE_MAX_SIZE. Must be called under _cache_lock."""
     now = int(time.time())
     stale = [k for k, v in cache.items() if now - v[-1] > ttl]
     for k in stale:
@@ -104,11 +109,15 @@ def _prune_cache(cache, ttl):
 
 
 def _get_opensky_token():
-    """Fetch or return cached OAuth2 Bearer token for OpenSky."""
+    """Fetch or return cached OAuth2 Bearer token for OpenSky. Thread-safe."""
     now = time.time()
     with _cache_lock:
         if _opensky_token["value"] and now < _opensky_token["expires_at"] - 30:
             return _opensky_token["value"]
+        if _opensky_token["fetching"]:
+            return None  # another thread is already fetching; skip rather than pile on
+        _opensky_token["fetching"] = True
+
     try:
         r = requests.post(
             OPENSKY_TOKEN_URL,
@@ -127,6 +136,10 @@ def _get_opensky_token():
             return _opensky_token["value"]
     except Exception:
         pass
+    finally:
+        with _cache_lock:
+            _opensky_token["fetching"] = False
+
     return None
 
 
@@ -160,11 +173,10 @@ class Flight:
             if not lat or not lon:
                 return None
             alt = entry[FR24_ALT]
-            alt = alt if isinstance(alt, (int, float)) else 0
             return cls(
                 lat=lat,
                 lon=lon,
-                altitude=alt,
+                altitude=alt if isinstance(alt, (int, float)) else 0,
                 vertical_speed=entry[FR24_VERT] if isinstance(entry[FR24_VERT], (int, float)) else 0,
                 callsign=(entry[FR24_CALLSIGN] or "").strip(),
                 hex_code=hex_code,
@@ -208,12 +220,13 @@ def fetch_flights():
 
     try:
         r = requests.get(DUMP1090_URL, timeout=5)
-        flights = []
-        for ac in r.json().get("aircraft", []):
-            f = Flight.from_dump1090(ac)
-            if f:
-                flights.append(f)
-        return flights
+        if r.status_code == 200:
+            flights = []
+            for ac in r.json().get("aircraft", []):
+                f = Flight.from_dump1090(ac)
+                if f:
+                    flights.append(f)
+            return flights
     except Exception:
         pass
 
@@ -233,13 +246,13 @@ def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
         return 0.0003048 * altitude_ft + EARTH_RADIUS_KM
 
     try:
-        (x0, y0, z0) = polar_to_cartesian(
+        x0, y0, z0 = polar_to_cartesian(
             flight.latitude, flight.longitude,
             feet_to_meters_plus_earth(flight.altitude),
         )
-        (x1, y1, z1) = polar_to_cartesian(*home)
+        x1, y1, z1 = polar_to_cartesian(*home)
         return math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2)
-    except AttributeError:
+    except (AttributeError, TypeError):
         return 1e6
 
 
@@ -257,7 +270,7 @@ def get_route(hex_code, callsign, vertical_speed):
     Route lookup priority:
       1. FlightAware AeroAPI (real-time flight plan, paid)
       2. OpenSky by hex (real-time actual departure/arrival)
-      3. adsbdb by callsign (static fallback)
+      3. adsbdb by callsign (static fallback, cached)
       4. LOCAL_AIRPORT heuristic (fill missing end based on climb/descent)
     Returns (origin, destination, source_label).
     """
@@ -325,18 +338,27 @@ def get_route(hex_code, callsign, vertical_speed):
                 except Exception:
                     pass
 
-    # 3. adsbdb callsign fallback
+    # 3. adsbdb callsign fallback (cached in _route_cache keyed by callsign)
     if not origin and not destination and callsign:
-        try:
-            r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
-            if r.status_code == 200:
-                route = r.json().get("response", {}).get("flightroute", {})
-                origin = (route.get("origin") or {}).get("iata_code", "") or ""
-                destination = (route.get("destination") or {}).get("iata_code", "") or ""
-                if origin or destination:
-                    source = "adsbdb"
-        except Exception:
-            pass
+        with _cache_lock:
+            cached = _route_cache.get(callsign)
+        if cached and now - cached[2] < OPENSKY_CACHE_TTL:
+            origin, destination = cached[0], cached[1]
+            source = "adsbdb:cached"
+        else:
+            try:
+                r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
+                if r.status_code == 200:
+                    route = r.json().get("response", {}).get("flightroute", {})
+                    origin = (route.get("origin") or {}).get("iata_code", "") or ""
+                    destination = (route.get("destination") or {}).get("iata_code", "") or ""
+                    if origin or destination:
+                        source = "adsbdb"
+                        with _cache_lock:
+                            _route_cache[callsign] = (origin, destination, now)
+                            _prune_cache(_route_cache, OPENSKY_CACHE_TTL)
+            except Exception:
+                pass
 
     # 4. LOCAL_AIRPORT heuristic
     if LOCAL_AIRPORT:
@@ -358,6 +380,7 @@ def get_aircraft_type(hex_code):
     Aircraft type lookup priority:
       1. airplanes.live (best coverage, has desc field)
       2. adsbdb (fallback)
+    Cache tuple: (type_string, source_label, timestamp) — timestamp last for _prune_cache.
     Returns (type_string, source_label).
     """
     if not hex_code:
@@ -366,9 +389,10 @@ def get_aircraft_type(hex_code):
     now = int(time.time())
     with _cache_lock:
         cached = _aircraft_cache.get(hex_code)
+    # cached[0]=type, cached[1]=source, cached[2]=timestamp
     # Don't serve empty-string cache entries — retry those
-    if cached and cached[0] and now - cached[1] < AIRCRAFT_CACHE_TTL:
-        return cached[0], "airplanes.live:cached"
+    if cached and cached[0] and now - cached[2] < AIRCRAFT_CACHE_TTL:
+        return cached[0], f"{cached[1]}:cached"
 
     # 1. airplanes.live
     try:
@@ -380,7 +404,7 @@ def get_aircraft_type(hex_code):
                 plane = ac.get("desc", "") or ac.get("t", "") or ""
                 if plane:
                     with _cache_lock:
-                        _aircraft_cache[hex_code] = (plane, now)
+                        _aircraft_cache[hex_code] = (plane, "airplanes.live", now)
                         _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
                     return plane, "airplanes.live"
     except Exception:
@@ -396,7 +420,7 @@ def get_aircraft_type(hex_code):
             plane = f"{manufacturer} {type_name}".strip()
             if plane:
                 with _cache_lock:
-                    _aircraft_cache[hex_code] = (plane, now)
+                    _aircraft_cache[hex_code] = (plane, "adsbdb", now)
                     _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
                 return plane, "adsbdb"
     except Exception:
@@ -415,7 +439,7 @@ class Overhead:
         self._processing = False
 
     def grab_data(self):
-        # Set processing=True before spawning the thread to prevent duplicate spawns
+        """Spawn a background fetch. No-ops if one is already in progress."""
         with self._lock:
             if self._processing:
                 return
@@ -429,18 +453,30 @@ class Overhead:
         data = []
         try:
             all_flights = fetch_flights()
-            print(f"[overhead] feed: {len(all_flights)} aircraft", flush=True)
-            for f in all_flights:
-                in_z = in_zone(f)
-                alt_ok = MIN_ALTITUDE < f.altitude < MAX_ALTITUDE
-                print(f"[overhead]   {f.callsign or '?':10} alt={f.altitude:6} in_zone={in_z} alt_ok={alt_ok}", flush=True)
+            in_zone_flights = [
+                f for f in all_flights
+                if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)
+            ]
+            out_count = len(all_flights) - len(in_zone_flights)
+            print(
+                f"[overhead] feed: {len(all_flights)} aircraft "
+                f"({len(in_zone_flights)} in zone, {out_count} out)",
+                flush=True
+            )
+            for f in in_zone_flights:
+                print(
+                    f"[overhead]   {f.callsign or '?':10} "
+                    f"alt={f.altitude:6} in_zone=True alt_ok=True",
+                    flush=True
+                )
 
-            flights = [f for f in all_flights if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)]
-            flights = sorted(flights, key=distance_from_flight_to_home)
+            flights = sorted(in_zone_flights, key=distance_from_flight_to_home)
 
             for flight in flights[:MAX_FLIGHT_LOOKUP]:
                 sleep(RATE_LIMIT_DELAY)
-                origin, destination, route_src = get_route(flight.hex_code, flight.callsign, flight.vertical_speed)
+                origin, destination, route_src = get_route(
+                    flight.hex_code, flight.callsign, flight.vertical_speed
+                )
                 plane, type_src = get_aircraft_type(flight.hex_code)
                 plane = plane if plane.upper() not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
@@ -456,7 +492,7 @@ class Overhead:
                     "callsign": callsign,
                 })
         except Exception:
-            pass
+            print(f"[overhead] error in _grab_data:\n{traceback.format_exc()}", flush=True)
         finally:
             with self._lock:
                 self._new_data = True
