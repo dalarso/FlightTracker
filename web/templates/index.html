@@ -160,11 +160,21 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     </div>
 
     <div class="section">
-      <div class="section-header">Home Location</div>
+      <div class="section-header">
+        Home Location
+        <div class="unit-selector">
+          <button class="unit-btn active" onclick="setAltUnit('ft',this)">ft</button>
+          <button class="unit-btn" onclick="setAltUnit('m',this)">m</button>
+          <button class="unit-btn" onclick="setAltUnit('km',this)">km</button>
+        </div>
+      </div>
       <div class="field-grid">
         <div class="field"><label>Latitude</label><input type="number" step="0.000001" id="loc_lat"></div>
         <div class="field"><label>Longitude</label><input type="number" step="0.000001" id="loc_lon"></div>
-        <div class="field"><label>Altitude (km ASL)</label><input type="number" step="0.00001" id="loc_alt"><div class="hint">Antenna height for distance calc</div></div>
+        <div class="field"><label id="loc-alt-label">Antenna Altitude (ft ASL)</label>
+          <div class="input-wrap"><input type="number" step="1" id="loc_alt"><span class="unit-label" id="alt-unit-label-3">ft</span></div>
+          <div class="hint">Antenna height for distance calc</div>
+        </div>
       </div>
     </div>
 
@@ -266,6 +276,8 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 // ── Constants ──────────────────────────────────────────────────
 const FT_TO_M  = 0.3048;
 const FT_TO_KM = 0.0003048;
+const KM_TO_FT = 3280.84;
+const KM_TO_M  = 1000;
 
 // ── State ──────────────────────────────────────────────────────
 let config = {};
@@ -322,17 +334,29 @@ function unitToFt(val, unit) {
   if (unit === 'km') return Math.round(val / FT_TO_KM);
   return Math.round(val);
 }
+function kmToUnit(km, unit) {
+  if (unit === 'ft') return +(km * KM_TO_FT).toFixed(1);
+  if (unit === 'm')  return +(km * KM_TO_M).toFixed(1);
+  return +km.toFixed(5);
+}
+function unitToKm(val, unit) {
+  if (unit === 'ft') return val / KM_TO_FT;
+  if (unit === 'm')  return val / KM_TO_M;
+  return parseFloat(val);
+}
 function setAltUnit(unit, btn) {
-  // Read current displayed values back to feet first
-  const minFt = unitToFt(parseFloat(document.getElementById('min_altitude').value) || 0, altUnit);
-  const maxFt = unitToFt(parseFloat(document.getElementById('max_altitude').value) || 0, altUnit);
+  const minFt  = unitToFt(parseFloat(document.getElementById('min_altitude').value) || 0, altUnit);
+  const maxFt  = unitToFt(parseFloat(document.getElementById('max_altitude').value) || 0, altUnit);
+  const altKm  = unitToKm(parseFloat(document.getElementById('loc_alt').value) || 0, altUnit);
   altUnit = unit;
   document.getElementById('min_altitude').value = ftToUnit(minFt, unit);
   document.getElementById('max_altitude').value = ftToUnit(maxFt, unit);
-  // Update all unit labels and buttons
+  document.getElementById('loc_alt').value = kmToUnit(altKm, unit);
+  document.getElementById('loc-alt-label').textContent = `Antenna Altitude (${unit} ASL)`;
   document.querySelectorAll('.unit-label').forEach(el => el.textContent = unit);
-  document.querySelectorAll('.unit-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.unit-btn').forEach(b => { if (b.textContent === unit) b.classList.add('active'); });
+  document.querySelectorAll('.unit-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent === unit);
+  });
 }
 
 // ── Eye Toggle ─────────────────────────────────────────────────
@@ -352,7 +376,7 @@ async function loadConfig() {
   document.getElementById('zone_br_x').value = config.ZONE_HOME.br_x;
   document.getElementById('loc_lat').value = config.LOCATION_HOME[0];
   document.getElementById('loc_lon').value = config.LOCATION_HOME[1];
-  document.getElementById('loc_alt').value = config.LOCATION_HOME[2];
+  document.getElementById('loc_alt').value = kmToUnit(config.LOCATION_HOME[2], altUnit);
   document.getElementById('min_altitude').value = ftToUnit(config.MIN_ALTITUDE, altUnit);
   document.getElementById('max_altitude').value = ftToUnit(config.MAX_ALTITUDE, altUnit);
   document.getElementById('local_airport').value = config.LOCAL_AIRPORT || '';
@@ -381,7 +405,7 @@ function buildConfigPayload() {
     LOCATION_HOME: [
       parseFloat(document.getElementById('loc_lat').value),
       parseFloat(document.getElementById('loc_lon').value),
-      parseFloat(document.getElementById('loc_alt').value),
+      unitToKm(parseFloat(document.getElementById('loc_alt').value), altUnit),
     ],
     MIN_ALTITUDE: unitToFt(parseFloat(document.getElementById('min_altitude').value), altUnit),
     MAX_ALTITUDE: unitToFt(parseFloat(document.getElementById('max_altitude').value), altUnit),
