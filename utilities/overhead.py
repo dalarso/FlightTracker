@@ -78,7 +78,10 @@ BLANK_FIELDS = ["", "N/A", "NONE"]
 OPENSKY_CACHE_TTL = 3600  # re-query OpenSky after 1 hour
 
 _route_cache = {}    # hex_code -> (origin, destination, timestamp)
+_aeroapi_cache = {}  # callsign -> (origin, destination, timestamp)
 _aircraft_cache = {} # hex_code -> type string
+
+AEROAPI_CACHE_TTL = 3600  # routes don't change mid-flight, cache for 1 hour
 _opensky_token = {"value": None, "expires_at": 0}
 
 
@@ -225,22 +228,28 @@ def get_route(hex_code, callsign, vertical_speed):
 
     # 1. FlightAware AeroAPI (highest quality, real-time with flight plan data)
     if FLIGHTAWARE_API_KEY and callsign:
-        try:
-            r = requests.get(
-                AEROAPI_URL.format(callsign.strip()),
-                headers={"x-apikey": FLIGHTAWARE_API_KEY},
-                timeout=10,
-            )
-            if r.status_code == 200:
-                flights = r.json().get("flights", [])
-                # prefer the flight currently in progress (no actual_off or no actual_on)
-                active = [f for f in flights if not f.get("actual_on")]
-                f = active[0] if active else (flights[0] if flights else None)
-                if f:
-                    origin = (f.get("origin") or {}).get("code_iata", "") or ""
-                    destination = (f.get("destination") or {}).get("code_iata", "") or ""
-        except Exception:
-            pass
+        now = int(time.time())
+        cached = _aeroapi_cache.get(callsign)
+        if cached and now - cached[2] < AEROAPI_CACHE_TTL:
+            origin, destination = cached[0], cached[1]
+        else:
+            try:
+                r = requests.get(
+                    AEROAPI_URL.format(callsign.strip()),
+                    headers={"x-apikey": FLIGHTAWARE_API_KEY},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    flights = r.json().get("flights", [])
+                    # prefer the flight currently in progress (no actual_on means still airborne)
+                    active = [f for f in flights if not f.get("actual_on")]
+                    f = active[0] if active else (flights[0] if flights else None)
+                    if f:
+                        origin = (f.get("origin") or {}).get("code_iata", "") or ""
+                        destination = (f.get("destination") or {}).get("code_iata", "") or ""
+                        _aeroapi_cache[callsign] = (origin, destination, now)
+            except Exception:
+                pass
 
     if origin or destination:
         origin = origin if origin.upper() not in BLANK_FIELDS else ""
