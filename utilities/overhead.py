@@ -233,8 +233,10 @@ def get_route(hex_code, callsign, vertical_speed):
             )
             if r.status_code == 200:
                 flights = r.json().get("flights", [])
-                if flights:
-                    f = flights[0]
+                # prefer the flight currently in progress (no actual_off or no actual_on)
+                active = [f for f in flights if not f.get("actual_on")]
+                f = active[0] if active else (flights[0] if flights else None)
+                if f:
                     origin = (f.get("origin") or {}).get("code_iata", "") or ""
                     destination = (f.get("destination") or {}).get("code_iata", "") or ""
         except Exception:
