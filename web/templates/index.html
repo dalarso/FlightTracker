@@ -441,59 +441,75 @@ async function saveConfig(restart) {
 }
 
 // ── Map ────────────────────────────────────────────────────────
+let zoneBounds = {};
+
 function initMap() {
   if (map) { setTimeout(() => map.invalidateSize(), 100); return; }
   map = L.map('map').setView([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], 13);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap', maxZoom: 18
   }).addTo(map);
+
   const z = config.ZONE_HOME;
+  zoneBounds = { n: z.tl_y, s: z.br_y, w: z.tl_x, e: z.br_x };
+
   zoneRect = L.rectangle([[z.tl_y, z.tl_x], [z.br_y, z.br_x]],
     { color: '#58a6ff', weight: 2, fillColor: '#58a6ff', fillOpacity: 0.1 }).addTo(map);
+
   homeMarker = L.circleMarker([config.LOCATION_HOME[0], config.LOCATION_HOME[1]],
-    { radius: 8, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 0.8, weight: 2 }).addTo(map).bindTooltip('Home');
-  const corners = [[z.tl_y, z.tl_x],[z.tl_y, z.br_x],[z.br_y, z.br_x],[z.br_y, z.tl_x]];
+    { radius: 8, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 0.8, weight: 2 })
+    .addTo(map).bindTooltip('Home');
+
   const handleIcon = L.divIcon({
     className: '',
     html: '<div style="width:16px;height:16px;background:#58a6ff;border:2px solid #fff;border-radius:4px;cursor:grab;box-sizing:border-box;"></div>',
     iconSize: [16, 16],
     iconAnchor: [8, 8]
   });
-  corners.forEach(pos => {
+
+  // NW, NE, SE, SW — each corner owns two edges
+  const cornerDefs = [
+    { latEdge: 'n', lngEdge: 'w' },
+    { latEdge: 'n', lngEdge: 'e' },
+    { latEdge: 's', lngEdge: 'e' },
+    { latEdge: 's', lngEdge: 'w' },
+  ];
+  const cornerPositions = [[z.tl_y, z.tl_x],[z.tl_y, z.br_x],[z.br_y, z.br_x],[z.br_y, z.tl_x]];
+
+  cornerPositions.forEach((pos, i) => {
+    const def = cornerDefs[i];
     const m = L.marker(pos, { icon: handleIcon, draggable: true, zIndexOffset: 1000 }).addTo(map);
-    m.on('drag', updateRectFromCorners);
-    m.on('dragend', snapCornersToRect);
+
+    m.on('drag', function(e) {
+      // e.latlng is always correct during drag — don't call getLatLng()
+      zoneBounds[def.latEdge] = e.latlng.lat;
+      zoneBounds[def.lngEdge] = e.latlng.lng;
+      zoneRect.setBounds([[zoneBounds.n, zoneBounds.w], [zoneBounds.s, zoneBounds.e]]);
+      updateMapCoordDisplay();
+    });
+
+    m.on('dragend', function() {
+      placeCornerMarkers(); // snap all corners to final clean bounds
+    });
+
     cornerMarkers.push(m);
   });
+
   updateZoneCoordDisplay();
 }
 
-function getBoundsFromCorners() {
-  const ll = cornerMarkers.map(m => m.getLatLng());
-  const lats = ll.map(l => l.lat), lngs = ll.map(l => l.lng);
-  return {
-    n: Math.max(...lats), s: Math.min(...lats),
-    w: Math.min(...lngs), e: Math.max(...lngs)
-  };
+function placeCornerMarkers() {
+  cornerMarkers[0].setLatLng([zoneBounds.n, zoneBounds.w]);
+  cornerMarkers[1].setLatLng([zoneBounds.n, zoneBounds.e]);
+  cornerMarkers[2].setLatLng([zoneBounds.s, zoneBounds.e]);
+  cornerMarkers[3].setLatLng([zoneBounds.s, zoneBounds.w]);
 }
 
-function updateRectFromCorners() {
-  // Update rectangle live during drag — don't touch markers while dragging
-  const { n, s, w, e } = getBoundsFromCorners();
-  zoneRect.setBounds([[n, w], [s, e]]);
-  document.getElementById('m-tl-y').textContent = n.toFixed(6);
-  document.getElementById('m-br-y').textContent = s.toFixed(6);
-  document.getElementById('m-tl-x').textContent = w.toFixed(6);
-  document.getElementById('m-br-x').textContent = e.toFixed(6);
-}
-
-function snapCornersToRect() {
-  // Only snap corners to clean positions after drag ends
-  const { n, s, w, e } = getBoundsFromCorners();
-  cornerMarkers[0].setLatLng([n, w]);
-  cornerMarkers[1].setLatLng([n, e]);
-  cornerMarkers[2].setLatLng([s, e]);
-  cornerMarkers[3].setLatLng([s, w]);
+function updateMapCoordDisplay() {
+  document.getElementById('m-tl-y').textContent = zoneBounds.n.toFixed(6);
+  document.getElementById('m-br-y').textContent = zoneBounds.s.toFixed(6);
+  document.getElementById('m-tl-x').textContent = zoneBounds.w.toFixed(6);
+  document.getElementById('m-br-x').textContent = zoneBounds.e.toFixed(6);
 }
 
 function updateZoneCoordDisplay() {
