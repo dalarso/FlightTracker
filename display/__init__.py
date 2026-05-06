@@ -143,7 +143,7 @@ class Display(
 
     @Animator.KeyFrame.add(1)
     def sync(self, count):
-        self.matrix.SetBrightness(0 if os.path.exists(PAUSE_FLAG) else BRIGHTNESS)
+        self.matrix.brightness = 0 if os.path.exists(PAUSE_FLAG) else BRIGHTNESS
         _ = self.matrix.SwapOnVSync(self.canvas)
 
     @Animator.KeyFrame.add(frames.PER_SECOND * 30)
