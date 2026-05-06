@@ -259,8 +259,9 @@ def get_route(hex_code, callsign, vertical_speed):
       2. OpenSky by hex (real-time actual departure/arrival)
       3. adsbdb by callsign (static fallback)
       4. LOCAL_AIRPORT heuristic (fill missing end based on climb/descent)
+    Returns (origin, destination, source_label).
     """
-    origin, destination = "", ""
+    origin, destination, source = "", "", ""
     now = int(time.time())
 
     # 1. FlightAware AeroAPI
@@ -269,6 +270,7 @@ def get_route(hex_code, callsign, vertical_speed):
             cached = _aeroapi_cache.get(callsign)
         if cached and now - cached[2] < AEROAPI_CACHE_TTL:
             origin, destination = cached[0], cached[1]
+            source = "aeroapi:cached"
         else:
             try:
                 r = requests.get(
@@ -283,6 +285,7 @@ def get_route(hex_code, callsign, vertical_speed):
                     if f:
                         origin = (f.get("origin") or {}).get("code_iata", "") or ""
                         destination = (f.get("destination") or {}).get("code_iata", "") or ""
+                        source = "aeroapi"
                         with _cache_lock:
                             _aeroapi_cache[callsign] = (origin, destination, now)
                             _prune_cache(_aeroapi_cache, AEROAPI_CACHE_TTL)
@@ -292,7 +295,7 @@ def get_route(hex_code, callsign, vertical_speed):
     if origin or destination:
         origin = origin if origin.upper() not in BLANK_FIELDS else ""
         destination = destination if destination.upper() not in BLANK_FIELDS else ""
-        return origin, destination
+        return origin, destination, source
 
     # 2. OpenSky
     if OPENSKY_CLIENT_ID and hex_code:
@@ -300,6 +303,7 @@ def get_route(hex_code, callsign, vertical_speed):
             cached = _route_cache.get(hex_code)
         if cached and now - cached[2] < OPENSKY_CACHE_TTL:
             origin, destination = cached[0], cached[1]
+            source = "opensky:cached"
         else:
             token = _get_opensky_token()
             if token:
@@ -314,6 +318,7 @@ def get_route(hex_code, callsign, vertical_speed):
                         flight = max(r.json(), key=lambda f: f.get("firstSeen", 0))
                         origin = icao_to_iata(flight.get("estDepartureAirport") or "")
                         destination = icao_to_iata(flight.get("estArrivalAirport") or "")
+                        source = "opensky"
                         with _cache_lock:
                             _route_cache[hex_code] = (origin, destination, now)
                             _prune_cache(_route_cache, OPENSKY_CACHE_TTL)
@@ -328,6 +333,8 @@ def get_route(hex_code, callsign, vertical_speed):
                 route = r.json().get("response", {}).get("flightroute", {})
                 origin = (route.get("origin") or {}).get("iata_code", "") or ""
                 destination = (route.get("destination") or {}).get("iata_code", "") or ""
+                if origin or destination:
+                    source = "adsbdb"
         except Exception:
             pass
 
@@ -336,12 +343,14 @@ def get_route(hex_code, callsign, vertical_speed):
         departing = vertical_speed > 0
         if departing and not origin:
             origin = LOCAL_AIRPORT
+            source = source or "heuristic"
         elif not departing and not destination:
             destination = LOCAL_AIRPORT
+            source = source or "heuristic"
 
     origin = origin if origin.upper() not in BLANK_FIELDS else ""
     destination = destination if destination.upper() not in BLANK_FIELDS else ""
-    return origin, destination
+    return origin, destination, source or "none"
 
 
 def get_aircraft_type(hex_code):
@@ -349,16 +358,17 @@ def get_aircraft_type(hex_code):
     Aircraft type lookup priority:
       1. airplanes.live (best coverage, has desc field)
       2. adsbdb (fallback)
+    Returns (type_string, source_label).
     """
     if not hex_code:
-        return ""
+        return "", "none"
 
     now = int(time.time())
     with _cache_lock:
         cached = _aircraft_cache.get(hex_code)
     # Don't serve empty-string cache entries — retry those
     if cached and cached[0] and now - cached[1] < AIRCRAFT_CACHE_TTL:
-        return cached[0]
+        return cached[0], "airplanes.live:cached"
 
     # 1. airplanes.live
     try:
@@ -372,7 +382,7 @@ def get_aircraft_type(hex_code):
                     with _cache_lock:
                         _aircraft_cache[hex_code] = (plane, now)
                         _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
-                    return plane
+                    return plane, "airplanes.live"
     except Exception:
         pass
 
@@ -388,11 +398,11 @@ def get_aircraft_type(hex_code):
                 with _cache_lock:
                     _aircraft_cache[hex_code] = (plane, now)
                     _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
-                return plane
+                return plane, "adsbdb"
     except Exception:
         pass
 
-    return ""
+    return "", "miss"
 
 
 # ── Overhead controller ────────────────────────────────────────────────────────
@@ -430,10 +440,12 @@ class Overhead:
 
             for flight in flights[:MAX_FLIGHT_LOOKUP]:
                 sleep(RATE_LIMIT_DELAY)
-                origin, destination = get_route(flight.hex_code, flight.callsign, flight.vertical_speed)
-                plane = get_aircraft_type(flight.hex_code)
+                origin, destination, route_src = get_route(flight.hex_code, flight.callsign, flight.vertical_speed)
+                plane, type_src = get_aircraft_type(flight.hex_code)
                 plane = plane if plane.upper() not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
+                print(f"[route:{route_src}] {callsign} {origin}->{destination}", flush=True)
+                print(f"[type:{type_src}] {callsign} '{plane}'", flush=True)
                 print(f"[overhead]   -> {callsign} plane='{plane}' {origin}->{destination}", flush=True)
                 data.append({
                     "plane": plane,
