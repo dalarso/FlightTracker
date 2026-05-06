@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlightTracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149; --cyan: #39d353;
+  }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 16px; height: 56px; flex-shrink: 0; }
+  header h1 { font-size: 18px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  header h1 span { color: var(--accent); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  nav { display: flex; gap: 4px; margin-left: auto; }
+  nav button { background: none; border: none; color: var(--muted); padding: 8px 16px; cursor: pointer; border-radius: 6px; font-size: 14px; font-weight: 500; transition: all .15s; }
+  nav button:hover { color: var(--text); background: rgba(255,255,255,.06); }
+  nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
+  .tab-content { display: none; flex: 1; overflow: hidden; }
+  .tab-content.active { display: flex; flex-direction: column; }
+
+  /* CONFIG TAB */
+  .config-scroll { flex: 1; overflow-y: auto; padding: 24px; }
+  .config-scroll::-webkit-scrollbar { width: 6px; } .config-scroll::-webkit-scrollbar-track { background: transparent; } .config-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+  .section-header { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
+  .field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0; }
+  .field { padding: 14px 20px; border-bottom: 1px solid var(--border); }
+  .field:last-child { border-bottom: none; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+  .field input, .field select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 14px; outline: none; transition: border-color .15s; }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
+  .field input[type=password] { font-family: monospace; }
+  .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .config-footer { padding: 16px 24px; border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+  .btn { padding: 8px 20px; border-radius: 6px; border: none; font-size: 14px; font-weight: 500; cursor: pointer; transition: all .15s; }
+  .btn-primary { background: var(--accent); color: #000; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-danger { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid rgba(248,81,73,.3); }
+  .btn-danger:hover { background: rgba(248,81,73,.25); }
+  .save-status { font-size: 13px; color: var(--muted); margin-left: auto; }
+  .save-status.ok { color: var(--green); }
+  .save-status.err { color: var(--red); }
+  .toggle-wrap { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+  .toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 22px; cursor: pointer; transition: .2s; }
+  .toggle input:checked + .toggle-slider { background: var(--accent); }
+  .toggle-slider:before { content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
+  .toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
+
+  /* MAP TAB */
+  #map-tab { position: relative; }
+  #map { flex: 1; }
+  .map-overlay { position: absolute; top: 16px; right: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+  .map-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 12px; min-width: 200px; }
+  .map-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 10px; }
+  .coord-row { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
+  .coord-row span:last-child { color: var(--text); font-family: monospace; }
+
+  /* LOG TAB */
+  #log-tab { flex-direction: column; }
+  .log-toolbar { padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .log-toolbar .log-stats { margin-left: auto; font-size: 12px; color: var(--muted); }
+  #log-output { flex: 1; overflow-y: auto; padding: 12px 16px; font-family: 'SFMono-Regular', 'Consolas', monospace; font-size: 12.5px; line-height: 1.7; background: #0a0e14; }
+  #log-output::-webkit-scrollbar { width: 6px; } #log-output::-webkit-scrollbar-track { background: transparent; } #log-output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .log-line { white-space: pre-wrap; word-break: break-all; }
+  .log-line.result { color: var(--cyan); }
+  .log-line.inzone { color: var(--green); }
+  .log-line.nodata { color: var(--yellow); }
+  .log-line.error { color: var(--red); }
+  .log-line.dim { color: #4a5568; }
+  .toggle-small { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .chip { background: rgba(88,166,255,.12); color: var(--accent); border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+  .chip.green { background: rgba(63,185,80,.12); color: var(--green); }
+  .chip.yellow { background: rgba(210,153,34,.12); color: var(--yellow); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>✈ Flight<span>Tracker</span></h1>
+  <div class="status-dot" id="status-dot" title="Service status"></div>
+  <nav>
+    <button class="active" onclick="showTab('config',this)">⚙ Config</button>
+    <button onclick="showTab('map',this)">🗺 Zone Map</button>
+    <button onclick="showTab('log',this)">📋 Log</button>
+  </nav>
+</header>
+
+<!-- CONFIG TAB -->
+<div class="tab-content active" id="config-tab">
+  <div class="config-scroll">
+
+    <div class="section">
+      <div class="section-header">Zone Boundaries</div>
+      <div class="field-grid">
+        <div class="field"><label>Top-Left Latitude (N)</label><input type="number" step="0.000001" id="zone_tl_y"><div class="hint">North edge of detection zone</div></div>
+        <div class="field"><label>Top-Left Longitude (W)</label><input type="number" step="0.000001" id="zone_tl_x"><div class="hint">West edge of detection zone</div></div>
+        <div class="field"><label>Bottom-Right Latitude (S)</label><input type="number" step="0.000001" id="zone_br_y"><div class="hint">South edge of detection zone</div></div>
+        <div class="field"><label>Bottom-Right Longitude (E)</label><input type="number" step="0.000001" id="zone_br_x"><div class="hint">East edge of detection zone</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Home Location</div>
+      <div class="field-grid">
+        <div class="field"><label>Latitude</label><input type="number" step="0.000001" id="loc_lat"></div>
+        <div class="field"><label>Longitude</label><input type="number" step="0.000001" id="loc_lon"></div>
+        <div class="field"><label>Altitude (km)</label><input type="number" step="0.00001" id="loc_alt"><div class="hint">Used for distance calculations</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Altitude Filter</div>
+      <div class="field-grid">
+        <div class="field"><label>Min Altitude (ft)</label><input type="number" step="100" id="min_altitude"></div>
+        <div class="field"><label>Max Altitude (ft)</label><input type="number" step="500" id="max_altitude"></div>
+        <div class="field"><label>Local Airport Code</label><input type="text" id="local_airport" maxlength="4"><div class="hint">Used as fallback origin/destination</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Display</div>
+      <div class="field-grid">
+        <div class="field"><label>Brightness (0–100)</label><input type="number" min="0" max="100" id="brightness"></div>
+        <div class="field"><label>GPIO Slowdown</label><input type="number" min="1" max="4" id="gpio_slowdown"><div class="hint">Increase if display flickers</div></div>
+        <div class="field"><label>Journey Code</label><input type="text" id="journey_code"></div>
+        <div class="field"><label>Journey Blank Filler</label><input type="text" id="journey_blank"></div>
+        <div class="field"><label>HAT PWM Enabled</label>
+          <div class="toggle-wrap">
+            <label class="toggle"><input type="checkbox" id="hat_pwm"><span class="toggle-slider"></span></label>
+            <span style="font-size:13px;color:var(--muted)">Reduces flicker on some HATs</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Weather</div>
+      <div class="field-grid">
+        <div class="field"><label>Location</label><input type="text" id="weather_location"><div class="hint">e.g. spring%20valley,nv,us</div></div>
+        <div class="field"><label>Units</label>
+          <select id="temp_units">
+            <option value="imperial">Imperial (°F)</option>
+            <option value="metric">Metric (°C)</option>
+          </select>
+        </div>
+        <div class="field"><label>OpenWeather API Key</label><input type="password" id="ow_key"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Receiver</div>
+      <div class="field-grid">
+        <div class="field"><label>Receiver Host</label><input type="text" id="receiver_host"><div class="hint">IP of fr24feed/dump1090 Pi</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">API Keys</div>
+      <div class="field-grid">
+        <div class="field"><label>FlightAware AeroAPI Key</label><input type="password" id="fa_key"></div>
+        <div class="field"><label>OpenSky Client ID</label><input type="text" id="opensky_id"></div>
+        <div class="field"><label>OpenSky Client Secret</label><input type="password" id="opensky_secret"></div>
+      </div>
+    </div>
+
+  </div>
+  <div class="config-footer">
+    <button class="btn btn-primary" onclick="saveConfig(false)">Save</button>
+    <button class="btn btn-danger" onclick="saveConfig(true)">Save &amp; Restart Display</button>
+    <span class="save-status" id="save-status"></span>
+  </div>
+</div>
+
+<!-- MAP TAB -->
+<div class="tab-content" id="map-tab">
+  <div id="map"></div>
+  <div class="map-overlay">
+    <div class="map-card">
+      <h3>Zone Bounds</h3>
+      <div class="coord-row"><span>N</span><span id="m-tl-y">—</span></div>
+      <div class="coord-row"><span>S</span><span id="m-br-y">—</span></div>
+      <div class="coord-row"><span>W</span><span id="m-tl-x">—</span></div>
+      <div class="coord-row"><span>E</span><span id="m-br-x">—</span></div>
+    </div>
+    <div class="map-card">
+      <h3>Instructions</h3>
+      <div style="color:var(--muted);line-height:1.6">Drag the corner handles<br>to resize the zone.<br><br>
+      <button class="btn btn-primary" style="width:100%" onclick="saveFromMap()">Save Zone</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LOG TAB -->
+<div class="tab-content" id="log-tab">
+  <div class="log-toolbar">
+    <span class="chip green" id="log-status">● LIVE</span>
+    <label class="toggle-small">
+      <label class="toggle" style="width:32px;height:18px"><input type="checkbox" id="autoscroll" checked><span class="toggle-slider"></span></label>
+      Auto-scroll
+    </label>
+    <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px" onclick="clearLog()">Clear</button>
+    <span class="log-stats" id="log-stats">0 lines</span>
+  </div>
+  <div id="log-output"></div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────
+let config = {};
+let map, zoneRect, homeMarker, cornerMarkers = [];
+let logLineCount = 0;
+let evtSource = null;
+
+// ── Tabs ───────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById(name + '-tab').classList.add('active');
+  btn.classList.add('active');
+  if (name === 'map') initMap();
+  if (name === 'log') initLog();
+}
+
+// ── Config ─────────────────────────────────────────────────────
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  config = await r.json();
+  document.getElementById('zone_tl_y').value = config.ZONE_HOME.tl_y;
+  document.getElementById('zone_tl_x').value = config.ZONE_HOME.tl_x;
+  document.getElementById('zone_br_y').value = config.ZONE_HOME.br_y;
+  document.getElementById('zone_br_x').value = config.ZONE_HOME.br_x;
+  document.getElementById('loc_lat').value = config.LOCATION_HOME[0];
+  document.getElementById('loc_lon').value = config.LOCATION_HOME[1];
+  document.getElementById('loc_alt').value = config.LOCATION_HOME[2];
+  document.getElementById('min_altitude').value = config.MIN_ALTITUDE;
+  document.getElementById('max_altitude').value = config.MAX_ALTITUDE;
+  document.getElementById('local_airport').value = config.LOCAL_AIRPORT || '';
+  document.getElementById('brightness').value = config.BRIGHTNESS;
+  document.getElementById('gpio_slowdown').value = config.GPIO_SLOWDOWN;
+  document.getElementById('journey_code').value = config.JOURNEY_CODE_SELECTED || '';
+  document.getElementById('journey_blank').value = config.JOURNEY_BLANK_FILLER || '';
+  document.getElementById('hat_pwm').checked = config.HAT_PWM_ENABLED;
+  document.getElementById('weather_location').value = config.WEATHER_LOCATION || '';
+  document.getElementById('temp_units').value = config.TEMPERATURE_UNITS || 'imperial';
+  document.getElementById('ow_key').value = config.OPENWEATHER_API_KEY || '';
+  document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
+  document.getElementById('fa_key').value = config.FLIGHTAWARE_API_KEY || '';
+  document.getElementById('opensky_id').value = config.OPENSKY_CLIENT_ID || '';
+  document.getElementById('opensky_secret').value = config.OPENSKY_CLIENT_SECRET || '';
+}
+
+function buildConfigPayload() {
+  return {
+    ZONE_HOME: {
+      tl_y: parseFloat(document.getElementById('zone_tl_y').value),
+      tl_x: parseFloat(document.getElementById('zone_tl_x').value),
+      br_y: parseFloat(document.getElementById('zone_br_y').value),
+      br_x: parseFloat(document.getElementById('zone_br_x').value),
+    },
+    LOCATION_HOME: [
+      parseFloat(document.getElementById('loc_lat').value),
+      parseFloat(document.getElementById('loc_lon').value),
+      parseFloat(document.getElementById('loc_alt').value),
+    ],
+    MIN_ALTITUDE: parseInt(document.getElementById('min_altitude').value),
+    MAX_ALTITUDE: parseInt(document.getElementById('max_altitude').value),
+    LOCAL_AIRPORT: document.getElementById('local_airport').value.trim().toUpperCase(),
+    BRIGHTNESS: parseInt(document.getElementById('brightness').value),
+    GPIO_SLOWDOWN: parseInt(document.getElementById('gpio_slowdown').value),
+    JOURNEY_CODE_SELECTED: document.getElementById('journey_code').value,
+    JOURNEY_BLANK_FILLER: document.getElementById('journey_blank').value,
+    HAT_PWM_ENABLED: document.getElementById('hat_pwm').checked,
+    WEATHER_LOCATION: document.getElementById('weather_location').value,
+    TEMPERATURE_UNITS: document.getElementById('temp_units').value,
+    OPENWEATHER_API_KEY: document.getElementById('ow_key').value,
+    RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
+    FLIGHTAWARE_API_KEY: document.getElementById('fa_key').value,
+    OPENSKY_CLIENT_ID: document.getElementById('opensky_id').value,
+    OPENSKY_CLIENT_SECRET: document.getElementById('opensky_secret').value,
+  };
+}
+
+async function saveConfig(restart) {
+  const status = document.getElementById('save-status');
+  status.textContent = 'Saving…'; status.className = 'save-status';
+  try {
+    const payload = buildConfigPayload();
+    payload.restart = restart;
+    const r = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await r.json();
+    if (data.ok) {
+      config = payload;
+      status.textContent = restart ? '✓ Saved — restarting display…' : '✓ Saved';
+      status.className = 'save-status ok';
+    } else {
+      status.textContent = '✗ ' + (data.error || 'Error'); status.className = 'save-status err';
+    }
+  } catch(e) {
+    status.textContent = '✗ ' + e.message; status.className = 'save-status err';
+  }
+  setTimeout(() => { status.textContent = ''; }, 4000);
+}
+
+// ── Map ────────────────────────────────────────────────────────
+function initMap() {
+  if (map) { setTimeout(() => map.invalidateSize(), 100); return; }
+
+  map = L.map('map').setView([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap', maxZoom: 18
+  }).addTo(map);
+
+  const z = config.ZONE_HOME;
+
+  // Zone rectangle
+  zoneRect = L.rectangle(
+    [[z.tl_y, z.tl_x], [z.br_y, z.br_x]],
+    { color: '#58a6ff', weight: 2, fillColor: '#58a6ff', fillOpacity: 0.1 }
+  ).addTo(map);
+
+  // Home marker
+  homeMarker = L.circleMarker([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], {
+    radius: 8, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 0.8, weight: 2
+  }).addTo(map).bindTooltip('Home');
+
+  // Corner drag handles
+  const corners = [
+    [z.tl_y, z.tl_x], // NW
+    [z.tl_y, z.br_x], // NE
+    [z.br_y, z.br_x], // SE
+    [z.br_y, z.tl_x], // SW
+  ];
+
+  const handleIcon = L.divIcon({
+    className: '', html: '<div style="width:14px;height:14px;background:#58a6ff;border:2px solid #fff;border-radius:3px;cursor:grab;margin-top:-7px;margin-left:-7px"></div>'
+  });
+
+  corners.forEach((pos, i) => {
+    const m = L.marker(pos, { icon: handleIcon, draggable: true }).addTo(map);
+    m.on('drag', () => updateZoneFromCorners());
+    cornerMarkers.push(m);
+  });
+
+  updateZoneCoordDisplay();
+}
+
+function updateZoneFromCorners() {
+  const latlngs = cornerMarkers.map(m => m.getLatLng());
+  const lats = latlngs.map(l => l.lat);
+  const lngs = latlngs.map(l => l.lng);
+  const north = Math.max(...lats), south = Math.min(...lats);
+  const west = Math.min(...lngs), east = Math.max(...lngs);
+
+  zoneRect.setBounds([[north, west], [south, east]]);
+
+  document.getElementById('m-tl-y').textContent = north.toFixed(6);
+  document.getElementById('m-br-y').textContent = south.toFixed(6);
+  document.getElementById('m-tl-x').textContent = west.toFixed(6);
+  document.getElementById('m-br-x').textContent = east.toFixed(6);
+
+  // Keep non-dragged corners locked to rectangle
+  cornerMarkers[0].setLatLng([north, west]);
+  cornerMarkers[1].setLatLng([north, east]);
+  cornerMarkers[2].setLatLng([south, east]);
+  cornerMarkers[3].setLatLng([south, west]);
+}
+
+function updateZoneCoordDisplay() {
+  const z = config.ZONE_HOME;
+  document.getElementById('m-tl-y').textContent = z.tl_y;
+  document.getElementById('m-br-y').textContent = z.br_y;
+  document.getElementById('m-tl-x').textContent = z.tl_x;
+  document.getElementById('m-br-x').textContent = z.br_x;
+}
+
+function saveFromMap() {
+  const bounds = zoneRect.getBounds();
+  document.getElementById('zone_tl_y').value = bounds.getNorth().toFixed(6);
+  document.getElementById('zone_tl_x').value = bounds.getWest().toFixed(6);
+  document.getElementById('zone_br_y').value = bounds.getSouth().toFixed(6);
+  document.getElementById('zone_br_x').value = bounds.getEast().toFixed(6);
+  saveConfig(false);
+}
+
+// ── Log ────────────────────────────────────────────────────────
+function initLog() {
+  if (evtSource) return;
+
+  // Load history first
+  fetch('/api/log/history').then(r => r.json()).then(data => {
+    data.lines.forEach(line => appendLog(line));
+    scrollLog();
+  });
+
+  // Then stream live
+  evtSource = new EventSource('/api/log/stream');
+  evtSource.onmessage = e => {
+    appendLog(e.data);
+    if (document.getElementById('autoscroll').checked) scrollLog();
+  };
+  evtSource.onerror = () => {
+    document.getElementById('log-status').textContent = '● DISCONNECTED';
+    document.getElementById('log-status').className = 'chip';
+  };
+}
+
+function appendLog(line) {
+  const el = document.createElement('div');
+  el.className = 'log-line ' + classifyLine(line);
+  el.textContent = line;
+  document.getElementById('log-output').appendChild(el);
+  logLineCount++;
+  document.getElementById('log-stats').textContent = logLineCount + ' lines';
+  // Trim to 2000 lines
+  const out = document.getElementById('log-output');
+  while (out.children.length > 2000) out.removeChild(out.firstChild);
+}
+
+function classifyLine(line) {
+  if (line.includes('-> ')) return 'result';
+  if (line.includes('in_zone=True')) return 'inzone';
+  if (line.includes("plane=''") || line.includes('plane= ')) return 'nodata';
+  if (line.toLowerCase().includes('error') || line.toLowerCase().includes('exception')) return 'error';
+  if (line.includes('in_zone=False')) return 'dim';
+  return '';
+}
+
+function scrollLog() {
+  const out = document.getElementById('log-output');
+  out.scrollTop = out.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-output').innerHTML = '';
+  logLineCount = 0;
+  document.getElementById('log-stats').textContent = '0 lines';
+}
+
+// ── Init ───────────────────────────────────────────────────────
+loadConfig();
+</script>
+</body>
+</html>

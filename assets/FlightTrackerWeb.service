@@ -1,0 +1,14 @@
+[Unit]
+Description=FlightTracker Web UI
+After=network.target FlightTracker.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/FlightTracker
+ExecStart=/home/pi/FlightTracker/env/bin/python web/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
