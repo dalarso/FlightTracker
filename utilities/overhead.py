@@ -47,12 +47,18 @@ except (ModuleNotFoundError, NameError, ImportError):
     OPENSKY_CLIENT_ID = None
     OPENSKY_CLIENT_SECRET = None
 
+try:
+    from config import FLIGHTAWARE_API_KEY
+except (ModuleNotFoundError, NameError, ImportError):
+    FLIGHTAWARE_API_KEY = None
+
 OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 
 # Data source URLs
 FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
 DUMP1090_URL = f"http://{RECEIVER_HOST}:8080/data/aircraft.json"
 AIRPLANESLIVE_URL = "https://api.airplanes.live/v2/hex/{}"
+AEROAPI_URL = "https://aeroapi.flightaware.com/aeroapi/flights/{}"
 OPENSKY_FLIGHTS_URL = "https://opensky-network.org/api/flights/aircraft"
 ADSBDB_CALLSIGN_URL = "https://api.adsbdb.com/v0/callsign/{}"
 ADSBDB_AIRCRAFT_URL = "https://api.adsbdb.com/v0/aircraft/{}"
@@ -217,7 +223,29 @@ def get_route(hex_code, callsign, vertical_speed):
     """
     origin, destination = "", ""
 
-    # 1. OpenSky
+    # 1. FlightAware AeroAPI (highest quality, real-time with flight plan data)
+    if FLIGHTAWARE_API_KEY and callsign:
+        try:
+            r = requests.get(
+                AEROAPI_URL.format(callsign.strip()),
+                headers={"x-apikey": FLIGHTAWARE_API_KEY},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                flights = r.json().get("flights", [])
+                if flights:
+                    f = flights[0]
+                    origin = (f.get("origin") or {}).get("code_iata", "") or ""
+                    destination = (f.get("destination") or {}).get("code_iata", "") or ""
+        except Exception:
+            pass
+
+    if origin or destination:
+        origin = origin if origin.upper() not in BLANK_FIELDS else ""
+        destination = destination if destination.upper() not in BLANK_FIELDS else ""
+        return origin, destination
+
+    # 3. OpenSky
     if OPENSKY_CLIENT_ID and hex_code:
         now = int(time.time())
         cached = _route_cache.get(hex_code)
@@ -241,7 +269,7 @@ def get_route(hex_code, callsign, vertical_speed):
                 except Exception:
                     pass
 
-    # 2. adsbdb callsign fallback
+    # 4. adsbdb callsign fallback
     if not origin and not destination and callsign:
         try:
             r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
@@ -252,7 +280,7 @@ def get_route(hex_code, callsign, vertical_speed):
         except Exception:
             pass
 
-    # 3. LOCAL_AIRPORT heuristic
+    # 5. LOCAL_AIRPORT heuristic
     if LOCAL_AIRPORT:
         departing = vertical_speed > 0
         if departing and not origin:
