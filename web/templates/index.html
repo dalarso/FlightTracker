@@ -302,7 +302,7 @@ async function checkDisplayStatus() {
   try {
     const r = await fetch('/api/display');
     const d = await r.json();
-    updateDisplayBtn(d.active);
+    updateDisplayBtn(!d.paused);
   } catch(e) {}
 }
 

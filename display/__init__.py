@@ -1,4 +1,4 @@
-import signal as _signal
+import os
 import sys
 
 from setup import frames
@@ -49,19 +49,7 @@ except (ModuleNotFoundError, NameError, ImportError):
     # If there's no experimental config data
     LOADING_LED_ENABLED = False
 
-# Display pause/resume via SIGUSR1/SIGUSR2
-_display_paused = False
-
-def _sig_pause(signum, frame):
-    global _display_paused
-    _display_paused = True
-
-def _sig_resume(signum, frame):
-    global _display_paused
-    _display_paused = False
-
-_signal.signal(_signal.SIGUSR1, _sig_pause)
-_signal.signal(_signal.SIGUSR2, _sig_resume)
+PAUSE_FLAG = "/tmp/ft_paused"
 
 
 class Display(
@@ -155,7 +143,7 @@ class Display(
 
     @Animator.KeyFrame.add(1)
     def sync(self, count):
-        self.matrix.SetBrightness(0 if _display_paused else BRIGHTNESS)
+        self.matrix.SetBrightness(0 if os.path.exists(PAUSE_FLAG) else BRIGHTNESS)
         _ = self.matrix.SwapOnVSync(self.canvas)
 
     @Animator.KeyFrame.add(frames.PER_SECOND * 30)

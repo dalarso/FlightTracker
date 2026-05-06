@@ -1,5 +1,4 @@
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -12,6 +11,7 @@ app = Flask(__name__)
 BASE_DIR = Path(__file__).parent.parent
 CONFIG_PATH = BASE_DIR / "config.py"
 LOG_PATH = Path.home() / "plane.log"
+PAUSE_FLAG = "/tmp/ft_paused"
 
 
 def read_config():
@@ -82,43 +82,24 @@ def post_config():
         return jsonify({"error": str(e)}), 500
 
 
-def _get_ft_pid():
-    r = subprocess.run(
-        ["systemctl", "show", "FlightTracker", "--property=MainPID"],
-        capture_output=True, text=True
-    )
-    for line in r.stdout.splitlines():
-        if line.startswith("MainPID="):
-            pid = int(line.split("=")[1].strip())
-            return pid if pid > 1 else None
-    return None
-
-
 @app.route("/api/display", methods=["GET"])
 def display_status():
-    pid = _get_ft_pid()
-    active = subprocess.run(
-        ["systemctl", "is-active", "FlightTracker"], capture_output=True, text=True
-    ).stdout.strip() == "active"
-    return jsonify({"active": active, "pid": pid})
+    return jsonify({"paused": os.path.exists(PAUSE_FLAG)})
 
 
 @app.route("/api/display/off", methods=["POST"])
 def display_off():
-    pid = _get_ft_pid()
-    if pid:
-        os.kill(pid, signal.SIGUSR1)
-        return jsonify({"ok": True})
-    return jsonify({"error": "FlightTracker not running"}), 500
+    open(PAUSE_FLAG, "w").close()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/display/on", methods=["POST"])
 def display_on():
-    pid = _get_ft_pid()
-    if pid:
-        os.kill(pid, signal.SIGUSR2)
-        return jsonify({"ok": True})
-    return jsonify({"error": "FlightTracker not running"}), 500
+    try:
+        os.remove(PAUSE_FLAG)
+    except FileNotFoundError:
+        pass
+    return jsonify({"ok": True})
 
 
 @app.route("/api/log/history")
