@@ -121,14 +121,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
   <div class="config-scroll">
 
     <div class="section">
-      <div class="section-header">
-        Zone Boundaries
-        <div class="unit-selector">
-          <button class="unit-btn active" onclick="setAltUnit('ft',this)">ft</button>
-          <button class="unit-btn" onclick="setAltUnit('m',this)">m</button>
-          <button class="unit-btn" onclick="setAltUnit('km',this)">km</button>
-        </div>
-      </div>
+      <div class="section-header">Zone Boundaries</div>
       <div class="field-grid">
         <div class="field"><label>Top-Left Latitude (N)</label><input type="number" step="0.000001" id="zone_tl_y"></div>
         <div class="field"><label>Top-Left Longitude (W)</label><input type="number" step="0.000001" id="zone_tl_x"></div>
@@ -463,24 +456,39 @@ function initMap() {
   const handleIcon = L.divIcon({ className: '', html: '<div style="width:14px;height:14px;background:#58a6ff;border:2px solid #fff;border-radius:3px;cursor:grab;margin:-7px 0 0 -7px"></div>' });
   corners.forEach(pos => {
     const m = L.marker(pos, { icon: handleIcon, draggable: true }).addTo(map);
-    m.on('drag', updateZoneFromCorners);
+    m.on('drag', updateRectFromCorners);
+    m.on('dragend', snapCornersToRect);
     cornerMarkers.push(m);
   });
   updateZoneCoordDisplay();
 }
 
-function updateZoneFromCorners() {
+function getBoundsFromCorners() {
   const ll = cornerMarkers.map(m => m.getLatLng());
   const lats = ll.map(l => l.lat), lngs = ll.map(l => l.lng);
-  const n = Math.max(...lats), s = Math.min(...lats);
-  const w = Math.min(...lngs), e = Math.max(...lngs);
+  return {
+    n: Math.max(...lats), s: Math.min(...lats),
+    w: Math.min(...lngs), e: Math.max(...lngs)
+  };
+}
+
+function updateRectFromCorners() {
+  // Update rectangle live during drag — don't touch markers while dragging
+  const { n, s, w, e } = getBoundsFromCorners();
   zoneRect.setBounds([[n, w], [s, e]]);
-  cornerMarkers[0].setLatLng([n, w]); cornerMarkers[1].setLatLng([n, e]);
-  cornerMarkers[2].setLatLng([s, e]); cornerMarkers[3].setLatLng([s, w]);
   document.getElementById('m-tl-y').textContent = n.toFixed(6);
   document.getElementById('m-br-y').textContent = s.toFixed(6);
   document.getElementById('m-tl-x').textContent = w.toFixed(6);
   document.getElementById('m-br-x').textContent = e.toFixed(6);
+}
+
+function snapCornersToRect() {
+  // Only snap corners to clean positions after drag ends
+  const { n, s, w, e } = getBoundsFromCorners();
+  cornerMarkers[0].setLatLng([n, w]);
+  cornerMarkers[1].setLatLng([n, e]);
+  cornerMarkers[2].setLatLng([s, e]);
+  cornerMarkers[3].setLatLng([s, w]);
 }
 
 function updateZoneCoordDisplay() {
