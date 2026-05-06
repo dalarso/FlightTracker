@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -79,6 +80,45 @@ def post_config():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _get_ft_pid():
+    r = subprocess.run(
+        ["systemctl", "show", "FlightTracker", "--property=MainPID"],
+        capture_output=True, text=True
+    )
+    for line in r.stdout.splitlines():
+        if line.startswith("MainPID="):
+            pid = int(line.split("=")[1].strip())
+            return pid if pid > 1 else None
+    return None
+
+
+@app.route("/api/display", methods=["GET"])
+def display_status():
+    pid = _get_ft_pid()
+    active = subprocess.run(
+        ["systemctl", "is-active", "FlightTracker"], capture_output=True, text=True
+    ).stdout.strip() == "active"
+    return jsonify({"active": active, "pid": pid})
+
+
+@app.route("/api/display/off", methods=["POST"])
+def display_off():
+    pid = _get_ft_pid()
+    if pid:
+        os.kill(pid, signal.SIGUSR1)
+        return jsonify({"ok": True})
+    return jsonify({"error": "FlightTracker not running"}), 500
+
+
+@app.route("/api/display/on", methods=["POST"])
+def display_on():
+    pid = _get_ft_pid()
+    if pid:
+        os.kill(pid, signal.SIGUSR2)
+        return jsonify({"ok": True})
+    return jsonify({"error": "FlightTracker not running"}), 500
 
 
 @app.route("/api/log/history")

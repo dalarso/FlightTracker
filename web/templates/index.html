@@ -7,89 +7,108 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #0d1117; --surface: #161b22; --border: #30363d;
-    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-    --green: #3fb950; --yellow: #d29922; --red: #f85149; --cyan: #39d353;
-  }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
-  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 16px; height: 56px; flex-shrink: 0; }
-  header h1 { font-size: 18px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; }
-  header h1 span { color: var(--accent); }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-  nav { display: flex; gap: 4px; margin-left: auto; }
-  nav button { background: none; border: none; color: var(--muted); padding: 8px 16px; cursor: pointer; border-radius: 6px; font-size: 14px; font-weight: 500; transition: all .15s; }
-  nav button:hover { color: var(--text); background: rgba(255,255,255,.06); }
-  nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
-  .tab-content { display: none; flex: 1; overflow: hidden; }
-  .tab-content.active { display: flex; flex-direction: column; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --yellow: #d29922; --red: #f85149; --cyan: #39d353;
+}
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
 
-  /* CONFIG TAB */
-  .config-scroll { flex: 1; overflow-y: auto; padding: 24px; }
-  .config-scroll::-webkit-scrollbar { width: 6px; } .config-scroll::-webkit-scrollbar-track { background: transparent; } .config-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
-  .section-header { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
-  .field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0; }
-  .field { padding: 14px 20px; border-bottom: 1px solid var(--border); }
-  .field:last-child { border-bottom: none; }
-  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
-  .field input, .field select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 14px; outline: none; transition: border-color .15s; }
-  .field input:focus, .field select:focus { border-color: var(--accent); }
-  .field input[type=password] { font-family: monospace; }
-  .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
-  .config-footer { padding: 16px 24px; border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
-  .btn { padding: 8px 20px; border-radius: 6px; border: none; font-size: 14px; font-weight: 500; cursor: pointer; transition: all .15s; }
-  .btn-primary { background: var(--accent); color: #000; }
-  .btn-primary:hover { filter: brightness(1.1); }
-  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
-  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
-  .btn-danger { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid rgba(248,81,73,.3); }
-  .btn-danger:hover { background: rgba(248,81,73,.25); }
-  .save-status { font-size: 13px; color: var(--muted); margin-left: auto; }
-  .save-status.ok { color: var(--green); }
-  .save-status.err { color: var(--red); }
-  .toggle-wrap { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
-  .toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 22px; cursor: pointer; transition: .2s; }
-  .toggle input:checked + .toggle-slider { background: var(--accent); }
-  .toggle-slider:before { content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
-  .toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
+/* HEADER */
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; align-items: center; gap: 12px; height: 56px; flex-shrink: 0; }
+header h1 { font-size: 17px; font-weight: 600; white-space: nowrap; }
+header h1 span { color: var(--accent); }
+.display-toggle { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 20px; padding: 6px 14px; cursor: pointer; transition: all .2s; user-select: none; }
+.display-toggle:hover { border-color: var(--accent); }
+.display-toggle .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); transition: background .3s; flex-shrink: 0; }
+.display-toggle.off .dot { background: var(--border); }
+.display-toggle span { font-size: 13px; font-weight: 500; }
+.display-toggle.off span { color: var(--muted); }
+nav { display: flex; gap: 2px; margin-left: auto; }
+nav button { background: none; border: none; color: var(--muted); padding: 8px 14px; cursor: pointer; border-radius: 6px; font-size: 13px; font-weight: 500; transition: all .15s; }
+nav button:hover { color: var(--text); background: rgba(255,255,255,.06); }
+nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 
-  /* MAP TAB */
-  #map-tab { position: relative; }
-  #map { flex: 1; }
-  .map-overlay { position: absolute; top: 16px; right: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
-  .map-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 12px; min-width: 200px; }
-  .map-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 10px; }
-  .coord-row { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
-  .coord-row span:last-child { color: var(--text); font-family: monospace; }
+/* TABS */
+.tab-content { display: none; flex: 1; overflow: hidden; }
+.tab-content.active { display: flex; flex-direction: column; }
 
-  /* LOG TAB */
-  #log-tab { flex-direction: column; }
-  .log-toolbar { padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
-  .log-toolbar .log-stats { margin-left: auto; font-size: 12px; color: var(--muted); }
-  #log-output { flex: 1; overflow-y: auto; padding: 12px 16px; font-family: 'SFMono-Regular', 'Consolas', monospace; font-size: 12.5px; line-height: 1.7; background: #0a0e14; }
-  #log-output::-webkit-scrollbar { width: 6px; } #log-output::-webkit-scrollbar-track { background: transparent; } #log-output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  .log-line { white-space: pre-wrap; word-break: break-all; }
-  .log-line.result { color: var(--cyan); }
-  .log-line.inzone { color: var(--green); }
-  .log-line.nodata { color: var(--yellow); }
-  .log-line.error { color: var(--red); }
-  .log-line.dim { color: #4a5568; }
-  .toggle-small { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
-  .chip { background: rgba(88,166,255,.12); color: var(--accent); border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
-  .chip.green { background: rgba(63,185,80,.12); color: var(--green); }
-  .chip.yellow { background: rgba(210,153,34,.12); color: var(--yellow); }
+/* CONFIG */
+.config-scroll { flex: 1; overflow-y: auto; padding: 20px; }
+.config-scroll::-webkit-scrollbar { width: 6px; }
+.config-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
+.section-header { padding: 12px 18px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; display: flex; align-items: center; gap: 10px; }
+.section-header .unit-selector { margin-left: auto; display: flex; gap: 2px; }
+.unit-btn { background: var(--bg); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 600; transition: all .15s; }
+.unit-btn.active { background: rgba(88,166,255,.15); border-color: var(--accent); color: var(--accent); }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.field { padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.field:last-child { border-bottom: none; }
+.field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; font-weight: 500; letter-spacing: .3px; }
+.input-wrap { position: relative; display: flex; }
+.field input, .field select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 7px 11px; border-radius: 6px; font-size: 13px; outline: none; transition: border-color .15s; }
+.field input:focus, .field select:focus { border-color: var(--accent); }
+.input-wrap input { border-radius: 6px 0 0 6px; }
+.eye-btn { background: var(--bg); border: 1px solid var(--border); border-left: none; color: var(--muted); padding: 0 10px; border-radius: 0 6px 6px 0; cursor: pointer; font-size: 14px; transition: color .15s; }
+.eye-btn:hover { color: var(--text); }
+.unit-label { background: var(--bg); border: 1px solid var(--border); border-left: none; color: var(--muted); padding: 0 10px; border-radius: 0 6px 6px 0; font-size: 12px; display: flex; align-items: center; white-space: nowrap; }
+.field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.toggle-wrap { display: flex; align-items: center; gap: 10px; margin-top: 3px; }
+.toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 20px; cursor: pointer; transition: .2s; }
+.toggle input:checked + .toggle-slider { background: var(--accent); }
+.toggle-slider:before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
+.toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
+.config-footer { padding: 14px 20px; border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.btn { padding: 7px 18px; border-radius: 6px; border: none; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
+.btn-primary { background: var(--accent); color: #000; }
+.btn-primary:hover { filter: brightness(1.1); }
+.btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+.btn-danger { background: rgba(248,81,73,.12); color: var(--red); border: 1px solid rgba(248,81,73,.25); }
+.btn-danger:hover { background: rgba(248,81,73,.22); }
+.save-status { font-size: 12px; color: var(--muted); margin-left: auto; }
+.save-status.ok { color: var(--green); }
+.save-status.err { color: var(--red); }
+
+/* MAP */
+#map-tab { position: relative; }
+#map { flex: 1; }
+.map-overlay { position: absolute; top: 14px; right: 14px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+.map-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 12px; min-width: 180px; }
+.map-card h3 { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 8px; }
+.coord-row { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); margin-bottom: 3px; }
+.coord-row span:last-child { color: var(--text); font-family: monospace; }
+
+/* LOG */
+#log-tab { flex-direction: column; }
+.log-toolbar { padding: 8px 14px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-shrink: 0; flex-wrap: wrap; }
+.log-stats { margin-left: auto; font-size: 11px; color: var(--muted); }
+#log-output { flex: 1; overflow-y: auto; padding: 10px 14px; font-family: 'SFMono-Regular', 'Consolas', monospace; font-size: 12px; line-height: 1.7; background: #080c10; }
+#log-output::-webkit-scrollbar { width: 6px; }
+#log-output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.log-line { white-space: pre-wrap; word-break: break-all; color: #6e7681; }
+.log-line.result  { color: var(--cyan); }
+.log-line.inzone  { color: var(--green); }
+.log-line.nodata  { color: var(--yellow); }
+.log-line.error   { color: var(--red); }
+.chip { border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+.chip.green { background: rgba(63,185,80,.12); color: var(--green); }
+.chip.red { background: rgba(248,81,73,.12); color: var(--red); }
+.toggle-small { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>✈ Flight<span>Tracker</span></h1>
-  <div class="status-dot" id="status-dot" title="Service status"></div>
+  <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Toggle LED display on/off">
+    <div class="dot"></div>
+    <span id="display-label">Display On</span>
+  </div>
   <nav>
     <button class="active" onclick="showTab('config',this)">⚙ Config</button>
     <button onclick="showTab('map',this)">🗺 Zone Map</button>
@@ -102,12 +121,41 @@
   <div class="config-scroll">
 
     <div class="section">
-      <div class="section-header">Zone Boundaries</div>
+      <div class="section-header">
+        Zone Boundaries
+        <div class="unit-selector">
+          <button class="unit-btn active" onclick="setAltUnit('ft',this)">ft</button>
+          <button class="unit-btn" onclick="setAltUnit('m',this)">m</button>
+          <button class="unit-btn" onclick="setAltUnit('km',this)">km</button>
+        </div>
+      </div>
       <div class="field-grid">
-        <div class="field"><label>Top-Left Latitude (N)</label><input type="number" step="0.000001" id="zone_tl_y"><div class="hint">North edge of detection zone</div></div>
-        <div class="field"><label>Top-Left Longitude (W)</label><input type="number" step="0.000001" id="zone_tl_x"><div class="hint">West edge of detection zone</div></div>
-        <div class="field"><label>Bottom-Right Latitude (S)</label><input type="number" step="0.000001" id="zone_br_y"><div class="hint">South edge of detection zone</div></div>
-        <div class="field"><label>Bottom-Right Longitude (E)</label><input type="number" step="0.000001" id="zone_br_x"><div class="hint">East edge of detection zone</div></div>
+        <div class="field"><label>Top-Left Latitude (N)</label><input type="number" step="0.000001" id="zone_tl_y"></div>
+        <div class="field"><label>Top-Left Longitude (W)</label><input type="number" step="0.000001" id="zone_tl_x"></div>
+        <div class="field"><label>Bottom-Right Latitude (S)</label><input type="number" step="0.000001" id="zone_br_y"></div>
+        <div class="field"><label>Bottom-Right Longitude (E)</label><input type="number" step="0.000001" id="zone_br_x"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">
+        Altitude Filter
+        <div class="unit-selector">
+          <button class="unit-btn active" onclick="setAltUnit('ft',this)">ft</button>
+          <button class="unit-btn" onclick="setAltUnit('m',this)">m</button>
+          <button class="unit-btn" onclick="setAltUnit('km',this)">km</button>
+        </div>
+      </div>
+      <div class="field-grid">
+        <div class="field">
+          <label>Min Altitude</label>
+          <div class="input-wrap"><input type="number" step="1" id="min_altitude"><span class="unit-label" id="alt-unit-label-1">ft</span></div>
+        </div>
+        <div class="field">
+          <label>Max Altitude</label>
+          <div class="input-wrap"><input type="number" step="1" id="max_altitude"><span class="unit-label" id="alt-unit-label-2">ft</span></div>
+        </div>
+        <div class="field"><label>Local Airport</label><input type="text" id="local_airport" maxlength="4"><div class="hint">Fallback origin/destination (e.g. LAS)</div></div>
       </div>
     </div>
 
@@ -116,21 +164,12 @@
       <div class="field-grid">
         <div class="field"><label>Latitude</label><input type="number" step="0.000001" id="loc_lat"></div>
         <div class="field"><label>Longitude</label><input type="number" step="0.000001" id="loc_lon"></div>
-        <div class="field"><label>Altitude (km)</label><input type="number" step="0.00001" id="loc_alt"><div class="hint">Used for distance calculations</div></div>
+        <div class="field"><label>Altitude (km ASL)</label><input type="number" step="0.00001" id="loc_alt"><div class="hint">Antenna height for distance calc</div></div>
       </div>
     </div>
 
     <div class="section">
-      <div class="section-header">Altitude Filter</div>
-      <div class="field-grid">
-        <div class="field"><label>Min Altitude (ft)</label><input type="number" step="100" id="min_altitude"></div>
-        <div class="field"><label>Max Altitude (ft)</label><input type="number" step="500" id="max_altitude"></div>
-        <div class="field"><label>Local Airport Code</label><input type="text" id="local_airport" maxlength="4"><div class="hint">Used as fallback origin/destination</div></div>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-header">Display</div>
+      <div class="section-header">Display Hardware</div>
       <div class="field-grid">
         <div class="field"><label>Brightness (0–100)</label><input type="number" min="0" max="100" id="brightness"></div>
         <div class="field"><label>GPIO Slowdown</label><input type="number" min="1" max="4" id="gpio_slowdown"><div class="hint">Increase if display flickers</div></div>
@@ -139,7 +178,7 @@
         <div class="field"><label>HAT PWM Enabled</label>
           <div class="toggle-wrap">
             <label class="toggle"><input type="checkbox" id="hat_pwm"><span class="toggle-slider"></span></label>
-            <span style="font-size:13px;color:var(--muted)">Reduces flicker on some HATs</span>
+            <span style="font-size:12px;color:var(--muted)">Reduces flicker on some HATs</span>
           </div>
         </div>
       </div>
@@ -155,7 +194,9 @@
             <option value="metric">Metric (°C)</option>
           </select>
         </div>
-        <div class="field"><label>OpenWeather API Key</label><input type="password" id="ow_key"></div>
+        <div class="field"><label>OpenWeather API Key</label>
+          <div class="input-wrap"><input type="password" id="ow_key"><button class="eye-btn" onclick="toggleEye('ow_key',this)">👁</button></div>
+        </div>
       </div>
     </div>
 
@@ -169,9 +210,13 @@
     <div class="section">
       <div class="section-header">API Keys</div>
       <div class="field-grid">
-        <div class="field"><label>FlightAware AeroAPI Key</label><input type="password" id="fa_key"></div>
+        <div class="field"><label>FlightAware AeroAPI Key</label>
+          <div class="input-wrap"><input type="password" id="fa_key"><button class="eye-btn" onclick="toggleEye('fa_key',this)">👁</button></div>
+        </div>
         <div class="field"><label>OpenSky Client ID</label><input type="text" id="opensky_id"></div>
-        <div class="field"><label>OpenSky Client Secret</label><input type="password" id="opensky_secret"></div>
+        <div class="field"><label>OpenSky Client Secret</label>
+          <div class="input-wrap"><input type="password" id="opensky_secret"><button class="eye-btn" onclick="toggleEye('opensky_secret',this)">👁</button></div>
+        </div>
       </div>
     </div>
 
@@ -196,8 +241,8 @@
     </div>
     <div class="map-card">
       <h3>Instructions</h3>
-      <div style="color:var(--muted);line-height:1.6">Drag the corner handles<br>to resize the zone.<br><br>
-      <button class="btn btn-primary" style="width:100%" onclick="saveFromMap()">Save Zone</button>
+      <div style="color:var(--muted);line-height:1.7;font-size:12px">Drag corner handles<br>to resize the zone.<br><br>
+        <button class="btn btn-primary" style="width:100%;font-size:12px" onclick="saveFromMap()">Save Zone</button>
       </div>
     </div>
   </div>
@@ -211,15 +256,21 @@
       <label class="toggle" style="width:32px;height:18px"><input type="checkbox" id="autoscroll" checked><span class="toggle-slider"></span></label>
       Auto-scroll
     </label>
-    <button class="btn btn-secondary" style="padding:4px 12px;font-size:12px" onclick="clearLog()">Clear</button>
+    <button class="btn btn-secondary" style="padding:4px 12px;font-size:11px" onclick="clearLog()">Clear</button>
     <span class="log-stats" id="log-stats">0 lines</span>
   </div>
   <div id="log-output"></div>
 </div>
 
 <script>
+// ── Constants ──────────────────────────────────────────────────
+const FT_TO_M  = 0.3048;
+const FT_TO_KM = 0.0003048;
+
 // ── State ──────────────────────────────────────────────────────
 let config = {};
+let altUnit = 'ft';
+let displayOn = true;
 let map, zoneRect, homeMarker, cornerMarkers = [];
 let logLineCount = 0;
 let evtSource = null;
@@ -234,6 +285,63 @@ function showTab(name, btn) {
   if (name === 'log') initLog();
 }
 
+// ── Display Toggle ─────────────────────────────────────────────
+async function checkDisplayStatus() {
+  try {
+    const r = await fetch('/api/display');
+    const d = await r.json();
+    updateDisplayBtn(d.active);
+  } catch(e) {}
+}
+
+function updateDisplayBtn(on) {
+  displayOn = on;
+  const el = document.getElementById('display-toggle');
+  const lbl = document.getElementById('display-label');
+  el.className = 'display-toggle' + (on ? '' : ' off');
+  lbl.textContent = on ? 'Display On' : 'Display Off';
+}
+
+async function toggleDisplay() {
+  const endpoint = displayOn ? '/api/display/off' : '/api/display/on';
+  try {
+    const r = await fetch(endpoint, { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) updateDisplayBtn(!displayOn);
+  } catch(e) {}
+}
+
+// ── Unit Conversion ────────────────────────────────────────────
+function ftToUnit(ft, unit) {
+  if (unit === 'm')  return Math.round(ft * FT_TO_M);
+  if (unit === 'km') return +(ft * FT_TO_KM).toFixed(3);
+  return ft;
+}
+function unitToFt(val, unit) {
+  if (unit === 'm')  return Math.round(val / FT_TO_M);
+  if (unit === 'km') return Math.round(val / FT_TO_KM);
+  return Math.round(val);
+}
+function setAltUnit(unit, btn) {
+  // Read current displayed values back to feet first
+  const minFt = unitToFt(parseFloat(document.getElementById('min_altitude').value) || 0, altUnit);
+  const maxFt = unitToFt(parseFloat(document.getElementById('max_altitude').value) || 0, altUnit);
+  altUnit = unit;
+  document.getElementById('min_altitude').value = ftToUnit(minFt, unit);
+  document.getElementById('max_altitude').value = ftToUnit(maxFt, unit);
+  // Update all unit labels and buttons
+  document.querySelectorAll('.unit-label').forEach(el => el.textContent = unit);
+  document.querySelectorAll('.unit-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.unit-btn').forEach(b => { if (b.textContent === unit) b.classList.add('active'); });
+}
+
+// ── Eye Toggle ─────────────────────────────────────────────────
+function toggleEye(id, btn) {
+  const inp = document.getElementById(id);
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.style.opacity = inp.type === 'text' ? '1' : '0.5';
+}
+
 // ── Config ─────────────────────────────────────────────────────
 async function loadConfig() {
   const r = await fetch('/api/config');
@@ -245,8 +353,8 @@ async function loadConfig() {
   document.getElementById('loc_lat').value = config.LOCATION_HOME[0];
   document.getElementById('loc_lon').value = config.LOCATION_HOME[1];
   document.getElementById('loc_alt').value = config.LOCATION_HOME[2];
-  document.getElementById('min_altitude').value = config.MIN_ALTITUDE;
-  document.getElementById('max_altitude').value = config.MAX_ALTITUDE;
+  document.getElementById('min_altitude').value = ftToUnit(config.MIN_ALTITUDE, altUnit);
+  document.getElementById('max_altitude').value = ftToUnit(config.MAX_ALTITUDE, altUnit);
   document.getElementById('local_airport').value = config.LOCAL_AIRPORT || '';
   document.getElementById('brightness').value = config.BRIGHTNESS;
   document.getElementById('gpio_slowdown').value = config.GPIO_SLOWDOWN;
@@ -275,8 +383,8 @@ function buildConfigPayload() {
       parseFloat(document.getElementById('loc_lon').value),
       parseFloat(document.getElementById('loc_alt').value),
     ],
-    MIN_ALTITUDE: parseInt(document.getElementById('min_altitude').value),
-    MAX_ALTITUDE: parseInt(document.getElementById('max_altitude').value),
+    MIN_ALTITUDE: unitToFt(parseFloat(document.getElementById('min_altitude').value), altUnit),
+    MAX_ALTITUDE: unitToFt(parseFloat(document.getElementById('max_altitude').value), altUnit),
     LOCAL_AIRPORT: document.getElementById('local_airport').value.trim().toUpperCase(),
     BRIGHTNESS: parseInt(document.getElementById('brightness').value),
     GPIO_SLOWDOWN: parseInt(document.getElementById('gpio_slowdown').value),
@@ -317,65 +425,37 @@ async function saveConfig(restart) {
 // ── Map ────────────────────────────────────────────────────────
 function initMap() {
   if (map) { setTimeout(() => map.invalidateSize(), 100); return; }
-
   map = L.map('map').setView([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], 13);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap', maxZoom: 18
   }).addTo(map);
-
   const z = config.ZONE_HOME;
-
-  // Zone rectangle
-  zoneRect = L.rectangle(
-    [[z.tl_y, z.tl_x], [z.br_y, z.br_x]],
-    { color: '#58a6ff', weight: 2, fillColor: '#58a6ff', fillOpacity: 0.1 }
-  ).addTo(map);
-
-  // Home marker
-  homeMarker = L.circleMarker([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], {
-    radius: 8, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 0.8, weight: 2
-  }).addTo(map).bindTooltip('Home');
-
-  // Corner drag handles
-  const corners = [
-    [z.tl_y, z.tl_x], // NW
-    [z.tl_y, z.br_x], // NE
-    [z.br_y, z.br_x], // SE
-    [z.br_y, z.tl_x], // SW
-  ];
-
-  const handleIcon = L.divIcon({
-    className: '', html: '<div style="width:14px;height:14px;background:#58a6ff;border:2px solid #fff;border-radius:3px;cursor:grab;margin-top:-7px;margin-left:-7px"></div>'
-  });
-
-  corners.forEach((pos, i) => {
+  zoneRect = L.rectangle([[z.tl_y, z.tl_x], [z.br_y, z.br_x]],
+    { color: '#58a6ff', weight: 2, fillColor: '#58a6ff', fillOpacity: 0.1 }).addTo(map);
+  homeMarker = L.circleMarker([config.LOCATION_HOME[0], config.LOCATION_HOME[1]],
+    { radius: 8, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 0.8, weight: 2 }).addTo(map).bindTooltip('Home');
+  const corners = [[z.tl_y, z.tl_x],[z.tl_y, z.br_x],[z.br_y, z.br_x],[z.br_y, z.tl_x]];
+  const handleIcon = L.divIcon({ className: '', html: '<div style="width:14px;height:14px;background:#58a6ff;border:2px solid #fff;border-radius:3px;cursor:grab;margin:-7px 0 0 -7px"></div>' });
+  corners.forEach(pos => {
     const m = L.marker(pos, { icon: handleIcon, draggable: true }).addTo(map);
-    m.on('drag', () => updateZoneFromCorners());
+    m.on('drag', updateZoneFromCorners);
     cornerMarkers.push(m);
   });
-
   updateZoneCoordDisplay();
 }
 
 function updateZoneFromCorners() {
-  const latlngs = cornerMarkers.map(m => m.getLatLng());
-  const lats = latlngs.map(l => l.lat);
-  const lngs = latlngs.map(l => l.lng);
-  const north = Math.max(...lats), south = Math.min(...lats);
-  const west = Math.min(...lngs), east = Math.max(...lngs);
-
-  zoneRect.setBounds([[north, west], [south, east]]);
-
-  document.getElementById('m-tl-y').textContent = north.toFixed(6);
-  document.getElementById('m-br-y').textContent = south.toFixed(6);
-  document.getElementById('m-tl-x').textContent = west.toFixed(6);
-  document.getElementById('m-br-x').textContent = east.toFixed(6);
-
-  // Keep non-dragged corners locked to rectangle
-  cornerMarkers[0].setLatLng([north, west]);
-  cornerMarkers[1].setLatLng([north, east]);
-  cornerMarkers[2].setLatLng([south, east]);
-  cornerMarkers[3].setLatLng([south, west]);
+  const ll = cornerMarkers.map(m => m.getLatLng());
+  const lats = ll.map(l => l.lat), lngs = ll.map(l => l.lng);
+  const n = Math.max(...lats), s = Math.min(...lats);
+  const w = Math.min(...lngs), e = Math.max(...lngs);
+  zoneRect.setBounds([[n, w], [s, e]]);
+  cornerMarkers[0].setLatLng([n, w]); cornerMarkers[1].setLatLng([n, e]);
+  cornerMarkers[2].setLatLng([s, e]); cornerMarkers[3].setLatLng([s, w]);
+  document.getElementById('m-tl-y').textContent = n.toFixed(6);
+  document.getElementById('m-br-y').textContent = s.toFixed(6);
+  document.getElementById('m-tl-x').textContent = w.toFixed(6);
+  document.getElementById('m-br-x').textContent = e.toFixed(6);
 }
 
 function updateZoneCoordDisplay() {
@@ -387,25 +467,21 @@ function updateZoneCoordDisplay() {
 }
 
 function saveFromMap() {
-  const bounds = zoneRect.getBounds();
-  document.getElementById('zone_tl_y').value = bounds.getNorth().toFixed(6);
-  document.getElementById('zone_tl_x').value = bounds.getWest().toFixed(6);
-  document.getElementById('zone_br_y').value = bounds.getSouth().toFixed(6);
-  document.getElementById('zone_br_x').value = bounds.getEast().toFixed(6);
+  const b = zoneRect.getBounds();
+  document.getElementById('zone_tl_y').value = b.getNorth().toFixed(6);
+  document.getElementById('zone_tl_x').value = b.getWest().toFixed(6);
+  document.getElementById('zone_br_y').value = b.getSouth().toFixed(6);
+  document.getElementById('zone_br_x').value = b.getEast().toFixed(6);
   saveConfig(false);
 }
 
 // ── Log ────────────────────────────────────────────────────────
 function initLog() {
   if (evtSource) return;
-
-  // Load history first
-  fetch('/api/log/history').then(r => r.json()).then(data => {
-    data.lines.forEach(line => appendLog(line));
+  fetch('/api/log/history').then(r => r.json()).then(d => {
+    d.lines.forEach(appendLog);
     scrollLog();
   });
-
-  // Then stream live
   evtSource = new EventSource('/api/log/stream');
   evtSource.onmessage = e => {
     appendLog(e.data);
@@ -413,7 +489,7 @@ function initLog() {
   };
   evtSource.onerror = () => {
     document.getElementById('log-status').textContent = '● DISCONNECTED';
-    document.getElementById('log-status').className = 'chip';
+    document.getElementById('log-status').className = 'chip red';
   };
 }
 
@@ -421,36 +497,27 @@ function appendLog(line) {
   const el = document.createElement('div');
   el.className = 'log-line ' + classifyLine(line);
   el.textContent = line;
-  document.getElementById('log-output').appendChild(el);
+  const out = document.getElementById('log-output');
+  out.appendChild(el);
+  while (out.children.length > 2000) out.removeChild(out.firstChild);
   logLineCount++;
   document.getElementById('log-stats').textContent = logLineCount + ' lines';
-  // Trim to 2000 lines
-  const out = document.getElementById('log-output');
-  while (out.children.length > 2000) out.removeChild(out.firstChild);
 }
 
 function classifyLine(line) {
-  if (line.includes('-> ')) return 'result';
-  if (line.includes('in_zone=True')) return 'inzone';
-  if (line.includes("plane=''") || line.includes('plane= ')) return 'nodata';
-  if (line.toLowerCase().includes('error') || line.toLowerCase().includes('exception')) return 'error';
-  if (line.includes('in_zone=False')) return 'dim';
+  if (line.includes('-> '))           return 'result';
+  if (line.includes('in_zone=True'))  return 'inzone';
+  if (line.includes("plane=''"))      return 'nodata';
+  if (/error|exception/i.test(line))  return 'error';
   return '';
 }
 
-function scrollLog() {
-  const out = document.getElementById('log-output');
-  out.scrollTop = out.scrollHeight;
-}
-
-function clearLog() {
-  document.getElementById('log-output').innerHTML = '';
-  logLineCount = 0;
-  document.getElementById('log-stats').textContent = '0 lines';
-}
+function scrollLog() { const o = document.getElementById('log-output'); o.scrollTop = o.scrollHeight; }
+function clearLog() { document.getElementById('log-output').innerHTML = ''; logLineCount = 0; document.getElementById('log-stats').textContent = '0 lines'; }
 
 // ── Init ───────────────────────────────────────────────────────
 loadConfig();
+checkDisplayStatus();
 </script>
 </body>
 </html>
