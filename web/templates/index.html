@@ -33,11 +33,40 @@ nav button { background: none; border: none; color: var(--muted); padding: 8px 1
 nav button:hover { color: var(--text); background: rgba(255,255,255,.06); }
 nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 
-@media (max-width: 520px) {
-  header { flex-wrap: wrap; height: auto; padding: 8px 12px; gap: 6px; }
-  header h1 { font-size: 15px; }
-  nav { width: 100%; justify-content: space-around; border-top: 1px solid var(--border); padding-top: 4px; margin-left: 0; }
-  nav button { padding: 6px 8px; font-size: 12px; }
+/* Nav separator — vertical bar on desktop, horizontal rule in mobile dropdown */
+.nav-sep { width: 1px; background: var(--border); margin: 8px 6px; align-self: stretch; flex-shrink: 0; }
+
+#hamburger { display: none; }
+
+@media (max-width: 640px) {
+  header { padding: 0 10px; gap: 5px; }
+  header h1 { font-size: 14px; }
+  #hamburger {
+    display: flex; align-items: center; justify-content: center;
+    margin-left: auto; flex-shrink: 0;
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    width: 34px; height: 34px; border-radius: 6px; cursor: pointer; font-size: 18px;
+    transition: all .15s;
+  }
+  #hamburger:hover, #hamburger.open { border-color: var(--accent); color: var(--accent); }
+  nav {
+    display: none; position: fixed; top: 56px; left: 0; right: 0;
+    flex-direction: column; background: var(--surface);
+    border-bottom: 2px solid var(--accent);
+    box-shadow: 0 8px 28px rgba(0,0,0,.6); z-index: 1000; margin-left: 0;
+  }
+  nav.open { display: flex; }
+  nav button { border-radius: 0; padding: 13px 20px; font-size: 14px; text-align: left; border-bottom: 1px solid var(--border); width: 100%; }
+  /* Toggles inside nav dropdown: full-width flat rows instead of pills */
+  .nav-sep { width: 100%; height: 1px; margin: 0; align-self: auto; }
+  nav .display-toggle {
+    border-radius: 0; width: 100%; background: transparent;
+    border: none; border-bottom: 1px solid var(--border);
+    padding: 13px 20px; justify-content: flex-start; gap: 12px;
+    font-size: 14px;
+  }
+  nav .display-toggle:hover { border-color: transparent; border-bottom-color: var(--border); background: rgba(255,255,255,.04); }
+  nav > *:last-child { border-bottom: none !important; }
 }
 
 /* TABS */
@@ -241,22 +270,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 
 <header>
   <h1>✈ Flight<span>Tracker</span></h1>
-  <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Dim/undim LED display (service keeps running)" style="visibility:hidden">
-    <div class="dot"></div>
-    <span id="display-label">Display On</span>
-  </div>
-  <div class="display-toggle off" id="night-toggle" onclick="toggleNight()" title="Dim display to night brightness without turning it off" style="visibility:hidden">
-    <div class="dot"></div>
-    <span id="night-label">Night Off</span>
-  </div>
-  <div class="display-toggle" id="service-toggle" onclick="toggleService()" title="Stop/start FlightTracker service (stops API polling)" style="visibility:hidden">
-    <div class="dot"></div>
-    <span id="service-label">Service On</span>
-  </div>
-  <div class="display-toggle" id="apis-toggle" onclick="toggleAPIs()" title="Enable/disable limited APIs: AirLabs + FlightAware (falls back to OpenSky + adsbdb)" style="visibility:hidden">
-    <div class="dot"></div>
-    <span id="apis-label">APIs On</span>
-  </div>
+  <button id="hamburger" onclick="toggleHamburger()" aria-label="Menu" title="Menu">☰</button>
   <nav>
     <button class="active" onclick="showTab('config',this)">⚙ Config</button>
     <button onclick="showTab('display',this)">📺 Display</button>
@@ -264,6 +278,23 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <button onclick="showTab('apis',this)">📡 APIs</button>
     <button onclick="showTab('rules',this)">✏️ Rules</button>
     <button onclick="showTab('log',this)">📋 Log</button>
+    <div class="nav-sep"></div>
+    <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Dim/undim LED display (service keeps running)" style="display:none">
+      <div class="dot"></div>
+      <span id="display-label">Display On</span>
+    </div>
+    <div class="display-toggle off" id="night-toggle" onclick="toggleNight()" title="Dim display to night brightness without turning it off" style="display:none">
+      <div class="dot"></div>
+      <span id="night-label">Night Off</span>
+    </div>
+    <div class="display-toggle" id="service-toggle" onclick="toggleService()" title="Stop/start FlightTracker service (stops API polling)" style="display:none">
+      <div class="dot"></div>
+      <span id="service-label">Service On</span>
+    </div>
+    <div class="display-toggle" id="apis-toggle" onclick="toggleAPIs()" title="Enable/disable limited APIs: AirLabs + FlightAware (falls back to OpenSky + adsbdb)" style="display:none">
+      <div class="dot"></div>
+      <span id="apis-label">APIs On</span>
+    </div>
   </nav>
 </header>
 
@@ -578,7 +609,20 @@ let map, zoneRect, homeMarker, cornerMarkers = [];
 let evtSource = null;
 
 // ── Tabs ───────────────────────────────────────────────────────
+function toggleHamburger() {
+  const nav = document.querySelector('nav');
+  const btn = document.getElementById('hamburger');
+  nav.classList.toggle('open');
+  btn.classList.toggle('open', nav.classList.contains('open'));
+}
+
+function closeHamburger() {
+  document.querySelector('nav').classList.remove('open');
+  document.getElementById('hamburger').classList.remove('open');
+}
+
 function showTab(name, btn) {
+  closeHamburger();
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById(name + '-tab').classList.add('active');
@@ -589,6 +633,15 @@ function showTab(name, btn) {
   if (name === 'apis')    initAPIsTab(); else stopAPIsTab();
   if (name === 'rules')   initRulesTab();
 }
+
+// Close hamburger menu when clicking outside of it
+document.addEventListener('click', e => {
+  const nav = document.querySelector('nav');
+  const hbtn = document.getElementById('hamburger');
+  if (nav.classList.contains('open') && !nav.contains(e.target) && e.target !== hbtn) {
+    closeHamburger();
+  }
+});
 
 // ── Combined status fetch on load ──────────────────────────────
 async function checkInitialStatus(retries = 3) {
@@ -607,10 +660,10 @@ async function checkInitialStatus(retries = 3) {
     }
     // Exhausted retries — fall through and show toggles with default state
   }
-  document.getElementById('display-toggle').style.visibility = 'visible';
-  document.getElementById('night-toggle').style.visibility = 'visible';
-  document.getElementById('service-toggle').style.visibility = 'visible';
-  document.getElementById('apis-toggle').style.visibility = 'visible';
+  document.getElementById('display-toggle').style.removeProperty('display');
+  document.getElementById('night-toggle').style.removeProperty('display');
+  document.getElementById('service-toggle').style.removeProperty('display');
+  document.getElementById('apis-toggle').style.removeProperty('display');
 }
 
 async function checkDisplayStatus() {
