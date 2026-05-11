@@ -407,12 +407,13 @@ def api_stack():
     return jsonify({
         "stack": [
             {
-                "priority": 1,
-                "name":     "adsbdb",
-                "type":     "Route data (static historical DB)",
-                "url":      "https://api.adsbdb.com",
-                "cost":     "Free — no key required",
-                "key_set":  False,
+                "priority":    1,
+                "name":        "adsbdb",
+                "type":        "Route data (static historical DB)",
+                "url":         "https://api.adsbdb.com",
+                "cost":        "Free — no key required",
+                "key_set":     False,
+                "requires_key": False,
                 "notes":    "Queried for every new callsign. Result trusted immediately "
                             "when origin is LAS or VGT AND passes a geographic plausibility "
                             "check. Handles the majority of LAS-departure commercial traffic. "
@@ -423,8 +424,9 @@ def api_stack():
                 "name":     "OpenSky",
                 "type":     "Route data (real-time, by hex — free, unlimited)",
                 "url":      "https://opensky-network.org",
-                "cost":     "Free with credentials — no monthly limit",
-                "key_set":  bool(cfg.get("OPENSKY_CLIENT_ID")),
+                "cost":        "Free with credentials — no monthly limit",
+                "key_set":     bool(cfg.get("OPENSKY_CLIENT_ID")),
+                "requires_key": True,
                 "notes":    "Queried before AirLabs to conserve the monthly quota. "
                             "Trusted without coordinate verification when a local airport "
                             "(LAS/VGT) is confirmed by the aircraft's vertical rate: "
@@ -440,8 +442,9 @@ def api_stack():
                 "name":     "AirLabs",
                 "type":     "Route data (real-time, by callsign)",
                 "url":      "https://airlabs.co",
-                "cost":     "Free — 1,000 calls/month",
-                "key_set":  bool(cfg.get("AIRLABS_API_KEY")),
+                "cost":        "Free — 1,000 calls/month",
+                "key_set":     bool(cfg.get("AIRLABS_API_KEY")),
+                "requires_key": True,
                 "notes":    "Now mainly handles through-traffic that OpenSky couldn't "
                             "auto-trust. Returns airport coordinates, enabling the full "
                             "geometry plausibility check. Requires an ICAO callsign "
@@ -453,8 +456,9 @@ def api_stack():
                 "name":     "FlightAware AeroAPI",
                 "type":     "Route data (real-time, paid)",
                 "url":      "https://aeroapi.flightaware.com",
-                "cost":     f"${FEEDER_MONTHLY_CREDIT:.2f}/month feeder credit — ${AEROAPI_COST_PER_CALL:.3f}/call thereafter",
-                "key_set":  bool(cfg.get("FLIGHTAWARE_API_KEY")),
+                "cost":        f"${FEEDER_MONTHLY_CREDIT:.2f}/month feeder credit — ${AEROAPI_COST_PER_CALL:.3f}/call thereafter",
+                "key_set":     bool(cfg.get("FLIGHTAWARE_API_KEY")),
+                "requires_key": True,
                 "notes":    "True last resort — only called when all free sources return "
                             "no route. Cascades automatically on 402 (credit exhausted) "
                             "or 429. With healthy upstream sources, expect <5 calls/day.",
@@ -464,8 +468,9 @@ def api_stack():
                 "name":     "LOCAL_AIRPORT heuristic",
                 "type":     "Heuristic fallback",
                 "url":      None,
-                "cost":     "Free",
-                "key_set":  bool(cfg.get("LOCAL_AIRPORT")),
+                "cost":        "Free",
+                "key_set":     bool(cfg.get("LOCAL_AIRPORT")),
+                "requires_key": True,
                 "notes":    "Fills one missing endpoint using vertical speed when all "
                             "APIs have returned nothing: climbing → LOCAL_AIRPORT is "
                             "origin; descending → LOCAL_AIRPORT is destination.",
@@ -475,8 +480,9 @@ def api_stack():
                 "name":     "airplanes.live",
                 "type":     "Aircraft type lookup (not in route chain)",
                 "url":      "https://api.airplanes.live",
-                "cost":     "Free — no key required",
-                "key_set":  False,
+                "cost":        "Free — no key required",
+                "key_set":     False,
+                "requires_key": False,
                 "notes":    "Used for aircraft type/model (e.g. 'BOEING 737-800'). "
                             "Separate from the route chain; falls back to adsbdb "
                             "aircraft endpoint if needed. Results cached 24 hr. "

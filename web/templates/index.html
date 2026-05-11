@@ -180,6 +180,15 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .rule-note { color: var(--muted); font-size: 12px; }
 .rules-empty { padding: 28px 18px; color: var(--muted); font-size: 13px; text-align: center; }
 .rules-hint { font-size: 12px; color: var(--muted); line-height: 1.7; padding: 10px 18px 14px; border-top: 1px solid var(--border); }
+.rules-table tr.editing td { background: rgba(88,166,255,.04); }
+.rule-edit-input { width: 100%; background: var(--bg); border: 1px solid var(--accent); color: var(--text); padding: 4px 8px; border-radius: 4px; font-size: 13px; font-family: inherit; outline: none; min-width: 0; }
+.rule-edit-input:focus { border-color: #79c0ff; }
+.rule-edit-input.mono { font-family: 'SFMono-Regular', monospace; text-transform: uppercase; }
+.drag-handle { cursor: grab; color: var(--border); padding: 0 4px; font-size: 15px; user-select: none; transition: color .15s; }
+.drag-handle:hover { color: var(--muted); }
+.rules-table tr.drag-over > td:first-child { border-left: 2px solid var(--accent); }
+.rules-table tr.drag-over td { background: rgba(88,166,255,.07); }
+.rules-table tr.dragging { opacity: 0.35; }
 .log-line.override { color: #fbbf24; }
 .log-line.test     { color: #22d3ee; font-weight: 500; }
 
@@ -1201,11 +1210,11 @@ function renderStack(stack) {
   container.innerHTML = sorted.map(api => {
     const prioLabel = api.priority === 0 ? '—' : `#${api.priority}`;
     const prioClass = api.priority === 0 ? 'stack-priority p0' : 'stack-priority';
-    const keyBadge  = api.key_set === false && api.priority !== 0
-      ? `<span class="badge no-key">no key</span>`
-      : api.key_set === true
+    const keyBadge  = !api.requires_key
+      ? `<span class="badge free">no key needed</span>`
+      : api.key_set
         ? `<span class="badge key-set">key set</span>`
-        : `<span class="badge free">no key needed</span>`;
+        : `<span class="badge no-key">no key</span>`;
     const urlLink = api.url
       ? `<a href="${api.url}" target="_blank" style="color:var(--accent);font-size:11px;text-decoration:none">${api.url.replace('https://','')}</a>`
       : '';
@@ -1227,6 +1236,8 @@ function renderStack(stack) {
 // ── Override Rules ─────────────────────────────────────────────
 let _rules = [];
 let _rulesLoaded = false;
+let _editingIdx = null;
+let _dragIdx    = null;
 
 async function initRulesTab() {
   // Only fetch from server on first visit — subsequent visits re-render
@@ -1246,6 +1257,11 @@ async function initRulesTab() {
   }
 }
 
+function _editKeydown(e, i) {
+  if (e.key === 'Enter')  saveEditRule(i);
+  if (e.key === 'Escape') cancelEdit();
+}
+
 function renderRules() {
   const wrap = document.getElementById('rules-table-wrap');
   const countEl = document.getElementById('rules-count');
@@ -1256,30 +1272,149 @@ function renderRules() {
     return;
   }
 
+  const canDrag = _editingIdx === null;
+
+  const rows = _rules.map((r, i) => {
+    if (i === _editingIdx) {
+      return `
+        <tr class="editing">
+          <td><span class="drag-handle" style="opacity:.2;cursor:default">⠿</span></td>
+          <td><input id="edit-pattern" class="rule-edit-input mono" value="${escHtml(r.pattern)}"     onkeydown="_editKeydown(event,${i})"></td>
+          <td><input id="edit-origin"  class="rule-edit-input mono" value="${escHtml(r.origin)}"      onkeydown="_editKeydown(event,${i})" maxlength="4" style="max-width:70px"></td>
+          <td><input id="edit-dest"    class="rule-edit-input mono" value="${escHtml(r.destination)}" onkeydown="_editKeydown(event,${i})" maxlength="4" style="max-width:70px"></td>
+          <td><input id="edit-plane"   class="rule-edit-input"      value="${escHtml(r.plane||'')}"   onkeydown="_editKeydown(event,${i})"></td>
+          <td><input id="edit-note"    class="rule-edit-input"      value="${escHtml(r.note||'')}"    onkeydown="_editKeydown(event,${i})"></td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-primary"   style="padding:3px 10px;font-size:11px;margin-right:4px" onclick="saveEditRule(${i})">✓ Save</button>
+            <button class="btn btn-secondary" style="padding:3px 10px;font-size:11px"                  onclick="cancelEdit()">Cancel</button>
+          </td>
+        </tr>`;
+    }
+    const dragAttrs = canDrag
+      ? `draggable="true" ondragstart="dragStart(event,${i})" ondragover="dragOver(event,${i})" ondrop="dragDrop(event,${i})" ondragend="dragEnd()" ondragleave="dragLeave(event)"`
+      : '';
+    return `
+      <tr ${dragAttrs}>
+        <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
+        <td><span class="rule-pattern">${escHtml(r.pattern)}</span></td>
+        <td>${r.origin      ? `<span class="rule-airport">${escHtml(r.origin)}</span>`      : '<span class="rule-blank">—</span>'}</td>
+        <td>${r.destination ? `<span class="rule-airport">${escHtml(r.destination)}</span>` : '<span class="rule-blank">—</span>'}</td>
+        <td><span class="rule-note">${escHtml(r.plane || '')}</span></td>
+        <td><span class="rule-note">${escHtml(r.note  || '')}</span></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-secondary" style="padding:3px 10px;font-size:11px;margin-right:4px" onclick="editRule(${i})">✎ Edit</button>
+          <button class="btn btn-danger"    style="padding:3px 10px;font-size:11px"                  onclick="deleteRule(${i})">✕</button>
+        </td>
+      </tr>`;
+  }).join('');
+
   wrap.innerHTML = `
     <table class="rules-table">
-      <thead>
-        <tr>
-          <th>Pattern</th>
-          <th>Origin</th>
-          <th>Dest</th>
-          <th>Plane</th>
-          <th>Note</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${_rules.map((r, i) => `
-          <tr>
-            <td><span class="rule-pattern">${escHtml(r.pattern)}</span></td>
-            <td>${r.origin    ? `<span class="rule-airport">${escHtml(r.origin)}</span>`      : '<span class="rule-blank">—</span>'}</td>
-            <td>${r.destination ? `<span class="rule-airport">${escHtml(r.destination)}</span>` : '<span class="rule-blank">—</span>'}</td>
-            <td><span class="rule-note">${escHtml(r.plane || '')}</span></td>
-            <td><span class="rule-note">${escHtml(r.note || '')}</span></td>
-            <td><button class="btn btn-danger" style="padding:3px 10px;font-size:11px" onclick="deleteRule(${i})">✕</button></td>
-          </tr>`).join('')}
-      </tbody>
+      <thead><tr>
+        <th style="width:24px"></th>
+        <th>Pattern</th><th>Origin</th><th>Dest</th><th>Plane</th><th>Note</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
     </table>`;
+
+  // Focus first field if a row just entered edit mode
+  if (_editingIdx !== null) {
+    setTimeout(() => { const el = document.getElementById('edit-pattern'); if (el) el.focus(); }, 0);
+  }
+}
+
+function editRule(i) {
+  if (_editingIdx !== null && _editingIdx !== i) {
+    showToast('Changes discarded — editing another rule', 'err');
+  }
+  _editingIdx = i;
+  renderRules();
+}
+
+function cancelEdit() {
+  _editingIdx = null;
+  renderRules();
+}
+
+// ── Drag-to-reorder ────────────────────────────────────────────
+function dragStart(e, i) {
+  _dragIdx = i;
+  e.dataTransfer.effectAllowed = 'move';
+  // Small delay so the drag ghost renders before we dim the row
+  setTimeout(() => {
+    const rows = document.querySelectorAll('.rules-table tbody tr');
+    if (rows[i]) rows[i].classList.add('dragging');
+  }, 0);
+}
+
+function dragOver(e, i) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  // Clear previous highlight and set new one
+  document.querySelectorAll('.rules-table tbody tr').forEach((r, idx) => {
+    r.classList.toggle('drag-over', idx === i && idx !== _dragIdx);
+  });
+}
+
+function dragLeave(e) {
+  // Only clear if we've truly left the row (not just moved to a child element)
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove('drag-over');
+  }
+}
+
+async function dragDrop(e, i) {
+  e.preventDefault();
+  dragEnd();
+  if (_dragIdx === null || _dragIdx === i) { _dragIdx = null; return; }
+
+  const moved = _rules.splice(_dragIdx, 1)[0];
+  _rules.splice(i, 0, moved);
+
+  const ok = await saveRules();
+  if (ok) {
+    renderRules();
+    showToast('✓ Rules reordered', 'ok');
+  } else {
+    // Revert
+    const reverted = _rules.splice(i, 1)[0];
+    _rules.splice(_dragIdx, 0, reverted);
+    renderRules();
+  }
+  _dragIdx = null;
+}
+
+function dragEnd() {
+  document.querySelectorAll('.rules-table tbody tr').forEach(r => {
+    r.classList.remove('dragging', 'drag-over');
+  });
+}
+
+async function saveEditRule(i) {
+  const pattern = (document.getElementById('edit-pattern').value || '').trim().toUpperCase();
+  if (!pattern) { showToast('✗ Pattern is required', 'err'); return; }
+  if (_rules.some((r, idx) => idx !== i && r.pattern === pattern)) {
+    showToast(`✗ Pattern "${pattern}" already exists`, 'err'); return;
+  }
+
+  const original = { ..._rules[i] };
+  _rules[i] = {
+    pattern,
+    origin:      (document.getElementById('edit-origin').value  || '').trim().toUpperCase(),
+    destination: (document.getElementById('edit-dest').value    || '').trim().toUpperCase(),
+    plane:       (document.getElementById('edit-plane').value   || '').trim(),
+    note:        (document.getElementById('edit-note').value    || '').trim(),
+  };
+
+  const ok = await saveRules();
+  if (ok) {
+    _editingIdx = null;
+    renderRules();
+    showToast(`✓ Rule updated: ${pattern}`, 'ok');
+  } else {
+    _rules[i] = original;
+    renderRules();
+  }
 }
 
 async function addRule() {
@@ -1313,6 +1448,7 @@ async function addRule() {
 }
 
 async function deleteRule(i) {
+  _editingIdx = null;
   const removed = _rules.splice(i, 1)[0];
   const ok = await saveRules();
   if (ok) {
@@ -1320,7 +1456,7 @@ async function deleteRule(i) {
     showToast(`✓ Rule removed: ${removed.pattern}`, 'ok');
   } else {
     _rules.splice(i, 0, removed); // revert on failure
-    renderRules(); // re-render so the deleted row reappears
+    renderRules();
   }
 }
 
@@ -1350,6 +1486,113 @@ async function saveRules() {
     showToast(msg, 'err');
     return false;
   }
+}
+
+// ── Airline name lookup ────────────────────────────────────────
+const AIRLINE_NAMES = {
+  // ── US Major ──────────────────────────────────────────────────
+  'AAL':'American Airlines',      'DAL':'Delta Air Lines',
+  'UAL':'United Airlines',        'SWA':'Southwest Airlines',
+  'ASA':'Alaska Airlines',        'JBU':'JetBlue Airways',
+  'NKS':'Spirit Airlines',        'FFT':'Frontier Airlines',
+  'HAL':'Hawaiian Airlines',      'SCX':'Sun Country Airlines',
+  // ── US Regional ───────────────────────────────────────────────
+  'SKW':'SkyWest Airlines',       'RPA':'Republic Airways',
+  'ENY':'Envoy Air',              'PSA':'PSA Airlines',
+  'ASH':'Mesa Airlines',          'AWI':'Air Wisconsin',
+  'PDT':'Piedmont Airlines',      'GJS':'GoJet Airlines',
+  'QXE':'Horizon Air',            'SIL':'Silver Airways',
+  'TSQ':'Trans States Airlines',  'CHQ':'Chautauqua Airlines',
+  'CPZ':'Comair',                 'JZA':'Jazz Aviation',
+  // ── US Cargo ──────────────────────────────────────────────────
+  'FDX':'FedEx Express',          'UPS':'UPS Airlines',
+  'GTI':'Atlas Air',              'ABX':'ABX Air',
+  'PAC':'Polar Air Cargo',        'SOO':'Southern Air',
+  'CKS':'Kalitta Air',            'ATN':'Air Transport Intl',
+  'OAE':'Omni Air International',
+  // ── US Charter / Business ─────────────────────────────────────
+  'EJA':'NetJets',                'LXJ':'Flexjet',
+  'JSX':'JSX',
+  // ── Mexico ────────────────────────────────────────────────────
+  'AMX':'Aeromexico',             'VOI':'Volaris',
+  'VIV':'VivaAerobus',            'AIJ':'Interjet',
+  'MXY':'Mexicana',
+  // ── Canada ────────────────────────────────────────────────────
+  'ACA':'Air Canada',             'WJA':'WestJet',
+  'TRS':'Air Transat',            'SWG':'Sunwing Airlines',
+  'CJT':'Cargojet',
+  // ── UK ────────────────────────────────────────────────────────
+  'BAW':'British Airways',        'VIR':'Virgin Atlantic',
+  'EZY':'easyJet',                'TOM':'TUI Airways',
+  'EXS':'Jet2',
+  // ── Germany ───────────────────────────────────────────────────
+  'DLH':'Lufthansa',              'EWG':'Eurowings',
+  'CFG':'Condor',                 'GEC':'Lufthansa Cargo',
+  // ── France ────────────────────────────────────────────────────
+  'AFR':'Air France',
+  // ── Netherlands ───────────────────────────────────────────────
+  'KLM':'KLM',
+  // ── Spain ─────────────────────────────────────────────────────
+  'IBE':'Iberia',                 'VLG':'Vueling',
+  'IBS':'Iberia Express',
+  // ── Italy ─────────────────────────────────────────────────────
+  'AZA':'ITA Airways',
+  // ── Ireland ───────────────────────────────────────────────────
+  'EIN':'Aer Lingus',             'RYR':'Ryanair',
+  // ── Scandinavia / Nordic ──────────────────────────────────────
+  'SAS':'Scandinavian Airlines',  'FIN':'Finnair',
+  'NOZ':'Norwegian Air',          'ICE':'Icelandair',
+  // ── Switzerland / Austria / Portugal ─────────────────────────
+  'SWR':'SWISS',                  'AUA':'Austrian Airlines',
+  'TAP':'TAP Air Portugal',
+  // ── Belgium / Poland / Hungary / Czech / Romania / Greece ─────
+  'BEL':'Brussels Airlines',      'LOT':'LOT Polish Airlines',
+  'WZZ':'Wizz Air',               'CSA':'Czech Airlines',
+  'ROT':'TAROM',                  'AEE':'Aegean Airlines',
+  'OAL':'Olympic Air',
+  // ── Turkey / Russia ───────────────────────────────────────────
+  'THY':'Turkish Airlines',       'PGT':'Pegasus Airlines',
+  'AFL':'Aeroflot',               'SBI':'S7 Airlines',
+  // ── Middle East ───────────────────────────────────────────────
+  'UAE':'Emirates',               'QTR':'Qatar Airways',
+  'ETD':'Etihad Airways',         'SVA':'Saudia',
+  'GFA':'Gulf Air',               'MSR':'EgyptAir',
+  'ISR':'El Al',                  'MEA':'Middle East Airlines',
+  'RJA':'Royal Jordanian',        'OMA':'Oman Air',
+  'FDB':'flydubai',               'ABY':'Air Arabia',
+  'KAC':'Kuwait Airways',
+  // ── Asia-Pacific ──────────────────────────────────────────────
+  'SIA':'Singapore Airlines',     'CPA':'Cathay Pacific',
+  'JAL':'Japan Airlines',         'ANA':'All Nippon Airways',
+  'KAL':'Korean Air',             'AAR':'Asiana Airlines',
+  'CSN':'China Southern',         'CCA':'Air China',
+  'CES':'China Eastern',          'CAL':'China Airlines',
+  'MAS':'Malaysia Airlines',      'THA':'Thai Airways',
+  'GIA':'Garuda Indonesia',       'PAL':'Philippine Airlines',
+  'EVA':'EVA Air',                'QFA':'Qantas',
+  'ANZ':'Air New Zealand',        'AIC':'Air India',
+  'IGO':'IndiGo',                 'JST':'Jetstar',
+  'TGW':'Scoot',                  'APJ':'Peach Aviation',
+  'LNI':'Lion Air',               'CEB':'Cebu Pacific',
+  'HVN':'Vietnam Airlines',       'VJC':'VietJet Air',
+  'AXM':'AirAsia',                'AIQ':'Thai AirAsia',
+  // ── Latin America ─────────────────────────────────────────────
+  'LAN':'LATAM Airlines',         'TAM':'LATAM Brasil',
+  'AVA':'Avianca',                'GOL':'GOL Airlines',
+  'AZU':'Azul Airlines',          'CMP':'Copa Airlines',
+  'ARG':'Aerolíneas Argentinas',  'AEA':'Air Europa',
+  'SKU':'Sky Airline',
+  // ── Africa ────────────────────────────────────────────────────
+  'ETH':'Ethiopian Airlines',     'SAA':'South African Airways',
+  'KQA':'Kenya Airways',          'RAM':'Royal Air Maroc',
+  'DAH':'Air Algérie',            'TAR':'Tunisair',
+};
+
+function airlineName(callsign) {
+  if (!callsign) return null;
+  // Extract 2–3 letter ICAO prefix followed by digits: UAL2175 → UAL
+  const m = callsign.match(/^([A-Z]{2,3})(?=\d)/);
+  return m ? (AIRLINE_NAMES[m[1]] || null) : null;
 }
 
 // ── Test Flight ────────────────────────────────────────────────
@@ -1553,13 +1796,14 @@ function renderTestResult(d) {
 
   el.innerHTML = `
     <div style="padding:14px 18px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap">
         <span style="font-size:16px;font-weight:700;font-family:'SFMono-Regular',monospace">${escHtml(d.callsign)}</span>
         ${d.tail ? `<span style="font-size:13px;color:var(--muted);font-family:'SFMono-Regular',monospace">${escHtml(d.tail)}</span>` : ''}
         ${hexStr}
         <span style="font-size:12px">${airborneEl}</span>
         ${modeLabel}
       </div>
+      ${(n => n ? `<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${escHtml(n)}</div>` : '')(airlineName(d.callsign))}
       ${ovHtml}
       ${stepsSection}
       <div class="test-final">

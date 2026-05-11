@@ -1007,25 +1007,30 @@ def get_aircraft_type(hex_code):
         pass
 
     # 3. OpenSky aircraft metadata (public endpoint — no token required)
-    try:
-        r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            plane = (data.get("model") or data.get("typecode") or "").strip()
-            if plane:
-                with _cache_lock:
-                    _aircraft_cache[hex_code] = (plane, "opensky:meta", now)
-                    _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
-                return plane, "opensky:meta"
-    except Exception:
-        pass
+    if not _in_backoff("opensky_meta"):
+        try:
+            r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                plane = (data.get("model") or data.get("typecode") or "").strip()
+                if plane:
+                    with _cache_lock:
+                        _aircraft_cache[hex_code] = (plane, "opensky:meta", now)
+                        _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+                    return plane, "opensky:meta"
+            elif r.status_code == 429:
+                _set_backoff("opensky_meta", secs=3600)
+            elif r.status_code in (401, 403):
+                _set_backoff("opensky_meta", secs=86400)
+        except Exception:
+            pass
 
     # Cache the miss so all 3 APIs aren't retried on every poll cycle.
     # AIRCRAFT_MISS_TTL (5 min) keeps retries reasonable without hammering the
     # APIs for aircraft that genuinely have no type data yet (e.g. new deliveries).
     with _cache_lock:
         _aircraft_cache[hex_code] = ("", "miss", now)
-        _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+        _prune_cache(_aircraft_cache, AIRCRAFT_MISS_TTL)
     return "", "miss"
 
 
@@ -1061,6 +1066,7 @@ def run_test_lookup(callsign, use_cache=True):
 
     result = {
         "callsign":          cs,
+        "tail":              "",
         "use_cache":         use_cache,
         "hex_code":          "",
         "airborne":          False,
@@ -1104,7 +1110,8 @@ def run_test_lookup(callsign, use_cache=True):
                     plane_lat      = ac.get("lat")
                     plane_lon      = ac.get("lon")
                     vertical_speed = ac.get("baro_rate") or ac.get("geom_rate") or 0
-                    altitude_ft    = ac.get("alt_baro") or ac.get("alt_geom") or 10000
+                    _alt_raw    = ac.get("alt_baro") or ac.get("alt_geom") or 10000
+                    altitude_ft = _alt_raw if isinstance(_alt_raw, (int, float)) else 10000
                     _live_type_cached = (ac.get("desc") or ac.get("t") or "").strip()
                     result.update({
                         "hex_code":       hex_code,
