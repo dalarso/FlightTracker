@@ -20,43 +20,42 @@ from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 
 def callsigns_match(flights_a, flights_b):
-    get_callsigns = lambda flights: [f["callsign"] for f in flights]
-    callsigns_a = set(get_callsigns(flights_a))
-    callsigns_b = set(get_callsigns(flights_b))
-
-    return callsigns_a == callsigns_b
+    return {f["callsign"] for f in flights_a} == {f["callsign"] for f in flights_b}
 
 
 try:
-    # Attempt to load config data
     from config import (
         BRIGHTNESS,
         GPIO_SLOWDOWN,
         HAT_PWM_ENABLED
     )
-
 except (ImportError, NameError):
-    # If there's no config data
     BRIGHTNESS = 100
     GPIO_SLOWDOWN = 1
     HAT_PWM_ENABLED = True
 
 try:
+    from config import NIGHT_BRIGHTNESS
+except (ImportError, NameError):
+    NIGHT_BRIGHTNESS = 20
+
+try:
     # Attempt to load experimental config data
     from config import LOADING_LED_ENABLED
 
-except (ModuleNotFoundError, NameError, ImportError):
+except (ImportError, NameError):
     # If there's no experimental config data
     LOADING_LED_ENABLED = False
 
-PAUSE_FLAG = "/tmp/ft_paused"
+PAUSE_FLAG  = "/tmp/ft_paused"
+NIGHT_FLAG  = "/tmp/ft_night"
 
 
 class Display(
     WeatherScene,
     FlightDetailsScene,
     JourneyScene,
-    LoadingLEDScene if LOADING_LED_ENABLED else LoadingPulseScene ,
+    LoadingLEDScene if LOADING_LED_ENABLED else LoadingPulseScene,
     PlaneDetailsScene,
     ClockScene,
     DayScene,
@@ -96,12 +95,16 @@ class Display(
         self.overhead = Overhead()
         self.overhead.grab_data()
 
-        # Initalise animator and scenes
+        # Initialise animator and scenes
         super().__init__()
 
         # Overwrite any default settings from
         # Animator or Scenes
         self.delay = frames.PERIOD
+
+        # Track pause/night state so we can force redraws on transitions
+        self._was_paused = os.path.exists(PAUSE_FLAG)
+        self._was_night = os.path.exists(NIGHT_FLAG)
 
     def draw_square(self, x0, y0, x1, y1, colour):
         for x in range(x0, x1):
@@ -133,7 +136,7 @@ class Display(
                 self._data = new_data
 
             # Only reset if there's flight data already
-            # on the screen, of if there's some new
+            # on the screen, or if there's some new
             # data available to draw which is different
             # from the current data
             reset_required = there_is_data and data_is_different
@@ -141,9 +144,35 @@ class Display(
             if reset_required:
                 self.reset_scene()
 
+    def _reset_idle_scenes(self):
+        """Force clock/date/day to redraw on their next tick."""
+        self._last_time = None
+        self._last_date = None
+        self._last_day = None
+
     @Animator.KeyFrame.add(1)
     def sync(self, count):
-        self.matrix.brightness = 0 if os.path.exists(PAUSE_FLAG) else BRIGHTNESS
+        paused = os.path.exists(PAUSE_FLAG)
+        night  = os.path.exists(NIGHT_FLAG)
+
+        if paused:
+            # Blank the canvas every frame so nothing bleeds through
+            self.canvas.Clear()
+            self.matrix.brightness = 0
+        else:
+            if self._was_paused:
+                # Transitioning back on — canvas is already blank from the
+                # last paused frame; reset states so everything redraws.
+                self._reset_idle_scenes()
+            elif night != self._was_night:
+                # Night mode toggled — force redraws so the brightness
+                # change is immediately visible on all static elements.
+                self._reset_idle_scenes()
+
+            self.matrix.brightness = NIGHT_BRIGHTNESS if night else BRIGHTNESS
+
+        self._was_paused = paused
+        self._was_night  = night
         _ = self.matrix.SwapOnVSync(self.canvas)
 
     @Animator.KeyFrame.add(frames.PER_SECOND * 30)

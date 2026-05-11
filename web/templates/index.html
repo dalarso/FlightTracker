@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FlightTracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=swap">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
@@ -25,6 +27,7 @@ header h1 span { color: var(--accent); }
 .display-toggle.off .dot { background: var(--border); }
 .display-toggle span { font-size: 12px; font-weight: 500; }
 .display-toggle.off span { color: var(--muted); }
+.display-toggle.disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
 nav { display: flex; gap: 2px; margin-left: auto; flex-shrink: 0; }
 nav button { background: none; border: none; color: var(--muted); padding: 8px 12px; cursor: pointer; border-radius: 6px; font-size: 13px; font-weight: 500; transition: all .15s; white-space: nowrap; }
 nav button:hover { color: var(--text); background: rgba(255,255,255,.06); }
@@ -102,30 +105,140 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .log-line.inzone   { color: var(--green); }
 .log-line.nodata   { color: var(--yellow); }
 .log-line.error    { color: var(--red); }
-.log-line.api      { color: #a78bfa; }
+.log-line.route    { color: #a78bfa; }
+.log-line.type     { color: #a78bfa; }
+.log-line.web      { color: #f0883e; }
 .log-line.cached   { color: #4b5563; }
 .log-line.miss     { color: #d97706; }
 .chip { border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
 .chip.green { background: rgba(63,185,80,.12); color: var(--green); }
 .chip.red { background: rgba(248,81,73,.12); color: var(--red); }
+.chip.grey { background: rgba(139,148,158,.08); color: var(--muted); }
 .toggle-small { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 10px 20px; border-radius: 8px; font-size: 13px; font-weight: 500; opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; z-index: 9999; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.ok { border-color: var(--green); color: var(--green); }
 .toast.err { border-color: var(--red); color: var(--red); }
+
+/* NIGHT TOGGLE */
+.display-toggle#night-toggle .dot { background: var(--border); }
+.display-toggle#night-toggle:not(.off):not(.disabled) .dot { background: #f0883e; box-shadow: 0 0 5px rgba(240,136,62,.5); }
+.display-toggle#night-toggle:not(.off):not(.disabled) span { color: #f0883e; }
+.display-toggle#night-toggle:not(.off):not(.disabled) { border-color: rgba(240,136,62,.35); }
+
+/* APIs TOGGLE — amber dot when disabled (off = APIs disabled = warning) */
+.display-toggle#apis-toggle.off .dot { background: #f0883e; }
+.display-toggle#apis-toggle.off span { color: #f0883e; }
+.display-toggle#apis-toggle.off { border-color: rgba(240,136,62,.35); }
+
+/* APIs TAB */
+#apis-tab { flex-direction: column; overflow-y: auto; }
+.apis-scroll { flex: 1; overflow-y: auto; padding: 20px; }
+.apis-scroll::-webkit-scrollbar { width: 6px; }
+.apis-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.usage-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.usage-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
+.usage-card h3 { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 12px; }
+.usage-stat { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.usage-stat .label { font-size: 12px; color: var(--muted); }
+.usage-stat .value { font-size: 13px; font-weight: 600; font-family: monospace; }
+.usage-bar-wrap { background: var(--bg); border-radius: 4px; height: 6px; margin: 8px 0 4px; overflow: hidden; border: 1px solid var(--border); }
+.usage-bar { height: 100%; border-radius: 4px; transition: width .5s ease; background: var(--accent); }
+.usage-bar.warn { background: var(--yellow); }
+.usage-bar.danger { background: var(--red); }
+.usage-pct { font-size: 11px; color: var(--muted); text-align: right; }
+.stack-table { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+.stack-table-header { padding: 12px 18px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
+.stack-row { border-bottom: 1px solid var(--border); padding: 14px 18px; display: grid; grid-template-columns: 28px 1fr auto; gap: 12px; align-items: start; }
+.stack-row:last-child { border-bottom: none; }
+.stack-priority { font-size: 11px; font-weight: 700; color: var(--muted); padding-top: 2px; }
+.stack-priority.p0 { color: #4b5563; }
+.stack-name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.stack-type { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.stack-cost { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.stack-notes { font-size: 11px; color: #6e7681; line-height: 1.55; }
+.stack-badge { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; white-space: nowrap; }
+.badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; }
+.badge.key-set { background: rgba(63,185,80,.12); color: var(--green); border: 1px solid rgba(63,185,80,.2); }
+.badge.no-key { background: rgba(248,81,73,.08); color: var(--red); border: 1px solid rgba(248,81,73,.15); }
+.badge.free { background: rgba(88,166,255,.1); color: var(--accent); border: 1px solid rgba(88,166,255,.2); }
+.apis-month { font-size: 11px; color: var(--muted); margin-bottom: 12px; }
+
+/* RULES TAB */
+#rules-tab { flex-direction: column; }
+.rules-scroll { flex: 1; overflow-y: auto; padding: 20px; }
+.rules-scroll::-webkit-scrollbar { width: 6px; }
+.rules-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.rules-table { width: 100%; border-collapse: collapse; }
+.rules-table th { padding: 8px 14px; font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; text-align: left; border-bottom: 1px solid var(--border); }
+.rules-table td { padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.rules-table tr:last-child td { border-bottom: none; }
+.rules-table tr:hover td { background: rgba(255,255,255,.02); }
+.rule-pattern { font-family: 'SFMono-Regular', monospace; font-weight: 700; color: var(--text); }
+.rule-airport { font-family: 'SFMono-Regular', monospace; font-size: 13px; font-weight: 600; color: var(--accent); }
+.rule-blank { color: var(--border); }
+.rule-note { color: var(--muted); font-size: 12px; }
+.rules-empty { padding: 28px 18px; color: var(--muted); font-size: 13px; text-align: center; }
+.rules-hint { font-size: 12px; color: var(--muted); line-height: 1.7; padding: 10px 18px 14px; border-top: 1px solid var(--border); }
+.log-line.override { color: #fbbf24; }
+
+/* MATRIX PREVIEW */
+.matrix-wrapper { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; gap: 14px; }
+.matrix-bezel { width: 100%; max-width: 512px; background: linear-gradient(160deg,#1e1e1e,#111); border-radius: 14px; padding: 18px 22px 14px; box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 10px 40px rgba(0,0,0,.7); border: 1px solid #2a2a2a; }
+.matrix-screen {
+  aspect-ratio: 2/1; background: #030303; border-radius: 4px; overflow: hidden;
+  position: relative; display: flex; flex-direction: column;
+  font-family: 'VT323','Courier New',monospace; container-type: inline-size;
+  background-image: repeating-linear-gradient(0deg,rgba(0,0,0,0) 0px,rgba(0,0,0,0) 2px,rgba(0,0,0,.1) 2px,rgba(0,0,0,.1) 3px);
+  box-shadow: inset 0 0 60px rgba(0,0,0,.6);
+}
+.matrix-screen.night { filter: brightness(0.25); }
+.m-journey { flex: 0 0 40%; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; }
+.m-code { font-size: 9cqi; font-weight: bold; color: #ffff00; text-shadow: 0 0 8px rgba(255,255,0,.55), 0 0 20px rgba(255,255,0,.2); letter-spacing: .05em; }
+.m-arrow { font-size: 7cqi; color: #e36e00; text-shadow: 0 0 8px rgba(227,110,0,.55); }
+.m-bar { flex: 0 0 18%; display: flex; align-items: center; justify-content: space-between; padding: 0 3%; border-top: 1px solid #00c800; box-shadow: 0 -1px 6px rgba(0,200,0,.3); }
+.m-callsign { font-size: 5.5cqi; font-weight: bold; color: #6eb6ff; text-shadow: 0 0 6px rgba(110,182,255,.45); }
+.m-flight-index { font-size: 4cqi; color: #606060; }
+.m-plane { flex: 1; display: flex; align-items: center; overflow: hidden; }
+.m-plane-text { font-size: 5.5cqi; color: #c800c8; text-shadow: 0 0 8px rgba(200,0,200,.5); white-space: nowrap; display: inline-block; animation: matrix-scroll 10s linear infinite; font-weight: bold; padding-left: 100%; }
+@keyframes matrix-scroll { from { transform: translateX(0); } to { transform: translateX(-200%); } }
+.m-idle { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 4% 6%; gap: 2%; }
+.m-clock { font-size: 14cqi; color: #1d009c; text-shadow: 0 0 10px rgba(29,0,156,.6), 0 0 24px rgba(29,0,156,.3); line-height: 1; }
+.m-day { font-size: 5.5cqi; color: #555; line-height: 1.2; }
+.m-off { flex: 1; display: flex; align-items: center; justify-content: center; }
+.m-off-text { font-size: 4cqi; color: #1e1e1e; letter-spacing: .25em; }
+.m-service-off { color: #2a2a2a; }
+.matrix-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding: 0 2px; }
+.matrix-label { font-size: 11px; color: #3a3a3a; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; }
+.matrix-meta { font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
 
 <header>
   <h1>✈ Flight<span>Tracker</span></h1>
-  <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Toggle LED display on/off" style="visibility:hidden">
+  <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Dim/undim LED display (service keeps running)" style="visibility:hidden">
     <div class="dot"></div>
     <span id="display-label">Display On</span>
   </div>
+  <div class="display-toggle off" id="night-toggle" onclick="toggleNight()" title="Dim display to night brightness without turning it off" style="visibility:hidden">
+    <div class="dot"></div>
+    <span id="night-label">Night Off</span>
+  </div>
+  <div class="display-toggle" id="service-toggle" onclick="toggleService()" title="Stop/start FlightTracker service (stops API polling)" style="visibility:hidden">
+    <div class="dot"></div>
+    <span id="service-label">Service On</span>
+  </div>
+  <div class="display-toggle" id="apis-toggle" onclick="toggleAPIs()" title="Enable/disable limited APIs: AirLabs + FlightAware (falls back to OpenSky + adsbdb)" style="visibility:hidden">
+    <div class="dot"></div>
+    <span id="apis-label">APIs On</span>
+  </div>
   <nav>
     <button class="active" onclick="showTab('config',this)">⚙ Config</button>
+    <button onclick="showTab('display',this)">📺 Display</button>
     <button onclick="showTab('map',this)">🗺 Zone Map</button>
+    <button onclick="showTab('apis',this)">📡 APIs</button>
+    <button onclick="showTab('rules',this)">✏️ Rules</button>
     <button onclick="showTab('log',this)">📋 Log</button>
   </nav>
 </header>
@@ -184,6 +297,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           <div class="input-wrap"><input type="number" step="1" id="loc_alt"><span class="unit-label" id="alt-unit-label-3">ft</span></div>
           <div class="hint">Antenna height for distance calc</div>
         </div>
+        <div class="field"><label>Timezone</label><input type="text" id="timezone" placeholder="America/Los_Angeles"><div class="hint">IANA timezone — <a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank" style="color:var(--accent)">full list</a></div></div>
       </div>
     </div>
 
@@ -191,6 +305,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
       <div class="section-header">Display Hardware</div>
       <div class="field-grid">
         <div class="field"><label>Brightness (0–100)</label><input type="number" min="0" max="100" id="brightness"></div>
+        <div class="field"><label>Night Brightness (0–100)</label><input type="number" min="0" max="100" id="night_brightness"><div class="hint">Brightness when Night Mode is on</div></div>
         <div class="field"><label>GPIO Slowdown</label><input type="number" min="1" max="4" id="gpio_slowdown"><div class="hint">Increase if display flickers</div></div>
         <div class="field"><label>Journey Code</label><input type="text" id="journey_code"></div>
         <div class="field"><label>Journey Blank Filler</label><input type="text" id="journey_blank"></div>
@@ -229,10 +344,17 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <div class="section">
       <div class="section-header">API Keys</div>
       <div class="field-grid">
+        <div class="field"><label>AirLabs API Key</label>
+          <div class="input-wrap"><input type="password" id="airlabs_key"><button class="eye-btn" onclick="toggleEye('airlabs_key',this)">👁</button></div>
+          <div class="hint">Free — 1,000 calls/month · <a href="https://airlabs.co" target="_blank" style="color:var(--accent)">airlabs.co</a></div>
+        </div>
         <div class="field"><label>FlightAware AeroAPI Key</label>
           <div class="input-wrap"><input type="password" id="fa_key"><button class="eye-btn" onclick="toggleEye('fa_key',this)">👁</button></div>
+          <div class="hint">$0.005/call · feeder credit applies</div>
         </div>
-        <div class="field"><label>OpenSky Client ID</label><input type="text" id="opensky_id"></div>
+        <div class="field"><label>OpenSky Client ID</label><input type="text" id="opensky_id">
+          <div class="hint">Free with account · <a href="https://opensky-network.org" target="_blank" style="color:var(--accent)">opensky-network.org</a></div>
+        </div>
         <div class="field"><label>OpenSky Client Secret</label>
           <div class="input-wrap"><input type="password" id="opensky_secret"><button class="eye-btn" onclick="toggleEye('opensky_secret',this)">👁</button></div>
         </div>
@@ -264,6 +386,110 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         <button class="btn btn-primary" style="width:100%;font-size:12px" onclick="saveFromMap()">Save Zone</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- DISPLAY TAB -->
+<div class="tab-content" id="display-tab">
+  <div class="matrix-wrapper">
+    <div class="matrix-bezel">
+      <div class="matrix-screen" id="matrix-screen">
+        <div class="m-off"><span class="m-off-text">LOADING</span></div>
+      </div>
+      <div class="matrix-footer">
+        <span class="matrix-label">64 × 32 LED Matrix</span>
+        <span class="matrix-meta" id="matrix-meta">—</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- APIS TAB -->
+<div class="tab-content" id="apis-tab">
+  <div class="apis-scroll">
+    <div class="apis-month" id="apis-month">Loading…</div>
+
+    <div class="usage-grid">
+      <div class="usage-card" id="usage-airlabs">
+        <h3>AirLabs — Route Data</h3>
+        <div class="usage-stat"><span class="label">Calls used</span><span class="value" id="al-calls">—</span></div>
+        <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="al-remaining">—</span></div>
+        <div class="usage-bar-wrap"><div class="usage-bar" id="al-bar" style="width:0%"></div></div>
+        <div class="usage-pct" id="al-pct">—</div>
+        <div class="usage-stat" style="margin-top:8px"><span class="label">Period limit</span><span class="value" id="al-limit">—</span></div>
+        <div class="usage-stat"><span class="label">Period</span><span class="value" id="al-period" style="font-size:11px">—</span></div>
+      </div>
+      <div class="usage-card" id="usage-flightaware">
+        <h3>FlightAware AeroAPI</h3>
+        <div class="usage-stat"><span class="label">Est. calls</span><span class="value" id="fa-calls">—</span></div>
+        <div class="usage-stat"><span class="label">Est. spend</span><span class="value" id="fa-spend">—</span></div>
+        <div class="usage-bar-wrap"><div class="usage-bar" id="fa-bar" style="width:0%"></div></div>
+        <div class="usage-pct" id="fa-pct">—</div>
+        <div class="usage-stat" style="margin-top:8px"><span class="label">Monthly credit</span><span class="value" id="fa-credit">—</span></div>
+        <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="fa-remaining">—</span></div>
+        <div class="usage-stat"><span class="label">Period</span><span class="value" id="fa-period" style="font-size:11px">—</span></div>
+      </div>
+    </div>
+
+    <div class="stack-table">
+      <div class="stack-table-header">Route Data API Stack — priority order</div>
+      <div id="stack-rows">
+        <div class="stack-row"><div class="stack-priority">—</div><div style="color:var(--muted);font-size:12px">Loading…</div><div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- RULES TAB -->
+<div class="tab-content" id="rules-tab">
+  <div class="rules-scroll">
+
+    <div class="section">
+      <div class="section-header">
+        Override Rules
+        <span id="rules-count" style="margin-left:8px;font-size:11px;background:rgba(88,166,255,.12);color:var(--accent);padding:2px 8px;border-radius:10px;font-weight:600"></span>
+      </div>
+      <div id="rules-table-wrap">
+        <div class="rules-empty">Loading…</div>
+      </div>
+      <div class="rules-hint">
+        <strong style="color:var(--text)">How it works:</strong> When a flight's callsign or tail number matches a rule, all API lookups are skipped and the defined origin/destination is used directly — saving your AirLabs and FlightAware quota.<br>
+        <strong style="color:var(--text)">Wildcards:</strong> Use <code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--accent)">*</code> to match any characters.
+        &nbsp;<code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--accent)">JANET*</code> matches JANET42, JANET99, etc.
+        &nbsp;<code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--accent)">N9*WY</code> matches N911WY, N9WY, etc.<br>
+        <strong style="color:var(--text)">Tip:</strong> Leave origin or destination blank if unknown — the display will show <code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--muted)">?</code>.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Add Rule</div>
+      <div class="field-grid">
+        <div class="field">
+          <label>Pattern <span style="color:var(--red)">*</span></label>
+          <input type="text" id="rule-pattern" placeholder="JANET* or N911WY" style="text-transform:uppercase">
+          <div class="hint">Callsign or tail number — * matches anything</div>
+        </div>
+        <div class="field">
+          <label>Origin <span style="color:var(--muted)">(optional)</span></label>
+          <input type="text" id="rule-origin" placeholder="LAS" maxlength="4" style="text-transform:uppercase">
+          <div class="hint">Departure airport IATA code</div>
+        </div>
+        <div class="field">
+          <label>Destination <span style="color:var(--muted)">(optional)</span></label>
+          <input type="text" id="rule-dest" placeholder="—" maxlength="4" style="text-transform:uppercase">
+          <div class="hint">Arrival airport IATA code</div>
+        </div>
+        <div class="field">
+          <label>Note <span style="color:var(--muted)">(optional)</span></label>
+          <input type="text" id="rule-note" placeholder="Janet Airlines — classified destination">
+        </div>
+      </div>
+      <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px">
+        <button class="btn btn-primary" onclick="addRule()">+ Add Rule</button>
+        <span id="rules-save-status" class="save-status"></span>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -301,25 +527,42 @@ function showTab(name, btn) {
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById(name + '-tab').classList.add('active');
   btn.classList.add('active');
-  if (name === 'map') initMap();
-  if (name === 'log') initLog();
+  if (name === 'map')     initMap();
+  if (name === 'log')     initLog();     else stopLog();
+  if (name === 'display') initMatrixPreview(); else stopMatrixPreview();
+  if (name === 'apis')    initAPIsTab(); else stopAPIsTab();
+  if (name === 'rules')   initRulesTab();
 }
 
-// ── Display Toggle ─────────────────────────────────────────────
+// ── Combined status fetch on load ──────────────────────────────
+async function checkInitialStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    updateServiceBtn(d.running);
+    updateDisplayBtn(!d.paused);
+    updateNightBtn(d.night);
+    updateAPIsBtn(!d.apis_disabled);
+  } catch(e) {}
+  document.getElementById('display-toggle').style.visibility = 'visible';
+  document.getElementById('night-toggle').style.visibility = 'visible';
+  document.getElementById('service-toggle').style.visibility = 'visible';
+  document.getElementById('apis-toggle').style.visibility = 'visible';
+}
+
 async function checkDisplayStatus() {
   try {
     const r = await fetch('/api/display');
     const d = await r.json();
     updateDisplayBtn(!d.paused);
   } catch(e) {}
-  document.getElementById('display-toggle').style.visibility = 'visible';
 }
 
 function updateDisplayBtn(on) {
   displayOn = on;
   const el = document.getElementById('display-toggle');
   const lbl = document.getElementById('display-label');
-  el.className = 'display-toggle' + (on ? '' : ' off');
+  el.classList.toggle('off', !on);
   lbl.textContent = on ? 'Display On' : 'Display Off';
 }
 
@@ -331,6 +574,93 @@ async function toggleDisplay() {
     const r = await fetch(endpoint, { method: 'POST' });
     const d = await r.json();
     if (d.ok) updateDisplayBtn(!displayOn);
+  } catch(e) {}
+  el.style.pointerEvents = '';
+}
+
+// ── Service Toggle ─────────────────────────────────────────────
+let serviceRunning = true;
+
+function updateServiceBtn(running) {
+  serviceRunning = running;
+  const el = document.getElementById('service-toggle');
+  const lbl = document.getElementById('service-label');
+  el.classList.toggle('off', !running);
+  lbl.textContent = running ? 'Service On' : 'Service Off';
+  // Grey out display/night/FA toggles when service is not running
+  document.getElementById('display-toggle').classList.toggle('disabled', !running);
+  document.getElementById('night-toggle').classList.toggle('disabled', !running);
+  document.getElementById('apis-toggle').classList.toggle('disabled', !running);
+}
+
+async function toggleService() {
+  const el = document.getElementById('service-toggle');
+  el.style.pointerEvents = 'none';
+  const wasStopping = serviceRunning;
+  const endpoint = serviceRunning ? '/api/service/stop' : '/api/service/start';
+  try {
+    const r = await fetch(endpoint, { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      updateServiceBtn(!wasStopping);
+      if (wasStopping) {
+        // Service just stopped — display is implicitly off
+        updateDisplayBtn(false);
+      } else {
+        // Service just started — re-fetch actual display state
+        await checkDisplayStatus();
+      }
+      // Re-sync all toggle states after a short delay — the service needs a
+      // moment to fully start/stop before systemctl reports the right status.
+      setTimeout(checkInitialStatus, 1500);
+    } else {
+      showToast('✗ ' + (d.error || 'Service error'), 'err');
+    }
+  } catch(e) { showToast('✗ Request failed', 'err'); }
+  el.style.pointerEvents = '';
+}
+
+// ── Limited APIs Toggle (AirLabs + FlightAware) ────────────────
+let apisEnabled = true;
+
+function updateAPIsBtn(enabled) {
+  apisEnabled = enabled;
+  const el = document.getElementById('apis-toggle');
+  const lbl = document.getElementById('apis-label');
+  el.classList.toggle('off', !enabled);
+  lbl.textContent = enabled ? 'APIs On' : 'APIs Off';
+}
+
+async function toggleAPIs() {
+  const el = document.getElementById('apis-toggle');
+  el.style.pointerEvents = 'none';
+  try {
+    const r = await fetch('/api/apis/toggle', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) updateAPIsBtn(!d.apis_disabled);
+    else showToast('✗ ' + (d.error || 'API toggle failed'), 'err');
+  } catch(e) { showToast('✗ Request failed', 'err'); }
+  el.style.pointerEvents = '';
+}
+
+// ── Night Mode ─────────────────────────────────────────────────
+let nightActive = false;
+
+function updateNightBtn(active) {
+  nightActive = active;
+  const el = document.getElementById('night-toggle');
+  const lbl = document.getElementById('night-label');
+  el.classList.toggle('off', !active);
+  lbl.textContent = active ? 'Night On' : 'Night Off';
+}
+
+async function toggleNight() {
+  const el = document.getElementById('night-toggle');
+  el.style.pointerEvents = 'none';
+  try {
+    const r = await fetch('/api/display/night', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) updateNightBtn(d.night);
   } catch(e) {}
   el.style.pointerEvents = '';
 }
@@ -407,10 +737,12 @@ async function loadConfig() {
   document.getElementById('loc_lat').value = config.LOCATION_HOME[0];
   document.getElementById('loc_lon').value = config.LOCATION_HOME[1];
   document.getElementById('loc_alt').value = kmToUnit(config.LOCATION_HOME[2], altUnit);
+  document.getElementById('timezone').value = config.TIMEZONE || 'America/Los_Angeles';
   document.getElementById('min_altitude').value = ftToUnit(config.MIN_ALTITUDE, altUnit);
   document.getElementById('max_altitude').value = ftToUnit(config.MAX_ALTITUDE, altUnit);
   document.getElementById('local_airport').value = config.LOCAL_AIRPORT || '';
   document.getElementById('brightness').value = config.BRIGHTNESS;
+  document.getElementById('night_brightness').value = config.NIGHT_BRIGHTNESS ?? 20;
   document.getElementById('gpio_slowdown').value = config.GPIO_SLOWDOWN;
   document.getElementById('journey_code').value = config.JOURNEY_CODE_SELECTED || '';
   document.getElementById('journey_blank').value = config.JOURNEY_BLANK_FILLER || '';
@@ -419,6 +751,7 @@ async function loadConfig() {
   document.getElementById('temp_units').value = config.TEMPERATURE_UNITS || 'imperial';
   document.getElementById('ow_key').value = config.OPENWEATHER_API_KEY || '';
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
+  document.getElementById('airlabs_key').value = config.AIRLABS_API_KEY || '';
   document.getElementById('fa_key').value = config.FLIGHTAWARE_API_KEY || '';
   document.getElementById('opensky_id').value = config.OPENSKY_CLIENT_ID || '';
   document.getElementById('opensky_secret').value = config.OPENSKY_CLIENT_SECRET || '';
@@ -441,6 +774,7 @@ function buildConfigPayload() {
     MAX_ALTITUDE: unitToFt(parseFloat(document.getElementById('max_altitude').value), altUnit),
     LOCAL_AIRPORT: document.getElementById('local_airport').value.trim().toUpperCase(),
     BRIGHTNESS: parseInt(document.getElementById('brightness').value),
+    NIGHT_BRIGHTNESS: parseInt(document.getElementById('night_brightness').value),
     GPIO_SLOWDOWN: parseInt(document.getElementById('gpio_slowdown').value),
     JOURNEY_CODE_SELECTED: document.getElementById('journey_code').value,
     JOURNEY_BLANK_FILLER: document.getElementById('journey_blank').value,
@@ -448,7 +782,9 @@ function buildConfigPayload() {
     WEATHER_LOCATION: document.getElementById('weather_location').value,
     TEMPERATURE_UNITS: document.getElementById('temp_units').value,
     OPENWEATHER_API_KEY: document.getElementById('ow_key').value,
+    TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
+    AIRLABS_API_KEY: document.getElementById('airlabs_key').value,
     FLIGHTAWARE_API_KEY: document.getElementById('fa_key').value,
     OPENSKY_CLIENT_ID: document.getElementById('opensky_id').value,
     OPENSKY_CLIENT_SECRET: document.getElementById('opensky_secret').value,
@@ -460,6 +796,17 @@ async function saveConfig(restart) {
   status.textContent = 'Saving…'; status.className = 'save-status';
   try {
     const payload = buildConfigPayload();
+    const numericKeys = ['MIN_ALTITUDE','MAX_ALTITUDE','BRIGHTNESS','NIGHT_BRIGHTNESS','GPIO_SLOWDOWN'];
+    const locationKeys = payload.LOCATION_HOME;
+    const zoneKeys = Object.values(payload.ZONE_HOME);
+    if (numericKeys.some(k => isNaN(payload[k])) ||
+        locationKeys.some(v => isNaN(v)) ||
+        zoneKeys.some(v => isNaN(v))) {
+      const msg = '✗ Invalid numeric value — check all fields';
+      status.textContent = msg; status.className = 'save-status err';
+      showToast(msg, 'err');
+      return;
+    }
     payload.restart = restart;
     const r = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const data = await r.json();
@@ -556,10 +903,10 @@ function updateMapCoordDisplay() {
 
 function updateZoneCoordDisplay() {
   const z = config.ZONE_HOME;
-  document.getElementById('m-tl-y').textContent = z.tl_y;
-  document.getElementById('m-br-y').textContent = z.br_y;
-  document.getElementById('m-tl-x').textContent = z.tl_x;
-  document.getElementById('m-br-x').textContent = z.br_x;
+  document.getElementById('m-tl-y').textContent = Number(z.tl_y).toFixed(6);
+  document.getElementById('m-br-y').textContent = Number(z.br_y).toFixed(6);
+  document.getElementById('m-tl-x').textContent = Number(z.tl_x).toFixed(6);
+  document.getElementById('m-br-x').textContent = Number(z.br_x).toFixed(6);
 }
 
 function saveFromMap() {
@@ -574,8 +921,22 @@ function saveFromMap() {
 // ── Log ────────────────────────────────────────────────────────
 function initLog() {
   if (evtSource) return;
+  document.getElementById('log-status').textContent = '● LIVE';
+  document.getElementById('log-status').className = 'chip green';
   fetch('/api/log/history').then(r => r.json()).then(d => {
-    d.lines.forEach(appendLog);
+    // Batch-insert history lines in a single DOM operation via DocumentFragment
+    // to avoid 500 individual reflows on a slow Pi browser.
+    const out = document.getElementById('log-output');
+    const frag = document.createDocumentFragment();
+    d.lines.forEach(line => {
+      const el = document.createElement('div');
+      el.className = 'log-line ' + classifyLine(line);
+      el.textContent = line;
+      frag.appendChild(el);
+    });
+    out.appendChild(frag);
+    while (out.children.length > 2000) out.removeChild(out.firstChild);
+    document.getElementById('log-stats').textContent = out.children.length + ' lines';
     scrollLog();
   }).catch(() => {});
   evtSource = new EventSource('/api/log/stream');
@@ -609,18 +970,332 @@ function classifyLine(line) {
   if (line.includes('in_zone=True'))   return 'inzone';
   if (line.includes("plane=''"))       return 'nodata';
   if (/error|exception/i.test(line))   return 'error';
+  if (line.includes('[override]'))     return 'override';
   if (line.includes(':cached]'))       return 'cached';
   if (line.includes(':miss]'))         return 'miss';
-  if (line.includes('[route:') || line.includes('[type:')) return 'api';
+  // Combined "[route:X] [type:X]" line — classify as route (purple)
+  if (line.includes('[route:'))        return 'route';
+  if (line.includes('[web]'))          return 'web';
   return '';
+}
+
+function stopLog() {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  document.getElementById('log-status').textContent = '● OFFLINE';
+  document.getElementById('log-status').className = 'chip grey';
+}
+
+// ── Matrix Preview ─────────────────────────────────────────────
+let matrixTimer = null;
+
+function initMatrixPreview() {
+  if (matrixTimer) return;
+  updateMatrixPreview();
+  matrixTimer = setInterval(updateMatrixPreview, 10000);
+}
+
+function stopMatrixPreview() {
+  clearInterval(matrixTimer);
+  matrixTimer = null;
+}
+
+async function updateMatrixPreview() {
+  try {
+    const [status, flightData] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/flights').then(r => r.json()),
+    ]);
+    renderMatrix(status, flightData);
+    const ts = flightData.ts
+      ? new Date(flightData.ts * 1000).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit', timeZone: config.TIMEZONE || 'America/Los_Angeles'})
+      : '—';
+    document.getElementById('matrix-meta').textContent = `Last poll: ${ts}${flightData.stale ? ' (stale)' : ''}`;
+  } catch(e) {
+    document.getElementById('matrix-screen').innerHTML = '<div class="m-off"><span class="m-off-text">ERROR</span></div>';
+  }
+}
+
+function renderMatrix(status, flightData) {
+  const screen = document.getElementById('matrix-screen');
+  const flights = (!flightData.stale && Array.isArray(flightData.flights)) ? flightData.flights : [];
+
+  screen.className = 'matrix-screen' + (status.night && status.running && !status.paused ? ' night' : '');
+
+  if (!status.running) {
+    screen.innerHTML = '<div class="m-off"><span class="m-off-text m-service-off">SERVICE OFF</span></div>';
+    return;
+  }
+  if (status.paused) {
+    screen.innerHTML = '<div class="m-off"><span class="m-off-text">&#9632;&#9632;&#9632;</span></div>';
+    return;
+  }
+  if (flights.length === 0) {
+    const now = new Date();
+    const tz = config.TIMEZONE || 'America/Los_Angeles';
+    const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: tz });
+    const weekday = now.toLocaleDateString('en-US', { weekday: 'short', timeZone: tz });
+    const day     = now.toLocaleDateString('en-US', { day: '2-digit',   timeZone: tz });
+    const month   = now.toLocaleDateString('en-US', { month: 'short',   timeZone: tz });
+    screen.innerHTML = `
+      <div class="m-idle">
+        <div class="m-clock">${timeStr}</div>
+        <div class="m-day">${weekday} ${day} ${month}</div>
+      </div>`;
+    return;
+  }
+  const f = flights[0];
+  const total = flights.length;
+  const dur = Math.max(6, Math.ceil(((f.plane || '').length) * 0.4));
+  screen.innerHTML = `
+    <div class="m-journey">
+      <span class="m-code">${f.origin  || '&nbsp;?&nbsp;'}</span>
+      <span class="m-arrow">&#8594;</span>
+      <span class="m-code">${f.destination || '&nbsp;?&nbsp;'}</span>
+    </div>
+    <div class="m-bar">
+      <span class="m-callsign">${f.callsign || ''}</span>
+      <span class="m-flight-index">${total > 1 ? '1/' + total : ''}</span>
+    </div>
+    <div class="m-plane">
+      <span class="m-plane-text" style="animation-duration:${dur}s">${f.plane || '&#8212;'}</span>
+    </div>`;
 }
 
 function scrollLog() { const o = document.getElementById('log-output'); o.scrollTop = o.scrollHeight; }
 function clearLog() { document.getElementById('log-output').innerHTML = ''; document.getElementById('log-stats').textContent = '0 lines'; }
 
+// ── APIs Tab ───────────────────────────────────────────────────
+let apisTabTimer = null;
+
+function initAPIsTab() {
+  if (apisTabTimer) return;
+  loadAPIsTab();
+  apisTabTimer = setInterval(loadAPIsTab, 30000);
+}
+
+function stopAPIsTab() {
+  clearInterval(apisTabTimer);
+  apisTabTimer = null;
+}
+
+async function loadAPIsTab() {
+  try {
+    const [usageRes, stackRes] = await Promise.all([
+      fetch('/api/usage').then(r => r.json()),
+      fetch('/api/apis').then(r => r.json()),
+    ]);
+    renderUsage(usageRes);
+    renderStack(stackRes.stack || []);
+  } catch(e) {
+    document.getElementById('apis-month').textContent = 'Failed to load API data';
+  }
+}
+
+function fmtPeriod(start, end) {
+  if (!start || !end) return '—';
+  // Use Date.UTC so the display date matches the server's YYYY-MM-DD string
+  // regardless of the browser's local timezone.
+  const fmt = s => {
+    const [y, m, d] = s.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d))
+      .toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  };
+  return `${fmt(start)} – ${fmt(end)}`;
+}
+
+function renderUsage(d) {
+  document.getElementById('apis-month').textContent = '';
+
+  const al = d.airlabs || {};
+  document.getElementById('al-calls').textContent     = al.calls ?? '—';
+  document.getElementById('al-remaining').textContent = al.remaining ?? '—';
+  document.getElementById('al-limit').textContent     = al.limit ?? '—';
+  document.getElementById('al-period').textContent    = fmtPeriod(al.period_start, al.period_end);
+  const alPct = al.pct_used ?? 0;
+  document.getElementById('al-pct').textContent = `${alPct}% used`;
+  const alBar = document.getElementById('al-bar');
+  alBar.style.width = Math.min(100, alPct) + '%';
+  alBar.className = 'usage-bar' + (alPct >= 90 ? ' danger' : alPct >= 70 ? ' warn' : '');
+
+  const fa = d.flightaware || {};
+  document.getElementById('fa-calls').textContent     = fa.calls ?? '—';
+  document.getElementById('fa-spend').textContent     = fa.est_spend != null ? `$${fa.est_spend.toFixed(3)}` : '—';
+  document.getElementById('fa-credit').textContent    = fa.monthly_credit != null ? `$${fa.monthly_credit.toFixed(2)}` : '—';
+  document.getElementById('fa-remaining').textContent = fa.remaining != null ? `$${fa.remaining.toFixed(3)}` : '—';
+  document.getElementById('fa-period').textContent    = fmtPeriod(fa.period_start, fa.period_end);
+  const faPct = fa.pct_used ?? 0;
+  document.getElementById('fa-pct').textContent = `${faPct}% of credit used`;
+  const faBar = document.getElementById('fa-bar');
+  faBar.style.width = Math.min(100, faPct) + '%';
+  faBar.className = 'usage-bar' + (faPct >= 90 ? ' danger' : faPct >= 70 ? ' warn' : '');
+}
+
+function renderStack(stack) {
+  const container = document.getElementById('stack-rows');
+  // Sort: priority 0 (type lookup, not in route chain) goes last; others ascending
+  const sorted = [...stack].sort((a, b) => {
+    if (a.priority === 0) return 1;
+    if (b.priority === 0) return -1;
+    return a.priority - b.priority;
+  });
+
+  container.innerHTML = sorted.map(api => {
+    const prioLabel = api.priority === 0 ? '—' : `#${api.priority}`;
+    const prioClass = api.priority === 0 ? 'stack-priority p0' : 'stack-priority';
+    const keyBadge  = api.key_set === false && api.priority !== 0
+      ? `<span class="badge no-key">no key</span>`
+      : api.key_set === true
+        ? `<span class="badge key-set">key set</span>`
+        : `<span class="badge free">no key needed</span>`;
+    const urlLink = api.url
+      ? `<a href="${api.url}" target="_blank" style="color:var(--accent);font-size:11px;text-decoration:none">${api.url.replace('https://','')}</a>`
+      : '';
+    return `
+      <div class="stack-row">
+        <div class="${prioClass}">${prioLabel}</div>
+        <div>
+          <div class="stack-name">${api.name}</div>
+          <div class="stack-type">${api.type}</div>
+          ${urlLink ? `<div style="margin-bottom:4px">${urlLink}</div>` : ''}
+          <div class="stack-cost">${api.cost}</div>
+          <div class="stack-notes">${api.notes}</div>
+        </div>
+        <div class="stack-badge">${keyBadge}</div>
+      </div>`;
+  }).join('');
+}
+
+// ── Override Rules ─────────────────────────────────────────────
+let _rules = [];
+let _rulesLoaded = false;
+
+async function initRulesTab() {
+  // Only fetch from server on first visit — subsequent visits re-render
+  // from the in-memory array (which stays in sync after add/delete).
+  if (_rulesLoaded) { renderRules(); return; }
+  try {
+    const r = await fetch('/api/overrides');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data)) throw new Error('Unexpected response format');
+    _rules = data;
+    _rulesLoaded = true;
+    renderRules();
+  } catch(e) {
+    document.getElementById('rules-table-wrap').innerHTML =
+      `<div class="rules-empty" style="color:var(--red)">Failed to load rules: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderRules() {
+  const wrap = document.getElementById('rules-table-wrap');
+  const countEl = document.getElementById('rules-count');
+  countEl.textContent = _rules.length ? `${_rules.length} rule${_rules.length > 1 ? 's' : ''}` : '';
+
+  if (_rules.length === 0) {
+    wrap.innerHTML = '<div class="rules-empty">No rules defined — add one below.</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table class="rules-table">
+      <thead>
+        <tr>
+          <th>Pattern</th>
+          <th>Origin</th>
+          <th>Dest</th>
+          <th>Note</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${_rules.map((r, i) => `
+          <tr>
+            <td><span class="rule-pattern">${escHtml(r.pattern)}</span></td>
+            <td>${r.origin    ? `<span class="rule-airport">${escHtml(r.origin)}</span>`      : '<span class="rule-blank">—</span>'}</td>
+            <td>${r.destination ? `<span class="rule-airport">${escHtml(r.destination)}</span>` : '<span class="rule-blank">—</span>'}</td>
+            <td><span class="rule-note">${escHtml(r.note || '')}</span></td>
+            <td><button class="btn btn-danger" style="padding:3px 10px;font-size:11px" onclick="deleteRule(${i})">✕</button></td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+async function addRule() {
+  const pattern = document.getElementById('rule-pattern').value.trim().toUpperCase();
+  if (!pattern) { showToast('✗ Pattern is required', 'err'); return; }
+  if (_rules.some(r => r.pattern === pattern)) {
+    showToast(`✗ Pattern "${pattern}" already exists`, 'err'); return;
+  }
+
+  const rule = {
+    pattern,
+    origin:      document.getElementById('rule-origin').value.trim().toUpperCase(),
+    destination: document.getElementById('rule-dest').value.trim().toUpperCase(),
+    note:        document.getElementById('rule-note').value.trim(),
+  };
+
+  _rules.push(rule);
+  const ok = await saveRules();
+  if (ok) {
+    document.getElementById('rule-pattern').value = '';
+    document.getElementById('rule-origin').value  = '';
+    document.getElementById('rule-dest').value    = '';
+    document.getElementById('rule-note').value    = '';
+    renderRules();
+    showToast(`✓ Rule added: ${rule.pattern}`, 'ok');
+  } else {
+    _rules.pop(); // revert on failure
+  }
+}
+
+async function deleteRule(i) {
+  const removed = _rules.splice(i, 1)[0];
+  const ok = await saveRules();
+  if (ok) {
+    renderRules();
+    showToast(`✓ Rule removed: ${removed.pattern}`, 'ok');
+  } else {
+    _rules.splice(i, 0, removed); // revert on failure
+    renderRules(); // re-render so the deleted row reappears
+  }
+}
+
+async function saveRules() {
+  const status = document.getElementById('rules-save-status');
+  status.textContent = 'Saving…'; status.className = 'save-status';
+  try {
+    const r = await fetch('/api/overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_rules),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      status.textContent = '✓ Saved'; status.className = 'save-status ok';
+      setTimeout(() => { status.textContent = ''; }, 3000);
+      return true;
+    } else {
+      const msg = '✗ ' + (d.error || 'Save failed');
+      status.textContent = msg; status.className = 'save-status err';
+      showToast(msg, 'err');
+      return false;
+    }
+  } catch(e) {
+    const msg = '✗ ' + e.message;
+    status.textContent = msg; status.className = 'save-status err';
+    showToast(msg, 'err');
+    return false;
+  }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 // ── Init ───────────────────────────────────────────────────────
 loadConfig();
-checkDisplayStatus();
+checkInitialStatus();
 </script>
 </body>
 </html>

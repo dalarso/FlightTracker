@@ -1,9 +1,20 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from utilities.animator import Animator
 from setup import colours, fonts, frames
 
 from rgbmatrix import graphics
+
+try:
+    from config import TIMEZONE
+except (ImportError, NameError):
+    TIMEZONE = "America/Los_Angeles"
+
+try:
+    _TZ = ZoneInfo(TIMEZONE)
+except Exception:
+    _TZ = ZoneInfo("America/Los_Angeles")
 
 # Setup
 CLOCK_FONT = fonts.large
@@ -25,13 +36,13 @@ class ClockScene(object):
         else:
             # If there's no data to display
             # then draw a clock
-            now = datetime.now()
+            now = datetime.now(_TZ)
             current_time = now.strftime("%H:%M")
 
             # Only draw if time needs updated
             if self._last_time != current_time:
                 # Undraw last time if different from current
-                if not self._last_time is None:
+                if self._last_time is not None:
                     _ = graphics.DrawText(
                         self.canvas,
                         CLOCK_FONT,
