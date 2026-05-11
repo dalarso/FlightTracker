@@ -535,7 +535,7 @@ function showTab(name, btn) {
 }
 
 // ── Combined status fetch on load ──────────────────────────────
-async function checkInitialStatus() {
+async function checkInitialStatus(retries = 3) {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
@@ -543,7 +543,14 @@ async function checkInitialStatus() {
     updateDisplayBtn(!d.paused);
     updateNightBtn(d.night);
     updateAPIsBtn(!d.apis_disabled);
-  } catch(e) {}
+  } catch(e) {
+    if (retries > 0) {
+      // Server may be mid-restart — retry a few times before giving up
+      setTimeout(() => checkInitialStatus(retries - 1), 1500);
+      return;  // don't show toggles yet; show them after a successful retry
+    }
+    // Exhausted retries — fall through and show toggles with default state
+  }
   document.getElementById('display-toggle').style.visibility = 'visible';
   document.getElementById('night-toggle').style.visibility = 'visible';
   document.getElementById('service-toggle').style.visibility = 'visible';
@@ -660,7 +667,10 @@ async function toggleNight() {
   try {
     const r = await fetch('/api/display/night', { method: 'POST' });
     const d = await r.json();
-    if (d.ok) updateNightBtn(d.night);
+    if (d.ok) {
+      updateNightBtn(d.night);
+      setTimeout(checkInitialStatus, 1500);  // re-sync all toggle states
+    }
   } catch(e) {}
   el.style.pointerEvents = '';
 }
@@ -1048,16 +1058,16 @@ function renderMatrix(status, flightData) {
   const dur = Math.max(6, Math.ceil(((f.plane || '').length) * 0.4));
   screen.innerHTML = `
     <div class="m-journey">
-      <span class="m-code">${f.origin  || '&nbsp;?&nbsp;'}</span>
+      <span class="m-code">${escHtml(f.origin) || '&nbsp;?&nbsp;'}</span>
       <span class="m-arrow">&#8594;</span>
-      <span class="m-code">${f.destination || '&nbsp;?&nbsp;'}</span>
+      <span class="m-code">${escHtml(f.destination) || '&nbsp;?&nbsp;'}</span>
     </div>
     <div class="m-bar">
-      <span class="m-callsign">${f.callsign || ''}</span>
+      <span class="m-callsign">${escHtml(f.callsign || '')}</span>
       <span class="m-flight-index">${total > 1 ? '1/' + total : ''}</span>
     </div>
     <div class="m-plane">
-      <span class="m-plane-text" style="animation-duration:${dur}s">${f.plane || '&#8212;'}</span>
+      <span class="m-plane-text" style="animation-duration:${dur}s">${escHtml(f.plane) || '&#8212;'}</span>
     </div>`;
 }
 
@@ -1154,11 +1164,11 @@ function renderStack(stack) {
       <div class="stack-row">
         <div class="${prioClass}">${prioLabel}</div>
         <div>
-          <div class="stack-name">${api.name}</div>
-          <div class="stack-type">${api.type}</div>
+          <div class="stack-name">${escHtml(api.name)}</div>
+          <div class="stack-type">${escHtml(api.type)}</div>
           ${urlLink ? `<div style="margin-bottom:4px">${urlLink}</div>` : ''}
-          <div class="stack-cost">${api.cost}</div>
-          <div class="stack-notes">${api.notes}</div>
+          <div class="stack-cost">${escHtml(api.cost)}</div>
+          <div class="stack-notes">${escHtml(api.notes)}</div>
         </div>
         <div class="stack-badge">${keyBadge}</div>
       </div>`;

@@ -1,3 +1,4 @@
+import calendar
 import fnmatch
 import json
 import math
@@ -214,6 +215,10 @@ CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
 #   _aircraft_cache : (type_string, source_label, timestamp)
 # Empty origin+dest with None coords = negative cache entry (API had no data).
 _cache_lock     = Lock()
+# _route_cache key scheme (three co-existing formats in the same dict):
+#   callsign           — adsbdb result, keyed by flight callsign (e.g. "SWA123")
+#   hex_code           — OpenSky result, keyed by 6-char ICAO hex (e.g. "a1b2c3")
+#   "airlabs:callsign" — AirLabs result, prefixed to avoid collisions with adsbdb entries
 _route_cache    = {}
 _aeroapi_cache  = {}
 _aircraft_cache = {}
@@ -532,7 +537,9 @@ def _billing_period_start(reset_day):
     # Before reset day this month — period started last month
     first_of_month = today.replace(day=1)
     last_month = first_of_month - timedelta(days=1)
-    return last_month.replace(day=reset_day).strftime("%Y-%m-%d")
+    # Clamp reset_day to actual days in last month (defensive for reset_day > 28)
+    last_month_days = calendar.monthrange(last_month.year, last_month.month)[1]
+    return last_month.replace(day=min(reset_day, last_month_days)).strftime("%Y-%m-%d")
 
 
 def _read_usage(path, reset_day):
@@ -660,10 +667,13 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                         )
                         _prune_cache(_route_cache, ADSBDB_CACHE_TTL)
                 elif r.status_code == 404:
-                    # Callsign not in adsbdb — cache as miss so we don't re-query every poll
+                    # Callsign not in adsbdb — cache as miss so we don't re-query every poll.
+                    # Use ADSBDB_CACHE_TTL (not ROUTE_MISS_TTL) so this prune doesn't evict
+                    # valid 1-hour cache entries for other callsigns.  The freshness check on
+                    # read still uses ROUTE_MISS_TTL for empty entries (see get_route above).
                     with _cache_lock:
                         _route_cache[callsign] = _cache_entry("", "", None, None, None, None)
-                        _prune_cache(_route_cache, ROUTE_MISS_TTL)
+                        _prune_cache(_route_cache, ADSBDB_CACHE_TTL)
                 # 5xx / unexpected: don't cache — transient error, retry next poll
             except Exception:
                 pass
@@ -709,6 +719,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # the plausibility check.
     _sky_origin = _sky_dest = ""
     _sky_src = "opensky"
+    # OpenSky is free/unlimited — intentionally excluded from the _apis_disabled kill-switch.
     if not (origin and destination) and OPENSKY_CLIENT_ID and hex_code and not _in_backoff("opensky"):
         with _cache_lock:
             cached = _route_cache.get(hex_code)
@@ -817,12 +828,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 else:
                     # Unexpected status (e.g. 404, 500) — negatively cache for
                     # ROUTE_MISS_TTL to prevent repeated quota-burning calls.
+                    # Use AIRLABS_CACHE_TTL for prune so we don't evict valid
+                    # 1-hour entries for other callsigns already in _route_cache.
                     _log(f"[airlabs] unexpected status {r.status_code} for {callsign} — negative caching")
                     with _cache_lock:
                         _route_cache[f"airlabs:{callsign}"] = _cache_entry(
                             "", "", None, None, None, None,
                         )
-                        _prune_cache(_route_cache, ROUTE_MISS_TTL)
+                        _prune_cache(_route_cache, AIRLABS_CACHE_TTL)
             except Exception:
                 pass
         else:
@@ -907,6 +920,13 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                 source = source or "aeroapi"
                         else:
                             _log(f"[aeroapi] implausible route {fa_origin}->{fa_dest} rejected for {callsign}")
+                else:
+                    # Unexpected status (4xx/5xx other than explicitly handled codes) —
+                    # negatively cache for ROUTE_MISS_TTL to prevent per-poll retries.
+                    _log(f"[aeroapi] unexpected status {r.status_code} for {callsign} — negative caching")
+                    with _cache_lock:
+                        _aeroapi_cache[callsign] = _cache_entry("", "", None, None, None, None)
+                        _prune_cache(_aeroapi_cache, AEROAPI_CACHE_TTL)
             except Exception:
                 pass
         # else: in backoff — already logged when backoff was set
@@ -1080,8 +1100,10 @@ class Overhead:
                 except Exception:
                     pass
 
-                # Persist caches only when we actually looked up flights — no point
-                # writing unchanged data every cycle when the zone is empty.
+                # Persist caches only when in-zone flights were processed.
+                # Route and type lookups only happen for in-zone flights, so
+                # an empty result means the caches are unchanged from the last
+                # write — skipping the write reduces unnecessary SD card I/O.
                 if data:
                     _save_caches()
 

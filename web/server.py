@@ -1,4 +1,6 @@
+import calendar
 import json
+import logging
 import os
 import subprocess
 import time
@@ -8,19 +10,20 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, render_template, request, Response, stream_with_context
 
+# Silence Werkzeug's request log and startup banner — they pollute plane.log
+# with HTTP noise that makes flight data harder to read.
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 LOG_PATH = Path.home() / "plane.log"
 
 
 def _log(msg):
+    # Write to stdout — captured by systemd's StandardOutput=append:/home/pi/plane.log,
+    # same as overhead.py.  Avoids a direct file-write that could race with log rotation.
     ts = datetime.now(_PACIFIC).strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}\n"
-    try:
-        with open(LOG_PATH, "a") as f:
-            f.write(line)
-    except Exception:
-        pass
+    print(f"[{ts}] {msg}", flush=True)
 
 
 app = Flask(__name__)
@@ -121,24 +124,24 @@ LOCATION_HOME = [
     {float(loc[1])},
     {float(loc[2])}
 ]
-WEATHER_LOCATION = {repr(str(existing["WEATHER_LOCATION"]))}
-OPENWEATHER_API_KEY = {repr(str(existing["OPENWEATHER_API_KEY"]))}
-TEMPERATURE_UNITS = {repr(str(existing["TEMPERATURE_UNITS"]))}
-MIN_ALTITUDE = {int(existing["MIN_ALTITUDE"])}
-MAX_ALTITUDE = {int(existing["MAX_ALTITUDE"])}
-BRIGHTNESS = {int(existing["BRIGHTNESS"])}
-GPIO_SLOWDOWN = {int(existing["GPIO_SLOWDOWN"])}
+WEATHER_LOCATION = {repr(str(existing.get("WEATHER_LOCATION", "")))}
+OPENWEATHER_API_KEY = {repr(str(existing.get("OPENWEATHER_API_KEY", "")))}
+TEMPERATURE_UNITS = {repr(str(existing.get("TEMPERATURE_UNITS", "imperial")))}
+MIN_ALTITUDE = {int(existing.get("MIN_ALTITUDE", 100))}
+MAX_ALTITUDE = {int(existing.get("MAX_ALTITUDE", 15000))}
+BRIGHTNESS = {int(existing.get("BRIGHTNESS", 80))}
+GPIO_SLOWDOWN = {int(existing.get("GPIO_SLOWDOWN", 2))}
 NIGHT_BRIGHTNESS = {int(existing.get("NIGHT_BRIGHTNESS", 20))}
-JOURNEY_CODE_SELECTED = {repr(str(existing["JOURNEY_CODE_SELECTED"]))}
-JOURNEY_BLANK_FILLER = {repr(str(existing["JOURNEY_BLANK_FILLER"]))}
-HAT_PWM_ENABLED = {bool(existing["HAT_PWM_ENABLED"])}
+JOURNEY_CODE_SELECTED = {repr(str(existing.get("JOURNEY_CODE_SELECTED", "")))}
+JOURNEY_BLANK_FILLER = {repr(str(existing.get("JOURNEY_BLANK_FILLER", " ? ")))}
+HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
 
-RECEIVER_HOST = {repr(str(existing["RECEIVER_HOST"]))}
+RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST", "localhost")))}
 
-LOCAL_AIRPORT = {repr(str(existing["LOCAL_AIRPORT"]))}
-OPENSKY_CLIENT_ID = {repr(str(existing["OPENSKY_CLIENT_ID"]))}
-OPENSKY_CLIENT_SECRET = {repr(str(existing["OPENSKY_CLIENT_SECRET"]))}
-FLIGHTAWARE_API_KEY = {repr(str(existing["FLIGHTAWARE_API_KEY"]))}
+LOCAL_AIRPORT = {repr(str(existing.get("LOCAL_AIRPORT", "")))}
+OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID", "")))}
+OPENSKY_CLIENT_SECRET = {repr(str(existing.get("OPENSKY_CLIENT_SECRET", "")))}
+FLIGHTAWARE_API_KEY = {repr(str(existing.get("FLIGHTAWARE_API_KEY", "")))}
 AIRLABS_API_KEY = {repr(str(existing.get("AIRLABS_API_KEY", "")))}
 TIMEZONE = {repr(str(existing.get("TIMEZONE", "America/Los_Angeles")))}
 """
@@ -147,8 +150,12 @@ TIMEZONE = {repr(str(existing.get("TIMEZONE", "America/Los_Angeles")))}
         if k not in _KNOWN_KEYS and not k.startswith("_"):
             content += f"{k} = {repr(v)}\n"
 
-    with open(CONFIG_PATH, "w") as f:
+    # Atomic write: write to a temp file then rename so a crash mid-write
+    # can't leave config.py truncated or empty.
+    tmp = str(CONFIG_PATH) + ".tmp"
+    with open(tmp, "w") as f:
         f.write(content)
+    os.replace(tmp, CONFIG_PATH)
 
 
 @app.route("/")
@@ -227,11 +234,14 @@ def get_flights():
 @app.route("/api/status", methods=["GET"])
 def combined_status():
     """Single endpoint returning both service and display state."""
-    svc = subprocess.run(
-        ["systemctl", "is-active", "FlightTracker"],
-        capture_output=True, text=True
-    )
-    running = svc.stdout.strip() == "active"
+    try:
+        svc = subprocess.run(
+            ["systemctl", "is-active", "FlightTracker"],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = svc.stdout.strip() == "active"
+    except subprocess.TimeoutExpired:
+        running = False
     return jsonify({
         "running": running,
         "paused": PAUSE_FLAG.exists() if running else True,
@@ -242,11 +252,15 @@ def combined_status():
 
 @app.route("/api/display", methods=["GET"])
 def display_status():
-    svc = subprocess.run(
-        ["systemctl", "is-active", "FlightTracker"],
-        capture_output=True, text=True
-    )
-    if svc.stdout.strip() != "active":
+    try:
+        svc = subprocess.run(
+            ["systemctl", "is-active", "FlightTracker"],
+            capture_output=True, text=True, timeout=5,
+        )
+        active = svc.stdout.strip() == "active"
+    except subprocess.TimeoutExpired:
+        active = False
+    if not active:
         return jsonify({"paused": True})
     return jsonify({"paused": PAUSE_FLAG.exists()})
 
@@ -267,11 +281,15 @@ def display_on():
 
 @app.route("/api/service", methods=["GET"])
 def service_status():
-    result = subprocess.run(
-        ["systemctl", "is-active", "FlightTracker"],
-        capture_output=True, text=True
-    )
-    return jsonify({"running": result.stdout.strip() == "active"})
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "FlightTracker"],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = result.stdout.strip() == "active"
+    except subprocess.TimeoutExpired:
+        running = False
+    return jsonify({"running": running})
 
 
 @app.route("/api/service/stop", methods=["POST"])
@@ -279,10 +297,12 @@ def service_stop():
     try:
         subprocess.run(
             ["sudo", "/usr/bin/systemctl", "stop", "FlightTracker"],
-            check=True, capture_output=True
+            check=True, capture_output=True, timeout=15,
         )
         _log("[web] service stopped")
         return jsonify({"ok": True})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "systemctl timed out"}), 504
     except subprocess.CalledProcessError as e:
         return jsonify({"error": (e.stderr or b"").decode()}), 500
 
@@ -292,10 +312,12 @@ def service_start():
     try:
         subprocess.run(
             ["sudo", "/usr/bin/systemctl", "start", "FlightTracker"],
-            check=True, capture_output=True
+            check=True, capture_output=True, timeout=15,
         )
         _log("[web] service started")
         return jsonify({"ok": True})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "systemctl timed out"}), 504
     except subprocess.CalledProcessError as e:
         return jsonify({"error": (e.stderr or b"").decode()}), 500
 
@@ -307,21 +329,23 @@ def _billing_period_start(reset_day):
         return today.replace(day=reset_day).strftime("%Y-%m-%d")
     first_of_month = today.replace(day=1)
     last_month = first_of_month - timedelta(days=1)
-    return last_month.replace(day=reset_day).strftime("%Y-%m-%d")
+    # Clamp reset_day to actual days in last month (defensive for reset_day > 28)
+    actual_day = min(reset_day, calendar.monthrange(last_month.year, last_month.month)[1])
+    return last_month.replace(day=actual_day).strftime("%Y-%m-%d")
 
 
 def _billing_period_end(reset_day):
     """Return the last day of the current billing period as YYYY-MM-DD."""
     today = datetime.now()
-    # Next reset = same day next month (or this month if we haven't hit it yet)
+    # Determine year/month of the next reset date
     if today.day >= reset_day:
-        # Next reset is next month on reset_day
-        if today.month == 12:
-            next_reset = today.replace(year=today.year + 1, month=1, day=reset_day)
-        else:
-            next_reset = today.replace(month=today.month + 1, day=reset_day)
+        y = today.year + 1 if today.month == 12 else today.year
+        m = 1 if today.month == 12 else today.month + 1
     else:
-        next_reset = today.replace(day=reset_day)
+        y, m = today.year, today.month
+    # Clamp reset_day to actual days in that month (defensive for reset_day > 28)
+    actual_day = min(reset_day, calendar.monthrange(y, m)[1])
+    next_reset = today.replace(year=y, month=m, day=actual_day)
     return (next_reset - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
@@ -518,6 +542,7 @@ def log_history():
 @app.route("/api/log/stream")
 def log_stream():
     def generate():
+        yield "retry: 5000\n\n"   # tell browser to wait 5 s before auto-reconnecting
         log_inode = None
         try:
             with open(LOG_PATH) as f:
@@ -548,4 +573,4 @@ def log_stream():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
