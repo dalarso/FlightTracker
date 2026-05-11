@@ -200,10 +200,10 @@ def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lo
     return (d_orig + d_dest) / route_km < 1.8
 
 
-AEROAPI_CACHE_TTL  = 3600   # routes don't change mid-flight
-OPENSKY_CACHE_TTL  = 3600   # re-query OpenSky after 1 hour
-ADSBDB_CACHE_TTL   = 3600   # adsbdb route data; 1 hr TTL
-AIRLABS_CACHE_TTL  = 3600   # airlabs route data; 1 hr TTL
+AEROAPI_CACHE_TTL  = 172800  # paid per call — cache 48 h; scheduled routes are stable
+OPENSKY_CACHE_TTL  = 3600    # free/unlimited, hex-keyed (aircraft not callsign) — keep short
+ADSBDB_CACHE_TTL   = 3600    # free/unlimited — keep short; fresh data costs nothing
+AIRLABS_CACHE_TTL  = 172800  # 1,000 calls/month limit — cache 48 h to protect quota
 ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
 CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
