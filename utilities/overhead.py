@@ -628,12 +628,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if _ov:
         ov_origin = (_ov.get("origin") or "").strip().upper()
         ov_dest   = (_ov.get("destination") or "").strip().upper()
+        ov_plane = (_ov.get("plane") or "").strip()
         _log(
             f"[override] {callsign} matched '{_ov['pattern']}'"
             f" → {ov_origin or '?'}->{ov_dest or '?'}"
+            + (f"  type='{ov_plane}'" if ov_plane else "")
             + (f"  ({_ov['note']})" if _ov.get("note") else "")
         )
-        return ov_origin, ov_dest, "override"
+        return ov_origin, ov_dest, "override", ov_plane
 
     # ── 1. adsbdb (static historical DB) ──────────────────────────────────────
     adsbdb_origin = adsbdb_dest = ""
@@ -943,7 +945,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 
     origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
     destination = destination if destination.upper() not in BLANK_FIELDS else ""
-    return origin, destination, source or "none"
+    return origin, destination, source or "none", ""  # 4th value: override plane (empty for non-override)
 
 
 def get_aircraft_type(hex_code):
@@ -1063,8 +1065,14 @@ class Overhead:
                     flight.latitude, flight.longitude,
                 )
                 _type_fut = _lookup_executor.submit(get_aircraft_type, flight.hex_code)
-                origin, destination, route_src = _route_fut.result()
-                plane, type_src              = _type_fut.result()
+                origin, destination, route_src, override_plane = _route_fut.result()
+                plane, type_src = _type_fut.result()
+
+                # If the override rule specifies a plane type, use it instead of the
+                # API result — lets known aircraft like MXY* show type without API calls.
+                if override_plane:
+                    plane    = override_plane
+                    type_src = "override"
 
                 plane    = plane    if plane.upper()    not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""

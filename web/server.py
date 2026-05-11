@@ -514,6 +514,7 @@ def save_overrides():
                 "pattern":     rule["pattern"].strip().upper(),
                 "origin":      rule.get("origin", "").strip().upper(),
                 "destination": rule.get("destination", "").strip().upper(),
+                "plane":       rule.get("plane", "").strip(),
                 "note":        rule.get("note", "").strip(),
             })
         tmp = str(OVERRIDES_FILE) + ".tmp"

@@ -480,6 +480,11 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           <div class="hint">Arrival airport IATA code</div>
         </div>
         <div class="field">
+          <label>Aircraft Type <span style="color:var(--muted)">(optional)</span></label>
+          <input type="text" id="rule-plane" placeholder="AIRBUS A220-300">
+          <div class="hint">Overrides API type lookup — use when APIs have no coverage</div>
+        </div>
+        <div class="field">
           <label>Note <span style="color:var(--muted)">(optional)</span></label>
           <input type="text" id="rule-note" placeholder="Janet Airlines — classified destination">
         </div>
@@ -1214,6 +1219,7 @@ function renderRules() {
           <th>Pattern</th>
           <th>Origin</th>
           <th>Dest</th>
+          <th>Plane</th>
           <th>Note</th>
           <th></th>
         </tr>
@@ -1224,6 +1230,7 @@ function renderRules() {
             <td><span class="rule-pattern">${escHtml(r.pattern)}</span></td>
             <td>${r.origin    ? `<span class="rule-airport">${escHtml(r.origin)}</span>`      : '<span class="rule-blank">—</span>'}</td>
             <td>${r.destination ? `<span class="rule-airport">${escHtml(r.destination)}</span>` : '<span class="rule-blank">—</span>'}</td>
+            <td><span class="rule-note">${escHtml(r.plane || '')}</span></td>
             <td><span class="rule-note">${escHtml(r.note || '')}</span></td>
             <td><button class="btn btn-danger" style="padding:3px 10px;font-size:11px" onclick="deleteRule(${i})">✕</button></td>
           </tr>`).join('')}
@@ -1242,6 +1249,7 @@ async function addRule() {
     pattern,
     origin:      document.getElementById('rule-origin').value.trim().toUpperCase(),
     destination: document.getElementById('rule-dest').value.trim().toUpperCase(),
+    plane:       document.getElementById('rule-plane').value.trim(),
     note:        document.getElementById('rule-note').value.trim(),
   };
 
@@ -1251,6 +1259,7 @@ async function addRule() {
     document.getElementById('rule-pattern').value = '';
     document.getElementById('rule-origin').value  = '';
     document.getElementById('rule-dest').value    = '';
+    document.getElementById('rule-plane').value   = '';
     document.getElementById('rule-note').value    = '';
     renderRules();
     showToast(`✓ Rule added: ${rule.pattern}`, 'ok');
