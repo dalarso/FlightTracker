@@ -91,8 +91,9 @@ AIRPLANESLIVE_URL = "https://api.airplanes.live/v2/hex/{}"
 AEROAPI_URL = "https://aeroapi.flightaware.com/aeroapi/flights/{}"
 AIRLABS_URL = "https://airlabs.co/api/v9/flight"
 OPENSKY_FLIGHTS_URL = "https://opensky-network.org/api/flights/aircraft"
-ADSBDB_CALLSIGN_URL = "https://api.adsbdb.com/v0/callsign/{}"
-ADSBDB_AIRCRAFT_URL = "https://api.adsbdb.com/v0/aircraft/{}"
+ADSBDB_CALLSIGN_URL  = "https://api.adsbdb.com/v0/callsign/{}"
+ADSBDB_AIRCRAFT_URL  = "https://api.adsbdb.com/v0/aircraft/{}"
+OPENSKY_AIRCRAFT_URL = "https://opensky-network.org/api/metadata/aircraft/icao/{}"  # public, no token
 
 # fr24feed flights.json field indices
 # {hex: [hex, lat, lon, heading, alt_ft, speed, squawk, ?, type, reg, timestamp, origin, dest, ?, on_ground, vert_rate, callsign]}
@@ -138,6 +139,7 @@ AIRLABS_USAGE_FILE = os.path.join(_DATA_DIR, "airlabs_usage.json")
 AEROAPI_USAGE_FILE = os.path.join(_DATA_DIR, "aeroapi_usage.json")
 CACHE_FILE         = os.path.join(_DATA_DIR, "ft_cache.json")
 OVERRIDES_FILE     = os.path.join(_DATA_DIR, "ft_overrides.json")
+TEST_DISPLAY_FILE  = "/tmp/ft_test_display.json"   # written by run_test_lookup(); read by _grab_data()
 AIRLABS_MONTHLY_LIMIT  = 1000        # free tier: 1,000 calls/month
 AEROAPI_COST_PER_CALL  = 0.005       # $0.005 per AeroAPI call (informational only)
 AIRLABS_RESET_DAY  = 9               # AirLabs billing period resets on the 9th
@@ -206,6 +208,7 @@ ADSBDB_CACHE_TTL   = 3600    # free/unlimited — keep short; fresh data costs n
 AIRLABS_CACHE_TTL  = 172800  # 1,000 calls/month limit — cache 48 h to protect quota
 ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
+AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every poll cycle
 CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
 
 # All caches store tuples where the LAST element is always the timestamp,
@@ -951,8 +954,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 def get_aircraft_type(hex_code):
     """
     Aircraft type lookup priority:
-      1. airplanes.live (best coverage, has desc field)
-      2. adsbdb (fallback)
+      1. airplanes.live /v2/hex/{hex}  (best coverage, has desc field)
+      2. adsbdb /v0/aircraft/{hex}     (static DB, manufacturer + type)
+      3. OpenSky metadata /api/metadata/aircraft/icao/{hex}  (public, no token)
     Cache tuple: (type_string, source_label, timestamp) — timestamp last for _prune_cache.
     Returns (type_string, source_label).
     """
@@ -967,8 +971,8 @@ def get_aircraft_type(hex_code):
         age = now - cached[2]
         if cached[0] and age < AIRCRAFT_CACHE_TTL:
             return cached[0], f"{cached[1]}:cached"   # known type, still fresh
-        # No miss TTL — always retry: get_aircraft_type is only called for in-zone
-        # flights, so every retry is justified.  A successful hit ends retries for 24h.
+        if not cached[0] and age < AIRCRAFT_MISS_TTL:
+            return "", "miss:cached"                   # recent miss — don't retry all 3 APIs yet
 
     # 1. airplanes.live
     try:
@@ -988,7 +992,7 @@ def get_aircraft_type(hex_code):
 
     # 2. adsbdb
     try:
-        r = requests.get(ADSBDB_AIRCRAFT_URL.format(hex_code), timeout=5)
+        r = requests.get(ADSBDB_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
         if r.status_code == 200:
             ac = r.json().get("response", {}).get("aircraft", {})
             manufacturer = ac.get("manufacturer", "") or ""
@@ -1002,10 +1006,488 @@ def get_aircraft_type(hex_code):
     except Exception:
         pass
 
-    # No miss caching — retry every poll cycle until the type resolves.
-    # Both APIs are free/unlimited and this function is only called for in-zone
-    # flights, so the extra calls are acceptable and the data actually matters.
+    # 3. OpenSky aircraft metadata (public endpoint — no token required)
+    try:
+        r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            plane = (data.get("model") or data.get("typecode") or "").strip()
+            if plane:
+                with _cache_lock:
+                    _aircraft_cache[hex_code] = (plane, "opensky:meta", now)
+                    _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+                return plane, "opensky:meta"
+    except Exception:
+        pass
+
+    # Cache the miss so all 3 APIs aren't retried on every poll cycle.
+    # AIRCRAFT_MISS_TTL (5 min) keeps retries reasonable without hammering the
+    # APIs for aircraft that genuinely have no type data yet (e.g. new deliveries).
+    with _cache_lock:
+        _aircraft_cache[hex_code] = ("", "miss", now)
+        _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
     return "", "miss"
+
+
+# ── Test flight lookup (no-cache, web-triggered) ──────────────────────────────
+
+def run_test_lookup(callsign, use_cache=True):
+    """
+    Full test lookup for the web UI.
+
+    use_cache=True  (default)
+        Calls the real get_route() / get_aircraft_type() functions — the exact
+        same code path as a live overhead flight, cache reads and all.  If the
+        API waterfall order ever changes, this mode follows automatically because
+        it literally IS those functions.
+
+    use_cache=False
+        Bypasses all cache reads; every API is called fresh.  Override rules
+        are still applied (step 0).  LOCAL_AIRPORT heuristic is skipped.
+        AirLabs and AeroAPI quota counters ARE incremented — these are real calls.
+
+    Both modes respect backoffs and the _apis_disabled kill-switch.
+    Writes to TEST_DISPLAY_FILE so the next grab_data() cycle injects the
+    flight into the LED matrix for 30 seconds.
+    Returns a comprehensive dict with per-step results for the web UI.
+    """
+    cs   = callsign.strip().upper()
+    tag  = f"[TEST:{cs}]"
+    mode = "cached" if use_cache else "no-cache"
+    DISPLAY_SECS = 30
+    now  = int(time.time())
+
+    _log(f"{tag} ━━━ test lookup starting [{mode}] ━━━")
+
+    result = {
+        "callsign":          cs,
+        "use_cache":         use_cache,
+        "hex_code":          "",
+        "airborne":          False,
+        "lat":               None,
+        "lon":               None,
+        "altitude":          None,
+        "vertical_speed":    0,
+        "override_matched":  False,
+        "override":          None,
+        "steps":             {},
+        "final_origin":      "",
+        "final_destination": "",
+        "final_plane":       "",
+        "route_source":      "none",
+        "type_source":       "none",
+        "display_injected":  False,
+        "display_seconds":   DISPLAY_SECS,
+    }
+
+    # ── Live position via airplanes.live (common to both modes) ───────────────
+    # Always run first — provides hex code and current position for plausibility
+    # checks, plus an opportunistic type from the live feed.
+    hex_code          = ""
+    plane_lat         = None
+    plane_lon         = None
+    vertical_speed    = 0
+    altitude_ft       = 10000
+    _live_type_cached = ""   # type from the feed, used in no-cache type resolution
+
+    for _kind, _url in [
+        ("callsign", f"https://api.airplanes.live/v2/callsign/{cs}"),
+        ("reg",      f"https://api.airplanes.live/v2/reg/{cs}"),
+    ]:
+        try:
+            r = requests.get(_url, timeout=8)
+            if r.status_code == 200:
+                ac_list = r.json().get("ac", [])
+                if ac_list:
+                    ac             = ac_list[0]
+                    hex_code       = (ac.get("hex") or "").lower()
+                    plane_lat      = ac.get("lat")
+                    plane_lon      = ac.get("lon")
+                    vertical_speed = ac.get("baro_rate") or ac.get("geom_rate") or 0
+                    altitude_ft    = ac.get("alt_baro") or ac.get("alt_geom") or 10000
+                    _live_type_cached = (ac.get("desc") or ac.get("t") or "").strip()
+                    result.update({
+                        "hex_code":       hex_code,
+                        "tail":           (ac.get("r") or "").strip().upper(),
+                        "airborne":       True,
+                        "lat":            plane_lat,
+                        "lon":            plane_lon,
+                        "altitude":       int(altitude_ft),
+                        "vertical_speed": int(vertical_speed),
+                    })
+                    result["steps"]["live_position"] = {
+                        "found_by": _kind,
+                        "hex":      hex_code,
+                        "lat":      plane_lat,
+                        "lon":      plane_lon,
+                        "alt_ft":   int(altitude_ft),
+                        "vs":       int(vertical_speed),
+                        "type":     _live_type_cached,
+                    }
+                    _log(
+                        f"{tag} [airplanes.live:{_kind}] hex={hex_code}"
+                        f" alt={altitude_ft} vs={vertical_speed}"
+                        f" pos=({plane_lat},{plane_lon})"
+                    )
+                    break
+        except Exception as _e:
+            _log(f"{tag} [airplanes.live:{_kind}] error: {_e}")
+
+    if not result["airborne"]:
+        _log(f"{tag} [airplanes.live] not currently airborne — static data only")
+        result["steps"]["live_position"] = {"found_by": None, "airborne": False}
+
+    # ── Branch: cached vs no-cache ────────────────────────────────────────────
+
+    if use_cache:
+        # ── CACHED MODE ───────────────────────────────────────────────────────
+        # Calls the real production functions verbatim.  If the API waterfall in
+        # get_route() or get_aircraft_type() ever changes, this test automatically
+        # follows — no duplication, no divergence.
+        result["steps"]["mode"] = "cache"
+
+        origin, destination, route_src, override_plane = get_route(
+            hex_code, cs, vertical_speed, plane_lat, plane_lon
+        )
+        plane, type_src = get_aircraft_type(hex_code)
+
+        # Mirror _grab_data(): if override specified a plane type, it wins
+        if override_plane:
+            plane    = override_plane
+            type_src = "override"
+
+        plane = plane if plane.upper() not in BLANK_FIELDS else ""
+
+        # Capture override details if the override fired (route_src == "override")
+        if route_src == "override":
+            _ov = _match_override(cs)
+            result["override_matched"] = True
+            result["override"]         = dict(_ov) if _ov else {}
+
+        result.update({
+            "final_origin":      origin,
+            "final_destination": destination,
+            "final_plane":       plane,
+            "route_source":      route_src,
+            "type_source":       type_src,
+        })
+        result["steps"].update({
+            "route_result": {"source": route_src,  "origin": origin, "destination": destination},
+            "type_result":  {"source": type_src,   "plane":  plane},
+        })
+        _log(f"{tag} [route:{route_src}] {origin or '?'}->{destination or '?'}")
+        _log(f"{tag} [type:{type_src}] '{plane}'")
+
+    else:
+        # ── NO-CACHE MODE ─────────────────────────────────────────────────────
+        # Every API called fresh; cache is never read.  Override rules still
+        # apply first (step 0).  LOCAL_AIRPORT heuristic intentionally skipped.
+        result["steps"]["mode"] = "no_cache"
+
+        # ── 0. Override rules ──────────────────────────────────────────────────
+        _ov = _match_override(cs)
+        if _ov:
+            ov_origin = (_ov.get("origin") or "").strip().upper()
+            ov_dest   = (_ov.get("destination") or "").strip().upper()
+            ov_plane  = (_ov.get("plane") or "").strip()
+            _log(
+                f"{tag} [override] matched '{_ov['pattern']}'"
+                f" → {ov_origin or '?'}->{ov_dest or '?'}"
+                + (f"  type='{ov_plane}'" if ov_plane else "")
+                + (f"  note: {_ov['note']}" if _ov.get("note") else "")
+            )
+            result["override_matched"]  = True
+            result["override"]          = dict(_ov)
+            result["final_origin"]      = ov_origin
+            result["final_destination"] = ov_dest
+            result["final_plane"]       = ov_plane
+            result["route_source"]      = "override"
+            if ov_plane:
+                result["type_source"]   = "override"
+            for _sk in ("adsbdb_route", "opensky", "airlabs", "aeroapi"):
+                result["steps"][_sk] = {"skipped": "override"}
+
+        _route_resolved = bool(result["final_origin"] or result["final_destination"])
+
+        if not _route_resolved:
+
+            # ── 1. adsbdb route (fresh) ────────────────────────────────────────
+            _adsbdb_origin = _adsbdb_dest = ""
+            _adsbdb_olat = _adsbdb_olon = _adsbdb_dlat = _adsbdb_dlon = None
+            try:
+                r = requests.get(ADSBDB_CALLSIGN_URL.format(cs), timeout=5)
+                result["steps"]["adsbdb_route"] = {"status": r.status_code}
+                if r.status_code == 200:
+                    fr = (r.json().get("response") or {}).get("flightroute") or {}
+                    _adsbdb_origin = (fr.get("origin") or {}).get("iata_code", "") or ""
+                    _adsbdb_dest   = (fr.get("destination") or {}).get("iata_code", "") or ""
+                    _adsbdb_olat   = (fr.get("origin") or {}).get("latitude")
+                    _adsbdb_olon   = (fr.get("origin") or {}).get("longitude")
+                    _adsbdb_dlat   = (fr.get("destination") or {}).get("latitude")
+                    _adsbdb_dlon   = (fr.get("destination") or {}).get("longitude")
+                    result["steps"]["adsbdb_route"].update({
+                        "origin": _adsbdb_origin, "destination": _adsbdb_dest,
+                    })
+                    _log(f"{tag} [adsbdb] route: {_adsbdb_origin or '?'}->{_adsbdb_dest or '?'}")
+                elif r.status_code == 404:
+                    _log(f"{tag} [adsbdb] callsign not in DB (404)")
+                else:
+                    _log(f"{tag} [adsbdb] unexpected status {r.status_code}")
+            except Exception as _e:
+                _log(f"{tag} [adsbdb] error: {_e}")
+                result["steps"]["adsbdb_route"] = {"error": str(_e)}
+
+            if _adsbdb_origin or _adsbdb_dest:
+                result["final_origin"]      = _adsbdb_origin
+                result["final_destination"] = _adsbdb_dest
+                result["route_source"]      = "adsbdb"
+                _route_resolved             = True
+
+            # ── 2. OpenSky (fresh, respects backoff) ───────────────────────────
+            if not (result["final_origin"] and result["final_destination"]) and OPENSKY_CLIENT_ID and hex_code:
+                if _in_backoff("opensky"):
+                    _log(f"{tag} [opensky] in backoff — skipping")
+                    result["steps"]["opensky"] = {"skipped": "backoff"}
+                else:
+                    _token = _get_opensky_token()
+                    if not _token:
+                        _log(f"{tag} [opensky] no token available")
+                        result["steps"]["opensky"] = {"skipped": "no_token"}
+                    else:
+                        try:
+                            r = requests.get(
+                                OPENSKY_FLIGHTS_URL,
+                                params={"icao24": hex_code.lower(), "begin": now - 86400, "end": now},
+                                headers={"Authorization": f"Bearer {_token}"},
+                                timeout=10,
+                            )
+                            result["steps"]["opensky"] = {"status": r.status_code}
+                            if r.status_code == 429:
+                                _set_backoff("opensky", secs=3600)
+                                _log(f"{tag} [opensky] 429 — rate limited")
+                            elif r.status_code in (401, 403):
+                                _set_backoff("opensky", secs=86400)
+                                _log(f"{tag} [opensky] auth error {r.status_code}")
+                            elif r.status_code == 200:
+                                _sky_data = r.json() or []
+                                if _sky_data:
+                                    _fl = max(_sky_data, key=lambda f: f.get("firstSeen", 0))
+                                    _sky_origin = icao_to_iata(_fl.get("estDepartureAirport") or "")
+                                    _sky_dest   = icao_to_iata(_fl.get("estArrivalAirport") or "")
+                                    result["steps"]["opensky"].update({
+                                        "origin": _sky_origin, "destination": _sky_dest,
+                                    })
+                                    _log(f"{tag} [opensky] route: {_sky_origin or '?'}->{_sky_dest or '?'}")
+                                    if _sky_origin or _sky_dest:
+                                        result["final_origin"]      = result["final_origin"] or _sky_origin
+                                        result["final_destination"] = result["final_destination"] or _sky_dest
+                                        result["route_source"]      = "opensky"
+                                        _route_resolved             = True
+                                else:
+                                    _log(f"{tag} [opensky] no flight history in last 24h")
+                                    result["steps"]["opensky"]["no_data"] = True
+                        except Exception as _e:
+                            _log(f"{tag} [opensky] error: {_e}")
+                            result["steps"]["opensky"] = {"error": str(_e)}
+
+            # ── 3. AirLabs (fresh, counts quota, respects backoff + kill-switch) ─
+            if not (result["final_origin"] and result["final_destination"]) and AIRLABS_API_KEY and cs:
+                _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)
+                if _in_backoff("airlabs"):
+                    _log(f"{tag} [airlabs] in backoff — skipping")
+                    result["steps"]["airlabs"] = {"skipped": "backoff"}
+                elif _apis_disabled:
+                    _log(f"{tag} [airlabs] APIs disabled — skipping")
+                    result["steps"]["airlabs"] = {"skipped": "apis_disabled"}
+                else:
+                    try:
+                        r = requests.get(
+                            AIRLABS_URL,
+                            params={"flight_icao": cs, "api_key": AIRLABS_API_KEY},
+                            timeout=5,
+                        )
+                        result["steps"]["airlabs"] = {"status": r.status_code}
+                        if r.status_code == 429:
+                            _set_backoff("airlabs", secs=3600)
+                            _log(f"{tag} [airlabs] 429 — rate limited")
+                        elif r.status_code in (401, 403):
+                            _set_backoff("airlabs", secs=86400)
+                            _log(f"{tag} [airlabs] auth error {r.status_code}")
+                        elif r.status_code == 200:
+                            _airlabs_increment()
+                            _resp = r.json().get("response") or {}
+                            _al_origin = _resp.get("dep_iata", "") or ""
+                            _al_dest   = _resp.get("arr_iata", "") or ""
+                            _al_olat   = _resp.get("dep_lat")
+                            _al_olon   = _resp.get("dep_lng")
+                            _al_dlat   = _resp.get("arr_lat")
+                            _al_dlon   = _resp.get("arr_lng")
+                            result["steps"]["airlabs"].update({
+                                "origin": _al_origin, "destination": _al_dest,
+                            })
+                            _log(f"{tag} [airlabs] route: {_al_origin or '?'}->{_al_dest or '?'}")
+                            if _al_origin or _al_dest:
+                                _al_ok = _route_plausible(plane_lat, plane_lon,
+                                                           _al_olat, _al_olon, _al_dlat, _al_dlon)
+                                result["steps"]["airlabs"]["plausible"] = _al_ok
+                                if _al_ok:
+                                    result["final_origin"]      = result["final_origin"] or _al_origin
+                                    result["final_destination"] = result["final_destination"] or _al_dest
+                                    result["route_source"]      = "airlabs"
+                                    _route_resolved             = True
+                                else:
+                                    _log(f"{tag} [airlabs] route implausible — rejected")
+                        else:
+                            _log(f"{tag} [airlabs] status {r.status_code} — no data")
+                    except Exception as _e:
+                        _log(f"{tag} [airlabs] error: {_e}")
+                        result["steps"]["airlabs"] = {"error": str(_e)}
+
+            # ── 4. AeroAPI (fresh, counts spend, respects backoff + kill-switch) ─
+            if not (result["final_origin"] and result["final_destination"]) and FLIGHTAWARE_API_KEY and cs:
+                _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)
+                if _in_backoff("aeroapi"):
+                    _log(f"{tag} [aeroapi] in backoff — skipping")
+                    result["steps"]["aeroapi"] = {"skipped": "backoff"}
+                elif _apis_disabled:
+                    _log(f"{tag} [aeroapi] APIs disabled — skipping")
+                    result["steps"]["aeroapi"] = {"skipped": "apis_disabled"}
+                else:
+                    try:
+                        r = requests.get(
+                            AEROAPI_URL.format(cs),
+                            headers={"x-apikey": FLIGHTAWARE_API_KEY},
+                            timeout=10,
+                        )
+                        result["steps"]["aeroapi"] = {"status": r.status_code}
+                        if r.status_code == 429:
+                            _set_backoff("aeroapi", secs=3600)
+                            _log(f"{tag} [aeroapi] 429 — rate limited")
+                        elif r.status_code == 402:
+                            _set_backoff("aeroapi", secs=86400)
+                            _log(f"{tag} [aeroapi] 402 — credit exhausted")
+                        elif r.status_code in (401, 403):
+                            _set_backoff("aeroapi", secs=86400)
+                            _log(f"{tag} [aeroapi] auth error {r.status_code}")
+                        elif r.status_code == 200:
+                            _aeroapi_increment()
+                            _flights = r.json().get("flights", [])
+                            _active  = [f for f in _flights if not f.get("actual_on")]
+                            _fa_fl   = _active[0] if _active else (_flights[0] if _flights else None)
+                            if _fa_fl:
+                                _fa_origin = (_fa_fl.get("origin") or {}).get("code_iata", "") or ""
+                                _fa_dest   = (_fa_fl.get("destination") or {}).get("code_iata", "") or ""
+                                _fa_olat   = (_fa_fl.get("origin") or {}).get("latitude")
+                                _fa_olon   = (_fa_fl.get("origin") or {}).get("longitude")
+                                _fa_dlat   = (_fa_fl.get("destination") or {}).get("latitude")
+                                _fa_dlon   = (_fa_fl.get("destination") or {}).get("longitude")
+                                result["steps"]["aeroapi"].update({
+                                    "origin": _fa_origin, "destination": _fa_dest,
+                                })
+                                _log(f"{tag} [aeroapi] route: {_fa_origin or '?'}->{_fa_dest or '?'}")
+                                if _fa_origin or _fa_dest:
+                                    _fa_ok = _route_plausible(plane_lat, plane_lon,
+                                                               _fa_olat, _fa_olon, _fa_dlat, _fa_dlon)
+                                    result["steps"]["aeroapi"]["plausible"] = _fa_ok
+                                    if _fa_ok:
+                                        result["final_origin"]      = result["final_origin"] or _fa_origin
+                                        result["final_destination"] = result["final_destination"] or _fa_dest
+                                        result["route_source"]      = "aeroapi"
+                                        _route_resolved             = True
+                                    else:
+                                        _log(f"{tag} [aeroapi] route implausible — rejected")
+                            else:
+                                _log(f"{tag} [aeroapi] no active flight found")
+                        else:
+                            _log(f"{tag} [aeroapi] status {r.status_code} — no data")
+                    except Exception as _e:
+                        _log(f"{tag} [aeroapi] error: {_e}")
+                        result["steps"]["aeroapi"] = {"error": str(_e)}
+
+        # ── Aircraft type (no-cache): airplanes.live feed data, then adsbdb, then OpenSky meta ──
+        if not result["final_plane"] and _live_type_cached:
+            result["final_plane"] = _live_type_cached
+            result["type_source"] = "airplanes.live"
+            _log(f"{tag} [type:airplanes.live] '{_live_type_cached}'")
+
+        if not result["final_plane"] and hex_code:
+            try:
+                r = requests.get(ADSBDB_AIRCRAFT_URL.format(hex_code), timeout=5)
+                result["steps"]["adsbdb_type"] = {"status": r.status_code}
+                if r.status_code == 200:
+                    _ac    = r.json().get("response", {}).get("aircraft", {})
+                    _mfr   = (_ac.get("manufacturer") or "").strip()
+                    _tp    = (_ac.get("type") or "").strip()
+                    _atype = f"{_mfr} {_tp}".strip()
+                    result["steps"]["adsbdb_type"]["type"] = _atype
+                    if _atype:
+                        result["final_plane"] = _atype
+                        result["type_source"] = "adsbdb"
+                        _log(f"{tag} [type:adsbdb] '{_atype}'")
+                    else:
+                        _log(f"{tag} [type:adsbdb] no type data")
+                else:
+                    _log(f"{tag} [type:adsbdb] status {r.status_code}")
+            except Exception as _e:
+                _log(f"{tag} [type:adsbdb] error: {_e}")
+                result["steps"]["adsbdb_type"] = {"error": str(_e)}
+
+        if not result["final_plane"] and hex_code:
+            try:
+                r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
+                result["steps"]["opensky_meta"] = {"status": r.status_code}
+                if r.status_code == 200:
+                    _odata = r.json()
+                    _otype = (_odata.get("model") or _odata.get("typecode") or "").strip()
+                    result["steps"]["opensky_meta"]["type"] = _otype
+                    if _otype:
+                        result["final_plane"] = _otype
+                        result["type_source"] = "opensky:meta"
+                        _log(f"{tag} [type:opensky:meta] '{_otype}'")
+                    else:
+                        _log(f"{tag} [type:opensky:meta] no type data")
+                else:
+                    _log(f"{tag} [type:opensky:meta] status {r.status_code}")
+            except Exception as _e:
+                _log(f"{tag} [type:opensky:meta] error: {_e}")
+                result["steps"]["opensky_meta"] = {"error": str(_e)}
+
+        if not result["final_plane"]:
+            result["type_source"] = "miss"
+            _log(f"{tag} [type] no data from any source")
+        # ── end no-cache mode ─────────────────────────────────────────────────
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    _log(
+        f"{tag} ━━━ result:"
+        f" {result['final_origin'] or '?'}->{result['final_destination'] or '?'}"
+        f" [{result['route_source']}]"
+        f" plane='{result['final_plane']}' [{result['type_source']}] ━━━"
+    )
+
+    # ── Display injection — 30 s window for the LED matrix ───────────────────
+    _display_data = {
+        "callsign":       cs,
+        "plane":          result["final_plane"],
+        "origin":         result["final_origin"],
+        "destination":    result["final_destination"],
+        "altitude":       int(altitude_ft),
+        "vertical_speed": int(vertical_speed),
+        "test":           True,
+        "expires":        now + DISPLAY_SECS,
+    }
+    try:
+        _tmp = TEST_DISPLAY_FILE + ".tmp"
+        with open(_tmp, "w") as _f:
+            json.dump(_display_data, _f)
+        os.replace(_tmp, TEST_DISPLAY_FILE)
+        result["display_injected"] = True
+        result["display_expires"]  = now + DISPLAY_SECS  # epoch so JS can compute true remaining
+        _log(f"{tag} injected into display for {DISPLAY_SECS}s")
+    except Exception as _e:
+        _log(f"{tag} WARNING: failed to write test display file: {_e}")
+
+    return result
 
 
 # ── Overhead controller ────────────────────────────────────────────────────────
@@ -1097,6 +1579,27 @@ class Overhead:
             _log(f"[overhead] error in _grab_data:\n{traceback.format_exc()}")
         finally:
             if success:
+                # ── Test flight injection ─────────────────────────────────────
+                # If a test was triggered via the web UI, prepend the test
+                # flight to data so it appears on the LED matrix and in
+                # ft_data.json for the remaining duration of its 30 s window.
+                try:
+                    _td = json.loads(_pathlib.Path(TEST_DISPLAY_FILE).read_text())
+                    if _td.get("expires", 0) > int(time.time()):
+                        data.insert(0, {
+                            "plane":          _td.get("plane", ""),
+                            "origin":         _td.get("origin", ""),
+                            "destination":    _td.get("destination", ""),
+                            "vertical_speed": _td.get("vertical_speed", 0),
+                            "altitude":       _td.get("altitude", 10000),
+                            "callsign":       _td.get("callsign", ""),
+                            "test":           True,
+                        })
+                except (FileNotFoundError, ValueError, KeyError,
+                        AttributeError, TypeError):
+                    pass  # malformed/missing file — skip injection silently
+                # ─────────────────────────────────────────────────────────────
+
                 # Only overwrite shared state and ft_data.json when the full poll
                 # completed without an exception.  A mid-poll crash can leave `data`
                 # partial or empty — never blank the display with a bad result.

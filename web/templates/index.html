@@ -181,6 +181,21 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .rules-empty { padding: 28px 18px; color: var(--muted); font-size: 13px; text-align: center; }
 .rules-hint { font-size: 12px; color: var(--muted); line-height: 1.7; padding: 10px 18px 14px; border-top: 1px solid var(--border); }
 .log-line.override { color: #fbbf24; }
+.log-line.test     { color: #22d3ee; font-weight: 500; }
+
+/* TEST FLIGHT CARD */
+.test-step-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px,1fr)); gap: 8px; margin: 10px 0 4px; }
+.test-step { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.test-step-name { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 2px; }
+.test-step-desc { font-size: 10px; color: #4b5563; margin-bottom: 6px; }
+.test-step-body  { font-size: 12px; font-family: 'SFMono-Regular', monospace; }
+.test-final { background: rgba(88,166,255,.05); border: 1px solid rgba(88,166,255,.18); border-radius: 8px; padding: 12px 14px; margin: 12px 0 4px; }
+.test-final-route { font-size: 22px; font-family: 'VT323', monospace; color: #ffff00; letter-spacing: .05em; line-height: 1; }
+.test-final-plane { font-size: 13px; color: #c800c8; margin-top: 4px; font-style: italic; }
+.test-override-box { background: rgba(63,185,80,.07); border: 1px solid rgba(63,185,80,.22); border-radius: 6px; padding: 8px 12px; margin: 8px 0 4px; }
+.test-override-box .ov-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--green); margin-bottom: 3px; }
+.test-countdown { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--green); font-weight: 600; margin-top: 8px; }
+.matrix-screen.test-mode::after { content: 'TEST'; position: absolute; top: 4px; right: 6px; font-size: 9px; color: #22d3ee; font-family: 'SFMono-Regular', monospace; letter-spacing: .1em; pointer-events: none; }
 
 /* MATRIX PREVIEW */
 .matrix-wrapper { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; gap: 14px; }
@@ -443,6 +458,33 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 <!-- RULES TAB -->
 <div class="tab-content" id="rules-tab">
   <div class="rules-scroll">
+
+    <!-- Test Flight section -->
+    <div class="section">
+      <div class="section-header">🧪 Test Flight Lookup</div>
+      <div style="padding:14px 18px 12px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.7">
+          Enter any callsign or tail number to run a full live lookup — same API pipeline as a real overhead flight.
+          LOCAL_AIRPORT heuristic skipped — results come from APIs only.
+          Logs are prefixed <code style="color:#22d3ee">[TEST:]</code> and the flight shows on the matrix for 30 seconds.<br>
+          <strong style="color:var(--text)">Use cached data</strong> checked: calls the real <code>get_route()</code> / <code>get_aircraft_type()</code> — exact same code path including cache reads. Unchecked: skips cache, hits every API fresh.
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" id="test-callsign"
+                 placeholder="e.g. MXY527  SWA1234  N530JL  AAL123"
+                 style="flex:1;min-width:200px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:7px 11px;border-radius:6px;font-size:13px;font-family:'SFMono-Regular',monospace;text-transform:uppercase;outline:none;transition:border-color .15s"
+                 maxlength="20" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor=''"
+                 onkeydown="if(event.key==='Enter')runTestFlight()">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none">
+            <input type="checkbox" id="test-use-cache" checked style="cursor:pointer;accent-color:var(--accent)">
+            Use cached data
+          </label>
+          <button class="btn btn-primary" id="test-run-btn" onclick="runTestFlight()" style="white-space:nowrap;min-width:100px">▶ Run Test</button>
+          <button class="btn btn-secondary" id="test-clear-btn" onclick="clearTestDisplay()" style="display:none;white-space:nowrap">✕ Clear Display</button>
+        </div>
+      </div>
+      <div id="test-result" style="display:none;border-top:1px solid var(--border)"></div>
+    </div>
 
     <div class="section">
       <div class="section-header">
@@ -981,6 +1023,7 @@ function appendLog(line) {
 }
 
 function classifyLine(line) {
+  if (line.includes('[TEST:'))         return 'test';   // must be first — test lines contain other tokens
   if (line.includes('[overhead]   ->')) return 'result';
   if (line.includes('in_zone=True'))   return 'inzone';
   if (line.includes("plane=''"))       return 'nodata';
@@ -1061,6 +1104,7 @@ function renderMatrix(status, flightData) {
   const f = flights[0];
   const total = flights.length;
   const dur = Math.max(6, Math.ceil(((f.plane || '').length) * 0.4));
+  if (f.test) screen.classList.add('test-mode');
   screen.innerHTML = `
     <div class="m-journey">
       <span class="m-code">${escHtml(f.origin) || '&nbsp;?&nbsp;'}</span>
@@ -1306,6 +1350,254 @@ async function saveRules() {
     showToast(msg, 'err');
     return false;
   }
+}
+
+// ── Test Flight ────────────────────────────────────────────────
+let _testCountdownTimer = null;
+
+async function runTestFlight() {
+  const input = document.getElementById('test-callsign');
+  const cs = input.value.trim().toUpperCase();
+  if (!cs) { input.focus(); return; }
+
+  const useCache = document.getElementById('test-use-cache').checked;
+  const btn     = document.getElementById('test-run-btn');
+  const clearBtn = document.getElementById('test-clear-btn');
+  const resultEl = document.getElementById('test-result');
+  btn.disabled = true;
+  btn.textContent = '⏳ Testing…';
+  clearBtn.style.display = 'none';
+  resultEl.style.display = 'none';
+  clearInterval(_testCountdownTimer);
+
+  try {
+    const ctrl = new AbortController();
+    const tmId = setTimeout(() => ctrl.abort(), 90000);
+    const resp = await fetch('/api/test_flight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({callsign: cs, use_cache: useCache}),
+      signal: ctrl.signal,
+    });
+    clearTimeout(tmId);
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.error || `Server error ${resp.status}`);
+    }
+    const data = await resp.json();
+    renderTestResult(data);
+    if (data.display_injected) clearBtn.style.display = 'inline-block';
+  } catch(e) {
+    resultEl.innerHTML =
+      `<div style="padding:14px 18px;color:var(--red)">✗ ${escHtml(e.message || 'Request failed')}</div>`;
+    resultEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run Test';
+  }
+}
+
+function renderTestResult(d) {
+  const el = document.getElementById('test-result');
+
+  // ── override box ──────────────────────────────────────────────
+  let ovHtml = '';
+  if (d.override_matched && d.override) {
+    const ov = d.override;
+    ovHtml = `
+      <div class="test-override-box">
+        <div class="ov-label">✓ Override Matched</div>
+        <div style="font-size:12px;margin-top:3px">
+          Pattern: <code style="color:var(--accent)">${escHtml(ov.pattern)}</code>
+          ${(ov.origin || ov.destination)
+            ? `&nbsp;· Route: <code style="color:var(--accent)">${escHtml(ov.origin||'?')} → ${escHtml(ov.destination||'?')}</code>`
+            : ''}
+          ${ov.plane ? `&nbsp;· Type: <code style="color:#c800c8">${escHtml(ov.plane)}</code>` : ''}
+          ${ov.note  ? `<br><span style="font-size:11px;color:var(--muted)">${escHtml(ov.note)}</span>` : ''}
+        </div>
+      </div>`;
+  } else {
+    ovHtml = `<div style="font-size:12px;color:var(--muted);margin:6px 0">No override rule matched.</div>`;
+  }
+
+  // ── decide render mode ────────────────────────────────────────
+  const isCacheMode = (d.steps || {}).mode === 'cache';
+
+  // ── live position row (shared by both modes) ──────────────────
+  function livePosBody(s) {
+    if (!s) return `<span style="color:var(--muted)">—</span>`;
+    if (s.error) return `<span style="color:var(--red)">✗ ${escHtml(s.error)}</span>`;
+    if (s.airborne === false) return `<span style="color:var(--muted)">Not airborne</span>`;
+    const alt = s.alt_ft != null ? `${Number(s.alt_ft).toLocaleString()} ft` : '—';
+    const vs  = s.vs    != null ? ` vs ${s.vs > 0 ? '+' : ''}${s.vs}` : '';
+    return `<span style="color:var(--green)">● Found</span> <code style="font-size:11px">${escHtml(s.hex||'—')}</code><br>`
+         + `<span style="color:var(--muted);font-size:11px">alt ${alt}${vs} · ${s.found_by||''}</span>`;
+  }
+
+  // ── cache mode: simplified two-card result ────────────────────
+  let stepsSection = '';
+  if (isCacheMode) {
+    const lp = (d.steps || {}).live_position;
+    const rr = (d.steps || {}).route_result || {};
+    const tr = (d.steps || {}).type_result  || {};
+    const routeBody = (rr.origin || rr.destination)
+      ? `<span style="color:var(--accent);font-weight:700">${escHtml(rr.origin||'?')} → ${escHtml(rr.destination||'?')}</span><br>`
+        + `<span style="font-size:11px;color:var(--muted)">source: <code>${escHtml(rr.source||'?')}</code></span>`
+      : `<span style="color:var(--muted)">No route data</span>`;
+    const typeBody = tr.plane
+      ? `<span style="color:#c800c8">${escHtml(tr.plane)}</span><br>`
+        + `<span style="font-size:11px;color:var(--muted)">source: <code>${escHtml(tr.source||'?')}</code></span>`
+      : `<span style="color:var(--muted)">No type data</span>`;
+    stepsSection = `
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:10px 0 0">
+        Cache Pipeline
+        <span style="font-size:9px;font-weight:400;color:var(--muted);text-transform:none;letter-spacing:0;margin-left:6px">— get_route() + get_aircraft_type() (live code path)</span>
+      </div>
+      <div class="test-step-grid" style="margin-top:8px">
+        <div class="test-step">
+          <div class="test-step-name">airplanes.live</div>
+          <div class="test-step-desc">Live position</div>
+          <div class="test-step-body">${livePosBody(lp)}</div>
+        </div>
+        <div class="test-step">
+          <div class="test-step-name">Route</div>
+          <div class="test-step-desc">get_route() — full cache waterfall</div>
+          <div class="test-step-body">${routeBody}</div>
+        </div>
+        <div class="test-step">
+          <div class="test-step-name">Aircraft Type</div>
+          <div class="test-step-desc">get_aircraft_type() — cache then APIs</div>
+          <div class="test-step-body">${typeBody}</div>
+        </div>
+      </div>`;
+  } else {
+    // ── no-cache mode: full per-API step grid ─────────────────────
+    const stepDefs = [
+      {key:'live_position', label:'airplanes.live',  desc:'Live position + type'},
+      {key:'adsbdb_route',  label:'adsbdb route',    desc:'Static historical DB'},
+      {key:'opensky',       label:'OpenSky',          desc:'Real-time by hex'},
+      {key:'airlabs',       label:'AirLabs',           desc:'Real-time by callsign'},
+      {key:'aeroapi',       label:'AeroAPI',            desc:'FlightAware paid'},
+      {key:'adsbdb_type',   label:'adsbdb type',       desc:'Aircraft type fallback'},
+      {key:'opensky_meta',  label:'OpenSky metadata',  desc:'Aircraft registry (public)'},
+    ];
+
+    function stepBody(def) {
+      const s = (d.steps || {})[def.key];
+      if (!s) {
+        if (d.override_matched && ['adsbdb_route','opensky','airlabs','aeroapi'].includes(def.key))
+          return `<span style="color:var(--muted)">Skipped — override</span>`;
+        if (!d.hex_code && ['adsbdb_type','opensky_meta'].includes(def.key))
+          return `<span style="color:var(--muted)">Skipped — no hex</span>`;
+        return `<span style="color:var(--muted)">—</span>`;
+      }
+      if (s.skipped)
+        return `<span style="color:var(--yellow)">Skipped: ${escHtml(s.skipped)}</span>`;
+      if (s.error)
+        return `<span style="color:var(--red)">✗ ${escHtml(s.error)}</span>`;
+      if (def.key === 'live_position') return livePosBody(s);
+      if (def.key === 'adsbdb_type' || def.key === 'opensky_meta') {
+        if (s.type) return `<span style="color:#c800c8">${escHtml(s.type)}</span>`;
+        return `<span style="color:var(--muted)">No type data</span>`;
+      }
+      // route step
+      if (s.origin !== undefined || s.destination !== undefined) {
+        const orig = s.origin || '?';
+        const dest = s.destination || '?';
+        const plaus = s.plausible === false
+          ? ` <span style="color:var(--red)">implausible</span>`
+          : s.plausible === true ? ` <span style="color:var(--green)">✓</span>` : '';
+        const code  = s.status ? ` <span style="color:var(--muted)">(${s.status})</span>` : '';
+        return `<span style="color:var(--accent);font-weight:700">${escHtml(orig)} → ${escHtml(dest)}</span>${plaus}${code}`;
+      }
+      if (s.status)
+        return `<span style="color:var(--muted)">HTTP ${s.status} — no data</span>`;
+      return `<span style="color:var(--muted)">—</span>`;
+    }
+
+    const stepsHtml = stepDefs.map(def => `
+      <div class="test-step">
+        <div class="test-step-name">${escHtml(def.label)}</div>
+        <div class="test-step-desc">${escHtml(def.desc)}</div>
+        <div class="test-step-body">${stepBody(def)}</div>
+      </div>`).join('');
+
+    stepsSection = `
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:10px 0 0">API Steps</div>
+      <div class="test-step-grid">${stepsHtml}</div>`;
+  }
+
+  // ── flight info bar ───────────────────────────────────────────
+  const hexStr     = d.hex_code ? `<code style="color:var(--muted);font-size:11px">${escHtml(d.hex_code)}</code>` : '';
+  const airborneEl = d.airborne
+    ? `<span style="color:var(--green)">● Airborne</span>${d.altitude ? ` <span style="font-size:11px;color:var(--muted)">${Number(d.altitude).toLocaleString()} ft</span>` : ''}`
+    : `<span style="color:var(--muted)">○ Not currently airborne</span>`;
+
+  // ── final result + countdown ──────────────────────────────────
+  // Use display_expires (epoch) to compute true remaining time after API latency.
+  // Fall back to display_seconds if expires not present.
+  const SECS = d.display_expires
+    ? Math.max(1, d.display_expires - Math.floor(Date.now() / 1000))
+    : (d.display_seconds || 30);
+  let displayLine = '';
+  if (d.display_injected) {
+    displayLine = `<div class="test-countdown" id="test-countdown">⏱ On display: <span id="test-countdown-num">${SECS}</span>s remaining</div>`;
+    startTestCountdown(SECS);
+  } else {
+    displayLine = `<div style="font-size:11px;color:var(--muted);margin-top:6px">Display: not injected</div>`;
+  }
+
+  const modeLabel = isCacheMode
+    ? `<span style="background:rgba(88,166,255,.12);color:var(--accent);border-radius:4px;padding:1px 7px;font-size:10px;font-weight:600;letter-spacing:.3px">CACHED</span>`
+    : `<span style="background:rgba(248,81,73,.10);color:var(--red);border-radius:4px;padding:1px 7px;font-size:10px;font-weight:600;letter-spacing:.3px">LIVE ONLY</span>`;
+
+  el.innerHTML = `
+    <div style="padding:14px 18px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:16px;font-weight:700;font-family:'SFMono-Regular',monospace">${escHtml(d.callsign)}</span>
+        ${d.tail ? `<span style="font-size:13px;color:var(--muted);font-family:'SFMono-Regular',monospace">${escHtml(d.tail)}</span>` : ''}
+        ${hexStr}
+        <span style="font-size:12px">${airborneEl}</span>
+        ${modeLabel}
+      </div>
+      ${ovHtml}
+      ${stepsSection}
+      <div class="test-final">
+        <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:8px">Display Result</div>
+        <div class="test-final-route">${escHtml(d.final_origin||'?')} → ${escHtml(d.final_destination||'?')}</div>
+        <div class="test-final-plane">${escHtml(d.final_plane||'— (no type data)')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:5px">
+          Route: <code>${escHtml(d.route_source)}</code> &nbsp;·&nbsp; Type: <code>${escHtml(d.type_source)}</code>
+        </div>
+        ${displayLine}
+      </div>
+    </div>`;
+  el.style.display = 'block';
+}
+
+function startTestCountdown(secs) {
+  clearInterval(_testCountdownTimer);
+  let rem = secs;
+  _testCountdownTimer = setInterval(() => {
+    rem--;
+    const numEl = document.getElementById('test-countdown-num');
+    if (numEl) numEl.textContent = rem;
+    if (rem <= 0) {
+      clearInterval(_testCountdownTimer);
+      const cdEl = document.getElementById('test-countdown');
+      if (cdEl) cdEl.innerHTML = '<span style="color:var(--muted)">⏹ Display time elapsed</span>';
+      document.getElementById('test-clear-btn').style.display = 'none';
+    }
+  }, 1000);
+}
+
+async function clearTestDisplay() {
+  clearInterval(_testCountdownTimer);
+  try { await fetch('/api/test_flight', {method: 'DELETE'}); } catch(e) {}
+  document.getElementById('test-clear-btn').style.display = 'none';
+  const cdEl = document.getElementById('test-countdown');
+  if (cdEl) cdEl.innerHTML = '<span style="color:var(--muted)">⏹ Cleared</span>';
+  showToast('✓ Test flight cleared from display', 'ok');
 }
 
 function escHtml(s) {

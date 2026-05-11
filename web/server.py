@@ -527,6 +527,52 @@ def save_overrides():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/test_flight", methods=["POST"])
+def test_flight():
+    """
+    Run a full no-cache API lookup for testing.  Same pipeline as a real
+    overhead flight — override rules, adsbdb, OpenSky, AirLabs, AeroAPI —
+    with two exceptions: no cache reads/writes, and the LOCAL_AIRPORT
+    heuristic is skipped.  All log lines are prefixed [TEST:{callsign}].
+
+    The result is also written to /tmp/ft_test_display.json so the next
+    grab_data() cycle injects the flight into the LED matrix for 30 s.
+    """
+    try:
+        data = request.json or {}
+        callsign = (data.get("callsign") or "").strip().upper()
+        if not callsign:
+            return jsonify({"error": "callsign is required"}), 400
+        if len(callsign) > 20 or not callsign.replace("-", "").isalnum():
+            return jsonify({"error": "invalid callsign"}), 400
+
+        # Lazy import — overhead.py is already loaded by flight-tracker.py
+        # when running as a service, so this just retrieves the cached module.
+        import sys
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        from utilities.overhead import run_test_lookup
+
+        result = run_test_lookup(callsign, use_cache=bool(data.get("use_cache", True)))
+        _log(
+            f"[web] test flight: {callsign}"
+            f" → {result.get('final_origin','?')}->{result.get('final_destination','?')}"
+            f" [{result.get('route_source','?')}]"
+            f" '{result.get('final_plane','')}' [{result.get('type_source','?')}]"
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/test_flight", methods=["DELETE"])
+def clear_test_flight():
+    """Remove the test display injection file (clears the 30 s display window)."""
+    Path("/tmp/ft_test_display.json").unlink(missing_ok=True)
+    _log("[web] test flight display cleared")
+    return jsonify({"ok": True})
+
+
 @app.route("/api/log/history")
 def log_history():
     try:
