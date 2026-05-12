@@ -3,6 +3,7 @@ import fnmatch
 import json
 import math
 import os
+import re
 import sys
 import time
 import traceback
@@ -147,6 +148,241 @@ AEROAPI_RESET_DAY  = 1               # FlightAware credit resets on the 1st
 
 # Local airports — used for journey/zone display features.
 _LOCAL_AIRPORTS = frozenset(a.strip().upper() for a in [LOCAL_AIRPORT, "VGT", "HSH"] if a and a.strip())
+
+# ── Airline display names (ICAO 3-letter prefix → human-readable name) ────────
+_AIRLINE_NAMES: dict[str, str] = {
+    # US majors
+    "AAL": "American Airlines",   "DAL": "Delta Air Lines",
+    "UAL": "United Airlines",     "SWA": "Southwest Airlines",
+    "ASA": "Alaska Airlines",     "JBU": "JetBlue Airways",
+    "NKS": "Spirit Airlines",     "FFT": "Frontier Airlines",
+    "SCX": "Sun Country Airlines","AAY": "Allegiant Air",
+    "HAL": "Hawaiian Airlines",   "VRD": "Virgin America",
+    # Canadian
+    "ACA": "Air Canada",          "WJA": "WestJet",
+    "POE": "Porter Airlines",     "FLE": "Flair Airlines",
+    # Mexican
+    "AMX": "Aeroméxico",          "VOI": "Volaris",
+    "VIV": "VivaAerobus",
+    # European
+    "BAW": "British Airways",     "VIR": "Virgin Atlantic",
+    "AFR": "Air France",          "DLH": "Lufthansa",
+    "KLM": "KLM",                 "UAE": "Emirates",
+    "QTR": "Qatar Airways",       "SIA": "Singapore Airlines",
+    "EIN": "Aer Lingus",          "IBE": "Iberia",
+    "CFG": "Condor",              "EDW": "Edelweiss Air",
+    # Asian / Pacific
+    "KAL": "Korean Air",          "QFA": "Qantas",
+    # Latin American
+    "CMP": "Copa Airlines",       "AVA": "Avianca",
+    # Regional/commuter
+    "SKW": "SkyWest Airlines",    "ENY": "Envoy Air",
+    "RPA": "Republic Airways",    "QXE": "Horizon Air",
+    "ASH": "Mesa Airlines",       "PDT": "Piedmont Airlines",
+    "JIA": "PSA Airlines",        "UCA": "CommutAir",
+    "CPZ": "Comair",              "MTN": "Mountain Air Cargo",
+    "FLG": "Frontier (charter)",  "SWG": "Sunwing Airlines",
+    "AGX": "Amerijet International",
+}
+
+def _airline_display(callsign: str) -> str:
+    """Return 'SWA123 (Southwest Airlines)' if prefix known, else just callsign."""
+    if not callsign or len(callsign) < 3:
+        return callsign
+    name = _AIRLINE_NAMES.get(callsign[:3].upper())
+    return f"{callsign} ({name})" if name else callsign
+
+# ── ICAO aircraft type code → human-readable translation ──────────────────────
+_AIRCRAFT_TYPE_MAP: dict[str, str] = {
+    # Boeing narrow-body
+    "B731": "Boeing 737-100",   "B732": "Boeing 737-200",
+    "B733": "Boeing 737-300",   "B734": "Boeing 737-400",
+    "B735": "Boeing 737-500",   "B736": "Boeing 737-600",
+    "B737": "Boeing 737-700",   "B738": "Boeing 737-800",
+    "B739": "Boeing 737-900",   "B37M": "Boeing 737 MAX 7",
+    "B38M": "Boeing 737 MAX 8", "B39M": "Boeing 737 MAX 9",
+    "B3XM": "Boeing 737 MAX 10",
+    # Boeing wide-body
+    "B744": "Boeing 747-400",   "B748": "Boeing 747-8",
+    "B752": "Boeing 757-200",   "B753": "Boeing 757-300",
+    "B762": "Boeing 767-200",   "B763": "Boeing 767-300",
+    "B764": "Boeing 767-400",
+    "B772": "Boeing 777-200",   "B77L": "Boeing 777-200LR",
+    "B773": "Boeing 777-300",   "B77W": "Boeing 777-300ER",
+    "B778": "Boeing 777X-8",    "B779": "Boeing 777X-9",
+    "B788": "Boeing 787-8",     "B789": "Boeing 787-9",
+    "B78X": "Boeing 787-10",
+    # Airbus narrow-body
+    "A318": "Airbus A318",      "A319": "Airbus A319",
+    "A320": "Airbus A320",      "A321": "Airbus A321",
+    "A19N": "Airbus A319neo",   "A20N": "Airbus A320neo",
+    "A21N": "Airbus A321neo",   "A22N": "Airbus A321XLR",
+    # Airbus wide-body
+    "A332": "Airbus A330-200",  "A333": "Airbus A330-300",
+    "A338": "Airbus A330-800neo","A339": "Airbus A330-900neo",
+    "A342": "Airbus A340-200",  "A343": "Airbus A340-300",
+    "A345": "Airbus A340-500",  "A346": "Airbus A340-600",
+    "A359": "Airbus A350-900",  "A35K": "Airbus A350-1000",
+    "A388": "Airbus A380",
+    # Embraer
+    "E170": "Embraer E170",     "E175": "Embraer E175",
+    "E190": "Embraer E190",     "E195": "Embraer E195",
+    "E75L": "Embraer E175-E2",  "E290": "Embraer E190-E2",
+    "E295": "Embraer E195-E2",
+    # Bombardier CRJ
+    "CRJ1": "Bombardier CRJ-100","CRJ2": "Bombardier CRJ-200",
+    "CRJ7": "Bombardier CRJ-700","CRJ9": "Bombardier CRJ-900",
+    "CRJX": "Bombardier CRJ-1000",
+    # Dash 8 / Q-series
+    "DH8A": "Dash 8-100",       "DH8B": "Dash 8-200",
+    "DH8C": "Dash 8-300",       "DH8D": "Dash 8-400",
+    "DHC8": "Dash 8",
+    # ATR
+    "AT43": "ATR 42-300",       "AT45": "ATR 42-500",
+    "AT72": "ATR 72-200",       "AT75": "ATR 72-500",
+    "AT76": "ATR 72-600",
+    # Business jets — Cessna Citation
+    "C25A": "Citation CJ2",     "C25B": "Citation CJ3",
+    "C25C": "Citation CJ4",     "C510": "Citation Mustang",
+    "C525": "Citation CJ1",     "C550": "Citation II",
+    "C56X": "Citation Excel",   "C560": "Citation V",
+    "C680": "Citation Sovereign","C750": "Citation X",
+    # Business jets — Gulfstream
+    "GLF4": "Gulfstream IV",    "GLF5": "Gulfstream V",
+    "G150": "Gulfstream G150",  "G280": "Gulfstream G280",
+    "G550": "Gulfstream G550",  "G650": "Gulfstream G650",
+    "G700": "Gulfstream G700",
+    # Business jets — Bombardier Global/Challenger
+    "CL30": "Bombardier Challenger 300",
+    "CL35": "Bombardier Challenger 350",
+    "CL60": "Bombardier Challenger 600",
+    "GL5T": "Bombardier Global 5000",
+    "GLEX": "Bombardier Global Express",
+    "GL7T": "Bombardier Global 7500",
+    # Business jets — Learjet
+    "LJ35": "Learjet 35",       "LJ45": "Learjet 45",
+    "LJ60": "Learjet 60",       "LJ75": "Learjet 75",
+    # Business jets — Dassault Falcon
+    "F2TH": "Falcon 2000",      "FA7X": "Falcon 7X",
+    "F900": "Falcon 900",       "F8EX": "Falcon 8X",
+    # Legacy MD / Boeing
+    "MD11": "MD-11",            "MD80": "MD-80",
+    "MD82": "MD-82",            "MD83": "MD-83",
+    "MD88": "MD-88",            "MD90": "MD-90",
+    # GA — Cessna piston
+    "C172": "Cessna 172",       "C182": "Cessna 182",
+    "C208": "Cessna Caravan",   "C210": "Cessna 210",
+    # GA — Piper
+    "P28A": "Piper PA-28",      "P28B": "Piper PA-28",
+    "PA34": "Piper Seneca",     "PA46": "Piper Malibu/Meridian",
+    # GA — Beechcraft
+    "BE20": "King Air 200",     "BE35": "Bonanza 35",
+    "BE36": "Bonanza 36",       "BE58": "Baron 58",
+    "BE9L": "King Air 90",      "BE99": "Beechcraft 1900",
+    # Helicopters
+    "B06":  "Bell 206",         "B407": "Bell 407",
+    "B412": "Bell 412",         "EC35": "EC135",
+    "EC45": "EC145",            "H125": "Airbus H125",
+    "R22":  "Robinson R22",     "R44":  "Robinson R44",
+    "S76":  "Sikorsky S-76",
+}
+
+def _translate_type(type_str: str) -> str:
+    """Map a raw ICAO type code (e.g. 'B738') to a readable name if known."""
+    if not type_str:
+        return type_str
+    return _AIRCRAFT_TYPE_MAP.get(type_str.strip().upper(), type_str)
+
+# ── Paid-API skip rules — GA registrations and known non-commercial prefixes ──
+# N-numbers (US civil registrations) never have filed routes in paid APIs.
+# Similarly, known military/government operator prefixes are skipped to avoid
+# burning quota on callsigns that will always return empty.
+_N_NUMBER_RE = re.compile(r"^N\d", re.IGNORECASE)
+
+_SKIP_PAID_PREFIXES = frozenset([
+    # US military air mobility / special missions
+    "RCH",   # REACH  — Air Mobility Command airlift
+    "PAT",   # PATRIOT — AMC passenger service
+    "SAM",   # Special Air Mission (VIP)
+    "HKY",   # Husky  — various military
+    # DOE / government special use
+    "DOE",
+    # JANET callsign prefix (classified flights to Groom Lake)
+    "JNT",
+])
+
+def _skip_paid_apis(callsign: str) -> bool:
+    """
+    Return True when paid APIs (AirLabs/AeroAPI) should be skipped for this
+    callsign.  Two cases:
+      • N-number registrations (GA flying VFR — no filed route exists)
+      • Known non-commercial ICAO prefixes (military, government)
+    Free APIs (adsbdb, OpenSky) are still tried — they may have historical data.
+    """
+    if not callsign:
+        return False
+    if _N_NUMBER_RE.match(callsign):
+        return True
+    if len(callsign) >= 3 and callsign[:3].upper() in _SKIP_PAID_PREFIXES:
+        return True
+    return False
+
+# ── Flight statistics ──────────────────────────────────────────────────────────
+STATS_FILE   = os.path.join(_DATA_DIR, "ft_stats.json")
+_stats_lock  = Lock()
+_stats_seen_today: set = set()   # (date, callsign) already counted this run
+_stats_last_date: str  = ""
+
+def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str) -> None:
+    """
+    Increment the daily flight counter for this callsign's airline prefix.
+    Each (date, callsign) is counted at most once per service run.
+    Writes are atomic (tmp → rename) and guarded by _stats_lock.
+    Never raises — stats must never crash the main poll loop.
+    """
+    global _stats_seen_today, _stats_last_date
+    if not callsign:
+        return
+    today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+    key   = (today, callsign)
+    if key in _stats_seen_today:
+        return
+    _stats_seen_today.add(key)
+
+    prefix = callsign[:3].upper() if len(callsign) >= 3 else "???"
+    try:
+        with _stats_lock:
+            # Load
+            try:
+                with open(STATS_FILE) as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+            day = data.setdefault(today, {"total": 0, "airlines": {}, "types": {}})
+            day["total"] = day.get("total", 0) + 1
+            day["airlines"][prefix] = day["airlines"].get(prefix, 0) + 1
+            if plane_type:
+                day["types"][plane_type] = day["types"].get(plane_type, 0) + 1
+            # Trim to last 30 days
+            cutoff = (datetime.now(_PACIFIC) - timedelta(days=30)).strftime("%Y-%m-%d")
+            data = {k: v for k, v in data.items() if k >= cutoff}
+            # Save
+            tmp = STATS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, STATS_FILE)
+        # Log a daily summary when day rolls over
+        if _stats_last_date and _stats_last_date != today:
+            try:
+                prev = data.get(_stats_last_date, {})
+                top  = sorted(prev.get("airlines", {}).items(), key=lambda x: -x[1])[:5]
+                top_str = ", ".join(f"{k}×{v}" for k, v in top)
+                _log(f"[stats] {_stats_last_date}: {prev.get('total', 0)} flights — top: {top_str}")
+            except Exception:
+                pass
+        _stats_last_date = today
+    except Exception:
+        pass  # never propagate
 
 # ── Route cache TTL tiers ──────────────────────────────────────────────────────
 # ICAO 3-letter operator prefix determines how long a confirmed paid-API route
@@ -311,13 +547,15 @@ def _save_caches():
     converted back to tuples on load.  Uses an atomic tmp→rename write.
     """
     with _cache_lock:
-        route_snap    = dict(_route_cache)
-        aeroapi_snap  = dict(_aeroapi_cache)
-        aircraft_snap = dict(_aircraft_cache)
+        route_snap      = dict(_route_cache)
+        aeroapi_snap    = dict(_aeroapi_cache)
+        aircraft_snap   = dict(_aircraft_cache)
+        paid_miss_snap  = dict(_paid_miss_cache)
     data = {
-        "route":    {k: list(v) for k, v in route_snap.items()},
-        "aeroapi":  {k: list(v) for k, v in aeroapi_snap.items()},
-        "aircraft": {k: list(v) for k, v in aircraft_snap.items()},
+        "route":     {k: list(v) for k, v in route_snap.items()},
+        "aeroapi":   {k: list(v) for k, v in aeroapi_snap.items()},
+        "aircraft":  {k: list(v) for k, v in aircraft_snap.items()},
+        "paid_miss": paid_miss_snap,   # {callsign: epoch timestamp}
     }
     try:
         tmp = CACHE_FILE + ".tmp"
@@ -338,7 +576,7 @@ def _load_caches():
         with open(CACHE_FILE) as f:
             data = json.load(f)
         now = int(time.time())
-        loaded = {"route": 0, "aeroapi": 0, "aircraft": 0}
+        loaded = {"route": 0, "aeroapi": 0, "aircraft": 0, "paid_miss": 0}
         with _cache_lock:
             for k, v in data.get("route", {}).items():
                 if len(v) == 7 and now - v[-1] < max(ADSBDB_CACHE_TTL, ROUTE_TTL_SCHEDULED, OPENSKY_CACHE_TTL):
@@ -357,9 +595,14 @@ def _load_caches():
                 if len(v) == 3 and now - v[-1] < AIRCRAFT_CACHE_TTL:
                     _aircraft_cache[k] = tuple(v)
                     loaded["aircraft"] += 1
+            for k, v in data.get("paid_miss", {}).items():
+                if isinstance(v, (int, float)) and now - v < ROUTE_PAID_MISS_TTL:
+                    _paid_miss_cache[k] = int(v)
+                    loaded["paid_miss"] += 1
         _log(
             f"[cache] loaded {loaded['route']} route, "
-            f"{loaded['aeroapi']} aeroapi, {loaded['aircraft']} aircraft entries"
+            f"{loaded['aeroapi']} aeroapi, {loaded['aircraft']} aircraft, "
+            f"{loaded['paid_miss']} paid-miss entries"
         )
     except FileNotFoundError:
         pass  # first run — nothing to load
@@ -782,7 +1025,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 try:
                     r = requests.get(
                         OPENSKY_FLIGHTS_URL,
-                        params={"icao24": hex_code.lower(), "begin": now - 86400, "end": now},
+                        params={"icao24": hex_code.lower(), "begin": now - 21600, "end": now},
                         headers={"Authorization": f"Bearer {token}"},
                         timeout=10,
                     )
@@ -832,11 +1075,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # Skipped when the callsign is in _paid_miss_cache — both paid APIs already
     # confirmed empty within ROUTE_PAID_MISS_TTL (2 h), no point burning quota.
     _need_airlabs = not (origin and destination)
-    _skip_paid = False
-    if _need_airlabs and callsign:
+    _skip_paid = _skip_paid_apis(callsign)   # N-numbers and military never have paid-API data
+    if _need_airlabs and callsign and not _skip_paid:
         with _cache_lock:
             _paid_miss_ts = _paid_miss_cache.get(callsign, 0)
-        _skip_paid = (now - _paid_miss_ts) < ROUTE_PAID_MISS_TTL
+        _skip_paid = _skip_paid or (now - _paid_miss_ts) < ROUTE_PAID_MISS_TTL
     al_origin = al_dest = ""
     al_olat = al_olon = al_dlat = al_dlon = None
     _al_src   = "airlabs"
@@ -860,6 +1103,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 )
                 if r.status_code == 429:
                     _set_backoff("airlabs", secs=3600)
+                elif r.status_code == 402:
+                    _set_backoff("airlabs", secs=86400)
+                    _log("[airlabs] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
                 elif r.status_code in (401, 403):
                     _set_backoff("airlabs", secs=86400)
                     _log(f"[airlabs] auth error ({r.status_code}) — check AIRLABS_API_KEY")
@@ -913,7 +1159,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 source = source or _al_src
                 if _al_src != "airlabs:cached":
                     _count_suffix = f" [call #{_al_count}]" if _al_count else ""
-                    _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} accepted{_count_suffix}")
+                    _log(f"[airlabs] {_airline_display(callsign)}: {al_origin or '?'}->{al_dest or '?'} accepted{_count_suffix}")
             else:
                 if _al_src != "airlabs:cached":
                     _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} skipped — origin not local")
@@ -1066,7 +1312,7 @@ def get_aircraft_type(hex_code):
             ac = r.json().get("response", {}).get("aircraft", {})
             manufacturer = ac.get("manufacturer", "") or ""
             type_name = ac.get("type", "") or ""
-            plane = f"{manufacturer} {type_name}".strip()
+            plane = _translate_type(f"{manufacturer} {type_name}".strip())
             if plane:
                 with _cache_lock:
                     _aircraft_cache[hex_code] = (plane, "adsbdb", now)
@@ -1081,7 +1327,7 @@ def get_aircraft_type(hex_code):
             r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
             if r.status_code == 200:
                 data = r.json()
-                plane = (data.get("model") or data.get("typecode") or "").strip()
+                plane = _translate_type((data.get("model") or data.get("typecode") or "").strip())
                 if plane:
                     with _cache_lock:
                         _aircraft_cache[hex_code] = (plane, "opensky:meta", now)
@@ -1348,7 +1594,7 @@ def run_test_lookup(callsign, use_cache=True):
                         try:
                             r = requests.get(
                                 OPENSKY_FLIGHTS_URL,
-                                params={"icao24": hex_code.lower(), "begin": now - 86400, "end": now},
+                                params={"icao24": hex_code.lower(), "begin": now - 21600, "end": now},
                                 headers={"Authorization": f"Bearer {_token}"},
                                 timeout=10,
                             )
@@ -1406,6 +1652,9 @@ def run_test_lookup(callsign, use_cache=True):
                         if r.status_code == 429:
                             _set_backoff("airlabs", secs=3600)
                             _log(f"{tag} [airlabs] 429 — rate limited")
+                        elif r.status_code == 402:
+                            _set_backoff("airlabs", secs=86400)
+                            _log(f"{tag} [airlabs] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
                         elif r.status_code in (401, 403):
                             _set_backoff("airlabs", secs=86400)
                             _log(f"{tag} [airlabs] auth error {r.status_code}")
@@ -1663,7 +1912,8 @@ class Overhead:
                 plane    = plane    if plane.upper()    not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
-                _log(f"[route:{route_src}] [type:{type_src}] {callsign} {origin}->{destination} '{plane}'")
+                _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {origin}->{destination} '{plane}'")
+                _record_flight_stat(callsign, plane, origin, destination)
 
                 prev_was_live = _is_live(route_src) or _is_live(type_src)
 
