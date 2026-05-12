@@ -149,6 +149,121 @@ AEROAPI_RESET_DAY  = 1               # FlightAware credit resets on the 1st
 # Local airports — used for journey/zone display features.
 _LOCAL_AIRPORTS = frozenset(a.strip().upper() for a in [LOCAL_AIRPORT, "VGT", "HSH"] if a and a.strip())
 
+# ── Airport city names (IATA code → city) for log display only ───────────────
+_AIRPORT_CITIES: dict[str, str] = {
+    # Nevada / local
+    "LAS": "Las Vegas",       "VGT": "N. Las Vegas",    "HSH": "Henderson",
+    "BLD": "Boulder City",
+    # US West
+    "LAX": "Los Angeles",     "SFO": "San Francisco",   "SAN": "San Diego",
+    "PHX": "Phoenix",         "TUS": "Tucson",           "ABQ": "Albuquerque",
+    "ELP": "El Paso",         "SMF": "Sacramento",       "OAK": "Oakland",
+    "SJC": "San Jose",        "BUR": "Burbank",          "LGB": "Long Beach",
+    "ONT": "Ontario CA",      "PSP": "Palm Springs",     "SBA": "Santa Barbara",
+    "FAT": "Fresno",          "RNO": "Reno",             "SLC": "Salt Lake City",
+    "SEA": "Seattle",         "PDX": "Portland",         "BOI": "Boise",
+    "GEG": "Spokane",         "MFR": "Medford",          "EUG": "Eugene",
+    # US Mountain / Central
+    "DEN": "Denver",          "DFW": "Dallas/Fort Worth","DAL": "Dallas",
+    "AUS": "Austin",          "SAT": "San Antonio",      "HOU": "Houston",
+    "IAH": "Houston",         "MSP": "Minneapolis",      "MCI": "Kansas City",
+    "STL": "St. Louis",       "MKE": "Milwaukee",        "ORD": "Chicago",
+    "MDW": "Chicago",         "DSM": "Des Moines",       "OMA": "Omaha",
+    "MSN": "Madison",         "GRR": "Grand Rapids",     "FSD": "Sioux Falls",
+    "RAP": "Rapid City",      "BIS": "Bismarck",
+    # US Mountain West
+    "BIL": "Billings",        "MSO": "Missoula",         "GTF": "Great Falls",
+    "JAC": "Jackson Hole",    "SUN": "Sun Valley",       "TWF": "Twin Falls",
+    # US East
+    "ATL": "Atlanta",         "CLT": "Charlotte",        "MEM": "Memphis",
+    "BNA": "Nashville",       "DTW": "Detroit",          "CLE": "Cleveland",
+    "CMH": "Columbus",        "PIT": "Pittsburgh",       "IND": "Indianapolis",
+    "CVG": "Cincinnati",      "PHL": "Philadelphia",     "EWR": "Newark",
+    "JFK": "New York",        "LGA": "New York",         "BOS": "Boston",
+    "BWI": "Baltimore",       "IAD": "Washington DC",    "DCA": "Washington DC",
+    "RDU": "Raleigh-Durham",  "ORF": "Norfolk",          "RIC": "Richmond",
+    "SYR": "Syracuse",        "ALB": "Albany",           "BDL": "Hartford",
+    "PVD": "Providence",      "BUF": "Buffalo",          "ROC": "Rochester",
+    "RFD": "Rockford",        "MLI": "Moline",           "CID": "Cedar Rapids",
+    # US Southeast / South
+    "MCO": "Orlando",         "TPA": "Tampa",            "MIA": "Miami",
+    "FLL": "Fort Lauderdale", "RSW": "Fort Myers",       "PBI": "West Palm Beach",
+    "SRQ": "Sarasota",        "JAX": "Jacksonville",     "SAV": "Savannah",
+    "CHS": "Charleston",      "GSO": "Greensboro",       "GSP": "Greenville",
+    "MSY": "New Orleans",     "BHM": "Birmingham",       "MOB": "Mobile",
+    "LIT": "Little Rock",     "OKC": "Oklahoma City",    "TUL": "Tulsa",
+    "XNA": "Fayetteville",
+    # US Hawaii / Alaska
+    "HNL": "Honolulu",        "OGG": "Maui",             "KOA": "Kona",
+    "LIH": "Lihue",           "ITO": "Hilo",
+    "ANC": "Anchorage",       "FAI": "Fairbanks",        "JNU": "Juneau",
+    "KTN": "Ketchikan",       "SIT": "Sitka",
+    # Canada
+    "YYZ": "Toronto",         "YVR": "Vancouver",        "YUL": "Montreal",
+    "YYC": "Calgary",         "YEG": "Edmonton",         "YWG": "Winnipeg",
+    "YOW": "Ottawa",          "YHZ": "Halifax",          "YYJ": "Victoria",
+    "YKA": "Kamloops",        "YLW": "Kelowna",
+    # Mexico
+    "MEX": "Mexico City",     "CUN": "Cancún",           "GDL": "Guadalajara",
+    "MTY": "Monterrey",       "SJD": "Los Cabos",        "PVR": "Puerto Vallarta",
+    "MZT": "Mazatlán",        "ZIH": "Ixtapa",           "HMO": "Hermosillo",
+    "BJX": "León",            "TLC": "Toluca",           "OAX": "Oaxaca",
+    # Caribbean
+    "NAS": "Nassau",          "GCM": "Grand Cayman",     "MBJ": "Montego Bay",
+    "SJU": "San Juan",        "STT": "St. Thomas",
+    # Europe
+    "LHR": "London",          "LGW": "London Gatwick",   "MAN": "Manchester",
+    "CDG": "Paris",           "ORY": "Paris Orly",       "FRA": "Frankfurt",
+    "AMS": "Amsterdam",       "ZRH": "Zürich",           "MAD": "Madrid",
+    "BCN": "Barcelona",       "FCO": "Rome",             "MXP": "Milan",
+    "VIE": "Vienna",          "DUB": "Dublin",           "CPH": "Copenhagen",
+    "ARN": "Stockholm",       "OSL": "Oslo",             "HEL": "Helsinki",
+    "LIS": "Lisbon",          "ATH": "Athens",           "IST": "Istanbul",
+    "BRU": "Brussels",        "MUC": "Munich",           "DUS": "Düsseldorf",
+    "HAM": "Hamburg",         "BER": "Berlin",           "PRG": "Prague",
+    "WAW": "Warsaw",          "BUD": "Budapest",         "GVA": "Geneva",
+    # Middle East
+    "DXB": "Dubai",           "DOH": "Doha",             "AUH": "Abu Dhabi",
+    "TLV": "Tel Aviv",        "AMM": "Amman",
+    # Asia / Pacific
+    "ICN": "Seoul",           "GMP": "Seoul Gimpo",      "NRT": "Tokyo",
+    "HND": "Tokyo",           "KIX": "Osaka",            "PEK": "Beijing",
+    "PKX": "Beijing",         "PVG": "Shanghai",         "SHA": "Shanghai",
+    "HKG": "Hong Kong",       "TPE": "Taipei",           "SIN": "Singapore",
+    "KUL": "Kuala Lumpur",    "BKK": "Bangkok",          "HAN": "Hanoi",
+    "SGN": "Ho Chi Minh City","CGK": "Jakarta",          "MNL": "Manila",
+    "CEB": "Cebu",
+    # Australia / New Zealand
+    "SYD": "Sydney",          "MEL": "Melbourne",        "BNE": "Brisbane",
+    "PER": "Perth",           "AKL": "Auckland",         "CHC": "Christchurch",
+    # Latin America
+    "BOG": "Bogotá",          "MDE": "Medellín",         "CLO": "Cali",
+    "PTY": "Panama City",     "SJO": "San José",         "GUA": "Guatemala City",
+    "SAP": "San Pedro Sula",  "LIM": "Lima",             "UIO": "Quito",
+    "GIG": "Rio de Janeiro",  "GRU": "São Paulo",        "BSB": "Brasília",
+    "SCL": "Santiago",        "EZE": "Buenos Aires",     "MVD": "Montevideo",
+    "ASU": "Asunción",        "VVI": "Santa Cruz",
+}
+
+def _route_display(origin: str, dest: str) -> str:
+    """
+    Build a log-friendly route string with city names where known.
+    'LAS->MKE (Las Vegas to Milwaukee)'
+    Falls back gracefully: 'LAS->XYZ (Las Vegas)' or 'LAS->MKE' if neither known.
+    """
+    o = (origin or "?").upper()
+    d = (dest   or "?").upper()
+    route  = f"{o}->{d}"
+    o_city = _AIRPORT_CITIES.get(o)
+    d_city = _AIRPORT_CITIES.get(d)
+    if o_city and d_city:
+        return f"{route} ({o_city} to {d_city})"
+    if o_city:
+        return f"{route} ({o_city})"
+    if d_city:
+        return f"{route} (to {d_city})"
+    return route
+
 # ── Airline display names (ICAO 3-letter prefix → human-readable name) ────────
 _AIRLINE_NAMES: dict[str, str] = {
     # US majors
@@ -994,7 +1109,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if adsbdb_ok:
         origin, destination, source = adsbdb_origin, adsbdb_dest, _adsbdb_src
         if _adsbdb_src != "adsbdb:cached":
-            _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} accepted")
+            _log(f"[adsbdb] {_airline_display(callsign)}: {_route_display(adsbdb_origin, adsbdb_dest)} accepted")
     elif adsbdb_origin or adsbdb_dest:
         if _adsbdb_src != "adsbdb:cached":
             if not _adsbdb_origin_local:
@@ -1065,7 +1180,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     destination = _sky_dest
                 source = source or _sky_src
                 if _sky_src != "opensky:cached":
-                    _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} accepted")
+                    _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
             elif _sky_src != "opensky:cached":
                 _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
 
@@ -1159,7 +1274,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 source = source or _al_src
                 if _al_src != "airlabs:cached":
                     _count_suffix = f" [call #{_al_count}]" if _al_count else ""
-                    _log(f"[airlabs] {_airline_display(callsign)}: {al_origin or '?'}->{al_dest or '?'} accepted{_count_suffix}")
+                    _log(f"[airlabs] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
             else:
                 if _al_src != "airlabs:cached":
                     _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} skipped — origin not local")
@@ -1231,7 +1346,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                 if not destination:
                                     destination = fa_dest
                                 source = "aeroapi"
-                                _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} accepted")
+                                _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
                             else:
                                 _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} skipped — origin not local")
                         else:
@@ -1813,7 +1928,7 @@ def run_test_lookup(callsign, use_cache=True):
     # ── Summary ───────────────────────────────────────────────────────────────
     _log(
         f"{tag} ━━━ result:"
-        f" {result['final_origin'] or '?'}->{result['final_destination'] or '?'}"
+        f" {_route_display(result['final_origin'], result['final_destination'])}"
         f" [{result['route_source']}]"
         f" plane='{result['final_plane']}' [{result['type_source']}] ━━━"
     )
@@ -1912,7 +2027,7 @@ class Overhead:
                 plane    = plane    if plane.upper()    not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
-                _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {origin}->{destination} '{plane}'")
+                _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'")
                 _record_flight_stat(callsign, plane, origin, destination)
 
                 prev_was_live = _is_live(route_src) or _is_live(type_src)
