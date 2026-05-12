@@ -249,6 +249,8 @@ def _set_backoff(api_name: str, secs: int = 3600) -> None:
 
 def _prune_cache(cache, ttl):
     """Remove stale entries and enforce CACHE_MAX_SIZE. Must be called under _cache_lock."""
+    if len(cache) <= CACHE_MAX_SIZE // 2:
+        return  # cache is small — skip O(N) sweep
     now = int(time.time())
     stale = [k for k, v in cache.items() if now - v[-1] > ttl]
     for k in stale:
@@ -266,11 +268,14 @@ def _save_caches():
     converted back to tuples on load.  Uses an atomic tmp→rename write.
     """
     with _cache_lock:
-        data = {
-            "route":    {k: list(v) for k, v in _route_cache.items()},
-            "aeroapi":  {k: list(v) for k, v in _aeroapi_cache.items()},
-            "aircraft": {k: list(v) for k, v in _aircraft_cache.items()},
-        }
+        route_snap    = dict(_route_cache)
+        aeroapi_snap  = dict(_aeroapi_cache)
+        aircraft_snap = dict(_aircraft_cache)
+    data = {
+        "route":    {k: list(v) for k, v in route_snap.items()},
+        "aeroapi":  {k: list(v) for k, v in aeroapi_snap.items()},
+        "aircraft": {k: list(v) for k, v in aircraft_snap.items()},
+    }
     try:
         tmp = CACHE_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -659,12 +664,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
                 if r.status_code == 200:
                     fr = (r.json().get("response") or {}).get("flightroute") or {}
-                    adsbdb_origin = (fr.get("origin") or {}).get("iata_code", "") or ""
-                    adsbdb_dest   = (fr.get("destination") or {}).get("iata_code", "") or ""
-                    adsbdb_olat   = (fr.get("origin") or {}).get("latitude")
-                    adsbdb_olon   = (fr.get("origin") or {}).get("longitude")
-                    adsbdb_dlat   = (fr.get("destination") or {}).get("latitude")
-                    adsbdb_dlon   = (fr.get("destination") or {}).get("longitude")
+                    _fr_orig      = fr.get("origin") or {}
+                    _fr_dest      = fr.get("destination") or {}
+                    adsbdb_origin = _fr_orig.get("iata_code", "") or ""
+                    adsbdb_dest   = _fr_dest.get("iata_code", "") or ""
+                    adsbdb_olat   = _fr_orig.get("latitude")
+                    adsbdb_olon   = _fr_orig.get("longitude")
+                    adsbdb_dlat   = _fr_dest.get("latitude")
+                    adsbdb_dlon   = _fr_dest.get("longitude")
                     # Cache hit or confirmed miss (no flightroute in DB)
                     with _cache_lock:
                         _route_cache[callsign] = _cache_entry(
@@ -708,12 +715,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     )
     if adsbdb_ok:
         origin, destination, source = adsbdb_origin, adsbdb_dest, _adsbdb_src
-        _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} accepted ({_adsbdb_src})")
+        if _adsbdb_src != "adsbdb:cached":
+            _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} accepted")
     elif adsbdb_origin or adsbdb_dest:
-        if not (_adsbdb_origin_local or _adsbdb_dest_local):
-            _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — no local endpoint ({_adsbdb_src})")
-        else:
-            _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — plausibility failed ({_adsbdb_src})")
+        if _adsbdb_src != "adsbdb:cached":
+            if not (_adsbdb_origin_local or _adsbdb_dest_local):
+                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — no local endpoint")
+            else:
+                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — plausibility failed")
     elif _adsbdb_src == "adsbdb":  # live call that returned nothing (not a cached negative)
         _log(f"[adsbdb] {callsign}: no data")
 
@@ -800,12 +809,15 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # Skipped when the callsign is in _paid_miss_cache — both paid APIs already
     # confirmed empty within ROUTE_PAID_MISS_TTL (2 h), no point burning quota.
     _need_airlabs = not (origin and destination)
-    with _cache_lock:
-        _paid_miss_ts = _paid_miss_cache.get(callsign, 0) if callsign else 0
-    _skip_paid = (now - _paid_miss_ts) < ROUTE_PAID_MISS_TTL
+    _skip_paid = False
+    if _need_airlabs and callsign:
+        with _cache_lock:
+            _paid_miss_ts = _paid_miss_cache.get(callsign, 0)
+        _skip_paid = (now - _paid_miss_ts) < ROUTE_PAID_MISS_TTL
     al_origin = al_dest = ""
     al_olat = al_olon = al_dlat = al_dlon = None
-    _al_src = "airlabs"
+    _al_src   = "airlabs"
+    _al_count = 0  # tracks live call count; > 0 means a real API call was made
 
     if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not _skip_paid:
         with _cache_lock:
@@ -815,8 +827,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             al_olat, al_olon = cached[2], cached[3]
             al_dlat, al_dlon = cached[4], cached[5]
             _al_src = "airlabs:cached"
-            if al_origin or al_dest:
-                _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} (cached)")
+            # No log — suppress cached-hit spam; live fetches produce a log below
         elif not _in_backoff("airlabs"):
             try:
                 r = requests.get(
@@ -838,10 +849,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     al_olon   = resp.get("dep_lng")
                     al_dlat   = resp.get("arr_lat")
                     al_dlon   = resp.get("arr_lng")
-                    if al_origin or al_dest:
-                        _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} [call #{_al_count}]")
-                        _al_src = "airlabs"
-                    else:
+                    if not (al_origin or al_dest):
                         _log(f"[airlabs] {callsign}: no data [call #{_al_count}]")
                     # Cache result (even empty — negative cache suppresses retries)
                     with _cache_lock:
@@ -879,11 +887,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _al_climbing   = vertical_speed >  256
             _al_descending = vertical_speed < -256
             if (_al_climbing or _al_descending) and not _al_local:
-                _dir = "climbing" if _al_climbing else "descending"
-                _log(
-                    f"[airlabs] rejecting {al_origin}->{al_dest} for {callsign}: "
-                    f"vs={vertical_speed:.0f} ({_dir}), neither endpoint is local"
-                )
+                if _al_src != "airlabs:cached":
+                    _dir = "climbing" if _al_climbing else "descending"
+                    _log(
+                        f"[airlabs] rejecting {al_origin}->{al_dest} for {callsign}: "
+                        f"vs={vertical_speed:.0f} ({_dir}), neither endpoint is local"
+                    )
             else:
                 # Guard each endpoint independently — don't overwrite a local airport
                 # that was already confirmed by a prior source (e.g. OpenSky).
@@ -892,9 +901,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 if not destination:
                     destination = al_dest
                 source = _al_src
-                _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} accepted")
+                if _al_src != "airlabs:cached":
+                    _count_suffix = f" [call #{_al_count}]" if _al_count else ""
+                    _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} accepted{_count_suffix}")
         else:
-            _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
+            if _al_src != "airlabs:cached":
+                _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
 
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
     if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not _skip_paid:
@@ -906,8 +918,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             if not destination:
                 destination = cached[1]
             source = source or "aeroapi:cached"
-            if cached[0] or cached[1]:
-                _log(f"[aeroapi] {callsign}: {cached[0] or '?'}->{cached[1] or '?'} (cached)")
+            # No log — suppress cached-hit spam; live fetches produce a log below
         elif not _in_backoff("aeroapi"):
             try:
                 r = requests.get(
@@ -932,16 +943,16 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     fa_origin = fa_dest = ""
                     fa_olat = fa_olon = fa_dlat = fa_dlon = None
                     if f:
-                        fa_origin = (f.get("origin") or {}).get("code_iata", "") or ""
-                        fa_dest   = (f.get("destination") or {}).get("code_iata", "") or ""
-                        fa_olat   = (f.get("origin") or {}).get("latitude")
-                        fa_olon   = (f.get("origin") or {}).get("longitude")
-                        fa_dlat   = (f.get("destination") or {}).get("latitude")
-                        fa_dlon   = (f.get("destination") or {}).get("longitude")
+                        _fa_orig  = f.get("origin") or {}
+                        _fa_dest  = f.get("destination") or {}
+                        fa_origin = _fa_orig.get("code_iata", "") or ""
+                        fa_dest   = _fa_dest.get("code_iata", "") or ""
+                        fa_olat   = _fa_orig.get("latitude")
+                        fa_olon   = _fa_orig.get("longitude")
+                        fa_dlat   = _fa_dest.get("latitude")
+                        fa_dlon   = _fa_dest.get("longitude")
                     _aeroapi_increment()  # logs running spend
-                    if fa_origin or fa_dest:
-                        _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'}")
-                    else:
+                    if not (fa_origin or fa_dest):
                         _log(f"[aeroapi] {callsign}: no flights returned")
                     with _cache_lock:
                         _aeroapi_cache[callsign] = _cache_entry(
@@ -1256,6 +1267,7 @@ def run_test_lookup(callsign, use_cache=True):
                 result["steps"][_sk] = {"skipped": "override"}
 
         _route_resolved = bool(result["final_origin"] or result["final_destination"])
+        _apis_disabled  = os.path.exists(APIS_DISABLED_FLAG)  # evaluate once for both AirLabs + AeroAPI
 
         if not _route_resolved:
 
@@ -1340,7 +1352,6 @@ def run_test_lookup(callsign, use_cache=True):
 
             # ── 3. AirLabs (fresh, counts quota, respects backoff + kill-switch) ─
             if not (result["final_origin"] and result["final_destination"]) and AIRLABS_API_KEY and cs:
-                _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)
                 if _in_backoff("airlabs"):
                     _log(f"{tag} [airlabs] in backoff — skipping")
                     result["steps"]["airlabs"] = {"skipped": "backoff"}
@@ -1393,7 +1404,6 @@ def run_test_lookup(callsign, use_cache=True):
 
             # ── 4. AeroAPI (fresh, counts spend, respects backoff + kill-switch) ─
             if not (result["final_origin"] and result["final_destination"]) and FLIGHTAWARE_API_KEY and cs:
-                _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)
                 if _in_backoff("aeroapi"):
                     _log(f"{tag} [aeroapi] in backoff — skipping")
                     result["steps"]["aeroapi"] = {"skipped": "backoff"}
@@ -1608,7 +1618,6 @@ class Overhead:
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
                 _log(f"[route:{route_src}] [type:{type_src}] {callsign} {origin}->{destination} '{plane}'")
-                _log(f"[overhead]   -> {callsign} plane='{plane}' {origin}->{destination}")
 
                 prev_was_live = _is_live(route_src) or _is_live(type_src)
 
