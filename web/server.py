@@ -416,7 +416,7 @@ def _db_stats(date_from: str, date_to: str, today: str | None = None) -> dict | 
         for b in ("free", "paid", "mixed", "none", "override"):
             v = buckets.get(b, 0)
             if v:
-                source_pct[b] = round(v / total_sourced * 100)
+                source_pct[b] = round(v / total_sourced * 100, 1)
 
     day_counts  = {r["date"]: r["cnt"] for r in day_rows}
     range_total = sum(day_counts.values())

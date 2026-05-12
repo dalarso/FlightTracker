@@ -1608,7 +1608,7 @@ function renderPeriodStats(d) {
           <span style="font-family:monospace;font-weight:600">${pct}%</span>
         </div>
         <div style="height:4px;background:var(--border);border-radius:2px">
-          <div style="height:100%;width:${pct}%;background:${b.color};border-radius:2px"></div>
+          <div style="height:100%;width:${pct}%;min-width:${pct > 0 ? '3px' : '0'};background:${b.color};border-radius:2px"></div>
         </div>`;
       srcEl.appendChild(row);
     });
