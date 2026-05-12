@@ -2017,9 +2017,9 @@ def run_test_lookup(callsign, use_cache=True):
         if override_plane:
             plane    = override_plane
             type_src = "override"
-        display_name = override_display or plane
 
-        plane = plane if plane.upper() not in BLANK_FIELDS else ""
+        plane        = plane if plane.upper() not in BLANK_FIELDS else ""
+        display_name = override_display or plane   # after BLANK_FIELDS strip so sentinels don't leak
 
         # Capture override details if the override fired (route_src == "override")
         if route_src == "override":
@@ -2031,6 +2031,7 @@ def run_test_lookup(callsign, use_cache=True):
             "final_origin":      origin,
             "final_destination": destination,
             "final_plane":       plane,
+            "final_display":     display_name,
             "route_source":      route_src,
             "type_source":       type_src,
         })
