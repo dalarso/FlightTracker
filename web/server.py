@@ -1015,6 +1015,7 @@ def save_overrides():
                 "pattern":     rule["pattern"].strip().upper(),
                 "origin":      rule.get("origin", "").strip().upper(),
                 "destination": rule.get("destination", "").strip().upper(),
+                "display":     rule.get("display", "").strip(),
                 "plane":       rule.get("plane", "").strip(),
                 "note":        rule.get("note", "").strip(),
             })

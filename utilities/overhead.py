@@ -1324,16 +1324,18 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # AirLabs, or FlightAware calls are made.
     _ov = _match_override(callsign)
     if _ov:
-        ov_origin = (_ov.get("origin") or "").strip().upper()
-        ov_dest   = (_ov.get("destination") or "").strip().upper()
-        ov_plane = (_ov.get("plane") or "").strip()
+        ov_origin   = (_ov.get("origin")   or "").strip().upper()
+        ov_dest     = (_ov.get("destination") or "").strip().upper()
+        ov_plane    = (_ov.get("plane")    or "").strip()  # type stored in stats (empty = use API result)
+        ov_display  = (_ov.get("display")  or "").strip()  # label shown on flight display only
         _log(
             f"[override] {callsign} matched '{_ov['pattern']}'"
             f" → {ov_origin or '?'}->{ov_dest or '?'}"
+            + (f"  display='{ov_display}'" if ov_display else "")
             + (f"  type='{ov_plane}'" if ov_plane else "")
             + (f"  ({_ov['note']})" if _ov.get("note") else "")
         )
-        return ov_origin, ov_dest, "override", ov_plane
+        return ov_origin, ov_dest, "override", ov_plane, ov_display
 
     # ── 0.5. Resolved-route cache (scheduled airlines only) ───────────────────
     # When we successfully resolve both endpoints for a scheduled airline
@@ -1746,7 +1748,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             int(time.time()) + ROUTE_TTL_SCHEDULED,
                             source=source.removesuffix(":cached"))
 
-    return origin, destination, source or "none", ""  # 4th value: override plane (empty for non-override)
+    return origin, destination, source or "none", "", ""  # 4th: override plane  5th: override display
 
 
 def _try_opensky_reg(hex_code: str) -> None:
@@ -2006,15 +2008,16 @@ def run_test_lookup(callsign, use_cache=True):
         # follows — no duplication, no divergence.
         result["steps"]["mode"] = "cache"
 
-        origin, destination, route_src, override_plane = get_route(
+        origin, destination, route_src, override_plane, override_display = get_route(
             hex_code, cs, vertical_speed, plane_lat, plane_lon
         )
         plane, type_src = get_aircraft_type(hex_code)
 
-        # Mirror _grab_data(): if override specified a plane type, it wins
+        # Mirror _grab_data(): override_plane replaces stored type; override_display is display-only
         if override_plane:
             plane    = override_plane
             type_src = "override"
+        display_name = override_display or plane
 
         plane = plane if plane.upper() not in BLANK_FIELDS else ""
 
@@ -2485,11 +2488,12 @@ class Overhead:
                     flight.latitude, flight.longitude,
                 )
                 _type_fut = _lookup_executor.submit(get_aircraft_type, flight.hex_code)
-                origin, destination, route_src, override_plane = _route_fut.result()
+                origin, destination, route_src, override_plane, override_display = _route_fut.result()
                 plane, type_src = _type_fut.result()
 
-                # If the override rule specifies a plane type, use it instead of the
-                # API result — lets known aircraft like MXY* show type without API calls.
+                # override_plane: replaces the stored aircraft type (stats + DB).
+                # override_display: shown on the flight display only — real type still logged.
+                # Legacy: if only override_plane is set (no display), it acts as both.
                 if override_plane:
                     plane    = override_plane
                     type_src = "override"
@@ -2497,21 +2501,27 @@ class Overhead:
                 plane    = plane    if plane.upper()    not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
+                # What to show on the flight display marquee.
+                # override_display wins if set; otherwise fall back to the real type.
+                display_name = override_display or plane
+
                 reg        = flight.registration or _cache_db_get_reg(flight.hex_code)
                 # GA/helicopters often broadcast their N-number as the callsign with
                 # no separate registration field — recognise and store it.
                 if not reg and _N_NUMBER_RE.match(callsign):
                     reg = callsign.upper()
                     _cache_db_set_reg(flight.hex_code, reg)
-                reg_suffix = f" {reg}" if reg else ""
-                _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
+                reg_suffix     = f" {reg}" if reg else ""
+                display_suffix = f" [display:{display_name}]" if display_name and display_name != plane else ""
+                _log(f"[route:{route_src}] [type:{type_src}]{display_suffix} {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
                 if callsign != _test_cs:
                     _record_flight_stat(callsign, plane, origin, destination, reg, route_src)
 
                 prev_was_live = _is_live(route_src) or _is_live(type_src)
 
                 data.append({
-                    "plane": plane,
+                    "plane":        plane,         # real aircraft type — used for stats
+                    "display_name": display_name,  # shown on flight display (may differ from plane)
                     "origin": origin,
                     "destination": destination,
                     "vertical_speed": flight.vertical_speed,

@@ -668,9 +668,14 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           <div class="hint">Arrival airport IATA code</div>
         </div>
         <div class="field">
-          <label>Aircraft Type <span style="color:var(--muted)">(optional)</span></label>
+          <label>Display Name <span style="color:var(--muted)">(optional)</span></label>
+          <input type="text" id="rule-display" placeholder="LVMPD AIR 2">
+          <div class="hint">Label shown on the flight display — real aircraft type still logged in stats</div>
+        </div>
+        <div class="field">
+          <label>Type Override <span style="color:var(--muted)">(optional)</span></label>
           <input type="text" id="rule-plane" placeholder="AIRBUS A220-300">
-          <div class="hint">Overrides API type lookup — use when APIs have no coverage</div>
+          <div class="hint">Overrides the stored aircraft type — leave blank to let APIs fill it in</div>
         </div>
         <div class="field">
           <label>Note <span style="color:var(--muted)">(optional)</span></label>
@@ -1272,7 +1277,8 @@ function renderMatrix(status, flightData) {
   }
   const f = flights[0];
   const total = flights.length;
-  const dur = Math.max(6, Math.ceil(((f.plane || '').length) * 0.4));
+  const displayLabel = f.display_name || f.plane || '';
+  const dur = Math.max(6, Math.ceil((displayLabel.length) * 0.4));
   if (f.test) screen.classList.add('test-mode');
   screen.innerHTML = `
     <div class="m-journey">
@@ -1285,7 +1291,7 @@ function renderMatrix(status, flightData) {
       <span class="m-flight-index">${total > 1 ? '1/' + total : ''}</span>
     </div>
     <div class="m-plane">
-      <span class="m-plane-text" style="animation-duration:${dur}s">${escHtml(f.plane) || '&#8212;'}</span>
+      <span class="m-plane-text" style="animation-duration:${dur}s">${escHtml(displayLabel) || '&#8212;'}</span>
     </div>`;
 }
 
@@ -1861,6 +1867,7 @@ function renderRules() {
           <td><input id="edit-pattern" class="rule-edit-input mono" value="${escHtml(r.pattern)}"     onkeydown="_editKeydown(event,${i})"></td>
           <td><input id="edit-origin"  class="rule-edit-input mono" value="${escHtml(r.origin)}"      onkeydown="_editKeydown(event,${i})" maxlength="4" style="max-width:70px"></td>
           <td><input id="edit-dest"    class="rule-edit-input mono" value="${escHtml(r.destination)}" onkeydown="_editKeydown(event,${i})" maxlength="4" style="max-width:70px"></td>
+          <td><input id="edit-display" class="rule-edit-input"       value="${escHtml(r.display||'')}" onkeydown="_editKeydown(event,${i})"></td>
           <td><input id="edit-plane"   class="rule-edit-input"      value="${escHtml(r.plane||'')}"   onkeydown="_editKeydown(event,${i})"></td>
           <td><input id="edit-note"    class="rule-edit-input"      value="${escHtml(r.note||'')}"    onkeydown="_editKeydown(event,${i})"></td>
           <td style="white-space:nowrap">
@@ -1878,7 +1885,8 @@ function renderRules() {
         <td><span class="rule-pattern">${escHtml(r.pattern)}</span></td>
         <td>${r.origin      ? `<span class="rule-airport">${escHtml(r.origin)}</span>`      : '<span class="rule-blank">—</span>'}</td>
         <td>${r.destination ? `<span class="rule-airport">${escHtml(r.destination)}</span>` : '<span class="rule-blank">—</span>'}</td>
-        <td><span class="rule-note">${escHtml(r.plane || '')}</span></td>
+        <td><span class="rule-note">${escHtml(r.display || '')}</span></td>
+        <td><span class="rule-note" style="color:var(--muted)">${escHtml(r.plane || '')}</span></td>
         <td><span class="rule-note">${escHtml(r.note  || '')}</span></td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary" style="padding:3px 10px;font-size:11px;margin-right:4px" onclick="editRule(${i})">✎ Edit</button>
@@ -1891,10 +1899,11 @@ function renderRules() {
     <table class="rules-table">
       <thead><tr>
         <th style="width:24px"></th>
-        <th>Pattern</th><th>Origin</th><th>Dest</th><th>Plane</th><th>Note</th><th></th>
+        <th>Pattern</th><th>Origin</th><th>Dest</th><th>Display Name</th><th>Type Override</th><th>Note</th><th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+
 
   // Focus first field if a row just entered edit mode
   if (_editingIdx !== null) {
@@ -1979,10 +1988,11 @@ async function saveEditRule(i) {
   const original = { ..._rules[i] };
   _rules[i] = {
     pattern,
-    origin:      (document.getElementById('edit-origin').value  || '').trim().toUpperCase(),
-    destination: (document.getElementById('edit-dest').value    || '').trim().toUpperCase(),
-    plane:       (document.getElementById('edit-plane').value   || '').trim(),
-    note:        (document.getElementById('edit-note').value    || '').trim(),
+    origin:      (document.getElementById('edit-origin').value   || '').trim().toUpperCase(),
+    destination: (document.getElementById('edit-dest').value     || '').trim().toUpperCase(),
+    display:     (document.getElementById('edit-display').value  || '').trim(),
+    plane:       (document.getElementById('edit-plane').value    || '').trim(),
+    note:        (document.getElementById('edit-note').value     || '').trim(),
   };
 
   const ok = await saveRules();
@@ -2007,6 +2017,7 @@ async function addRule() {
     pattern,
     origin:      document.getElementById('rule-origin').value.trim().toUpperCase(),
     destination: document.getElementById('rule-dest').value.trim().toUpperCase(),
+    display:     document.getElementById('rule-display').value.trim(),
     plane:       document.getElementById('rule-plane').value.trim(),
     note:        document.getElementById('rule-note').value.trim(),
   };
@@ -2017,6 +2028,7 @@ async function addRule() {
     document.getElementById('rule-pattern').value = '';
     document.getElementById('rule-origin').value  = '';
     document.getElementById('rule-dest').value    = '';
+    document.getElementById('rule-display').value = '';
     document.getElementById('rule-plane').value   = '';
     document.getElementById('rule-note').value    = '';
     renderRules();
@@ -2245,7 +2257,8 @@ function renderTestResult(d) {
           ${(ov.origin || ov.destination)
             ? `&nbsp;· Route: <code style="color:var(--accent)">${escHtml(ov.origin||'?')} → ${escHtml(ov.destination||'?')}</code>`
             : ''}
-          ${ov.plane ? `&nbsp;· Type: <code style="color:#c800c8">${escHtml(ov.plane)}</code>` : ''}
+          ${ov.display ? `&nbsp;· Display: <code style="color:#c800c8">${escHtml(ov.display)}</code>` : ''}
+          ${ov.plane   ? `&nbsp;· Type Override: <code style="color:#c800c8">${escHtml(ov.plane)}</code>` : ''}
           ${ov.note  ? `<br><span style="font-size:11px;color:var(--muted)">${escHtml(ov.note)}</span>` : ''}
         </div>
       </div>`;
