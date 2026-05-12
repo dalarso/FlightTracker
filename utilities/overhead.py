@@ -176,6 +176,17 @@ _SCHEDULED_PREFIXES = frozenset([
     "FLG", "SWG", "AGX",
 ])
 
+OPENSKY_CACHE_TTL    = 3600    # free/unlimited, hex-keyed — keep short
+ADSBDB_CACHE_TTL     = 3600    # free/unlimited — keep short; fresh data costs nothing
+# Paid API TTLs are tiered by operator type — see _route_ttl() which follows.
+ROUTE_TTL_SCHEDULED  = 604800  # 7 days — commercial + regional airlines (stable schedules)
+ROUTE_TTL_DEFAULT    = 3600    # 1 hour — GA, helicopters, charters, unknown (can re-depart)
+ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
+ROUTE_PAID_MISS_TTL = 7200  # both paid APIs confirmed empty — suppress for 2 h
+AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
+AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every poll cycle
+CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
+
 def _route_ttl(callsign: str) -> int:
     """
     Return the positive-hit cache TTL for AirLabs/AeroAPI based on operator type.
@@ -241,17 +252,6 @@ def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lo
     d_dest = _haversine_km(plane_lat, plane_lon, dest_lat, dest_lon)
     return (d_orig + d_dest) / route_km < 1.8
 
-
-OPENSKY_CACHE_TTL    = 3600    # free/unlimited, hex-keyed — keep short
-ADSBDB_CACHE_TTL     = 3600    # free/unlimited — keep short; fresh data costs nothing
-# Paid API TTLs are tiered by operator type — see _route_ttl() below.
-ROUTE_TTL_SCHEDULED  = 604800  # 7 days — commercial + regional airlines (stable schedules)
-ROUTE_TTL_DEFAULT    = 3600    # 1 hour — GA, helicopters, charters, unknown (can re-depart)
-ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
-ROUTE_PAID_MISS_TTL = 7200  # both paid APIs confirmed empty — suppress for 2 h
-AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
-AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every poll cycle
-CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
 
 # All caches store tuples where the LAST element is always the timestamp,
 # making _prune_cache's v[-1] access safe and consistent:
@@ -794,7 +794,6 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             fl = max(sky_data, key=lambda f: f.get("firstSeen", 0))
                             _sky_origin = icao_to_iata(fl.get("estDepartureAirport") or "")
                             _sky_dest   = icao_to_iata(fl.get("estArrivalAirport") or "")
-                            _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'}")
                         else:
                             _log(f"[opensky] {callsign}: no data")
                         # Cache hit or confirmed-empty 200 — suppresses re-queries within TTL.
@@ -820,7 +819,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     destination = _sky_dest
                 source = source or _sky_src
                 if _sky_src != "opensky:cached":
-                    _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} accepted ({_sky_src})")
+                    _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} accepted")
             elif _sky_src != "opensky:cached":
                 _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
 
@@ -909,7 +908,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     origin = al_origin
                 if not destination:
                     destination = al_dest
-                source = _al_src
+                source = source or _al_src
                 if _al_src != "airlabs:cached":
                     _count_suffix = f" [call #{_al_count}]" if _al_count else ""
                     _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} accepted{_count_suffix}")
@@ -981,10 +980,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             if _fa_origin_local:
                                 if not origin:
                                     origin = fa_origin
-                                    source = "aeroapi"
                                 if not destination:
                                     destination = fa_dest
-                                    source = source or "aeroapi"
+                                source = "aeroapi"
                                 _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} accepted")
                             else:
                                 _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} skipped — origin not local")
@@ -1006,7 +1004,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 
     # If still no route and paid APIs were eligible (not skipped, not disabled),
     # record a combined miss so neither is called again for 2 hours.
-    if not origin and not destination and callsign and not _skip_paid and not _apis_disabled:
+    if (not origin and not destination and callsign and not _skip_paid and not _apis_disabled
+            and (AIRLABS_API_KEY or FLIGHTAWARE_API_KEY)):
         if not _in_backoff("airlabs") and not _in_backoff("aeroapi"):
             with _cache_lock:
                 _paid_miss_cache[callsign] = now
@@ -1314,10 +1313,24 @@ def run_test_lookup(callsign, use_cache=True):
                 result["steps"]["adsbdb_route"] = {"error": str(_e)}
 
             if _adsbdb_origin or _adsbdb_dest:
-                result["final_origin"]      = _adsbdb_origin
-                result["final_destination"] = _adsbdb_dest
-                result["route_source"]      = "adsbdb"
-                _route_resolved             = True
+                _adsbdb_origin_local = _adsbdb_origin.upper() in _LOCAL_AIRPORTS if _adsbdb_origin else False
+                _adsbdb_ok = (
+                    _adsbdb_origin_local
+                    and _route_plausible(plane_lat, plane_lon,
+                                         _adsbdb_olat, _adsbdb_olon,
+                                         _adsbdb_dlat, _adsbdb_dlon)
+                )
+                result["steps"]["adsbdb_route"]["origin_local"] = _adsbdb_origin_local
+                if _adsbdb_ok:
+                    result["final_origin"]      = _adsbdb_origin
+                    result["final_destination"] = _adsbdb_dest
+                    result["route_source"]      = "adsbdb"
+                    _route_resolved             = True
+                    _log(f"{tag} [adsbdb] accepted — local origin")
+                elif not _adsbdb_origin_local:
+                    _log(f"{tag} [adsbdb] skipped — origin not local ({_adsbdb_origin or '?'})")
+                else:
+                    _log(f"{tag} [adsbdb] skipped — route implausible")
 
             # ── 2. OpenSky (fresh, respects backoff) ───────────────────────────
             if not (result["final_origin"] and result["final_destination"]) and OPENSKY_CLIENT_ID and hex_code:
@@ -1355,10 +1368,16 @@ def run_test_lookup(callsign, use_cache=True):
                                     })
                                     _log(f"{tag} [opensky] route: {_sky_origin or '?'}->{_sky_dest or '?'}")
                                     if _sky_origin or _sky_dest:
-                                        result["final_origin"]      = result["final_origin"] or _sky_origin
-                                        result["final_destination"] = result["final_destination"] or _sky_dest
-                                        result["route_source"]      = "opensky"
-                                        _route_resolved             = True
+                                        _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
+                                        result["steps"]["opensky"]["origin_local"] = _sky_origin_local
+                                        if _sky_origin_local:
+                                            result["final_origin"]      = result["final_origin"] or _sky_origin
+                                            result["final_destination"] = result["final_destination"] or _sky_dest
+                                            result["route_source"]      = "opensky"
+                                            _route_resolved             = True
+                                            _log(f"{tag} [opensky] accepted — local origin")
+                                        else:
+                                            _log(f"{tag} [opensky] skipped — origin not local ({_sky_origin or '?'})")
                                 else:
                                     _log(f"{tag} [opensky] no flight history in last 24h")
                                     result["steps"]["opensky"]["no_data"] = True
@@ -1402,14 +1421,18 @@ def run_test_lookup(callsign, use_cache=True):
                             })
                             _log(f"{tag} [airlabs] route: {_al_origin or '?'}->{_al_dest or '?'}")
                             if _al_origin or _al_dest:
+                                _al_origin_local = _al_origin.upper() in _LOCAL_AIRPORTS if _al_origin else False
                                 _al_ok = _route_plausible(plane_lat, plane_lon,
                                                            _al_olat, _al_olon, _al_dlat, _al_dlon)
+                                result["steps"]["airlabs"]["origin_local"] = _al_origin_local
                                 result["steps"]["airlabs"]["plausible"] = _al_ok
-                                if _al_ok:
+                                if _al_origin_local and _al_ok:
                                     result["final_origin"]      = result["final_origin"] or _al_origin
                                     result["final_destination"] = result["final_destination"] or _al_dest
                                     result["route_source"]      = "airlabs"
                                     _route_resolved             = True
+                                elif not _al_origin_local:
+                                    _log(f"{tag} [airlabs] skipped — origin not local ({_al_origin or '?'})")
                                 else:
                                     _log(f"{tag} [airlabs] route implausible — rejected")
                         else:
@@ -1460,14 +1483,18 @@ def run_test_lookup(callsign, use_cache=True):
                                 })
                                 _log(f"{tag} [aeroapi] route: {_fa_origin or '?'}->{_fa_dest or '?'}")
                                 if _fa_origin or _fa_dest:
+                                    _fa_origin_local = _fa_origin.upper() in _LOCAL_AIRPORTS if _fa_origin else False
                                     _fa_ok = _route_plausible(plane_lat, plane_lon,
                                                                _fa_olat, _fa_olon, _fa_dlat, _fa_dlon)
+                                    result["steps"]["aeroapi"]["origin_local"] = _fa_origin_local
                                     result["steps"]["aeroapi"]["plausible"] = _fa_ok
-                                    if _fa_ok:
+                                    if _fa_origin_local and _fa_ok:
                                         result["final_origin"]      = result["final_origin"] or _fa_origin
                                         result["final_destination"] = result["final_destination"] or _fa_dest
                                         result["route_source"]      = "aeroapi"
                                         _route_resolved             = True
+                                    elif not _fa_origin_local:
+                                        _log(f"{tag} [aeroapi] skipped — origin not local ({_fa_origin or '?'})")
                                     else:
                                         _log(f"{tag} [aeroapi] route implausible — rejected")
                             else:
