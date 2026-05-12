@@ -159,9 +159,18 @@ _SCHEDULED_PREFIXES = frozenset([
     "AAL", "DAL", "UAL", "SWA", "ASA", "JBU", "NKS", "FFT", "SCX", "AAY",
     "HAL", "VRD",
     # Canadian
-    "ACA", "WJA", "POE",
-    # Common international at LAS
-    "BAW", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
+    "ACA", "WJA", "POE", "FLE",
+    # Mexican
+    "AMX", "VOI", "VIV",
+    # European
+    "BAW", "VIR", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
+    "CFG", "EDW",
+    # Asian
+    "KAL",
+    # Latin American
+    "CMP", "AVA",
+    # Oceania
+    "QFA",
     # Regional/commuter
     "SKW", "ENY", "RPA", "QXE", "ASH", "PDT", "JIA", "UCA", "CPZ", "MTN",
     "FLG", "SWG", "AGX",
