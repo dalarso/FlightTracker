@@ -206,6 +206,7 @@ OPENSKY_CACHE_TTL  = 3600    # free/unlimited, hex-keyed (aircraft not callsign)
 ADSBDB_CACHE_TTL   = 3600    # free/unlimited — keep short; fresh data costs nothing
 AIRLABS_CACHE_TTL  = 172800  # 1,000 calls/month limit — cache 48 h to protect quota
 ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
+ROUTE_PAID_MISS_TTL = 7200  # both paid APIs confirmed empty — suppress for 2 h
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
 AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every poll cycle
 CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
@@ -221,9 +222,10 @@ _cache_lock     = Lock()
 #   callsign           — adsbdb result, keyed by flight callsign (e.g. "SWA123")
 #   hex_code           — OpenSky result, keyed by 6-char ICAO hex (e.g. "a1b2c3")
 #   "airlabs:callsign" — AirLabs result, prefixed to avoid collisions with adsbdb entries
-_route_cache    = {}
-_aeroapi_cache  = {}
-_aircraft_cache = {}
+_route_cache      = {}
+_aeroapi_cache    = {}
+_aircraft_cache   = {}
+_paid_miss_cache  = {}   # callsign → epoch; both AirLabs+AeroAPI confirmed empty
 _opensky_token  = {"value": None, "expires_at": 0, "fetching": False}
 
 # ── API backoff state ──────────────────────────────────────────────────────────
@@ -778,12 +780,17 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # ── 3. AirLabs (real-time, 1,000 calls/month — now mainly through-traffic) ──
     # Only called when OpenSky's result wasn't auto-trusted or returned nothing.
     # Returns airport coordinates, enabling the full plausibility check.
+    # Skipped when the callsign is in _paid_miss_cache — both paid APIs already
+    # confirmed empty within ROUTE_PAID_MISS_TTL (2 h), no point burning quota.
     _need_airlabs = not (origin and destination)
+    with _cache_lock:
+        _paid_miss_ts = _paid_miss_cache.get(callsign, 0) if callsign else 0
+    _skip_paid = (now - _paid_miss_ts) < ROUTE_PAID_MISS_TTL
     al_origin = al_dest = ""
     al_olat = al_olon = al_dlat = al_dlon = None
     _al_src = "airlabs"
 
-    if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled:
+    if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not _skip_paid:
         with _cache_lock:
             cached = _route_cache.get(f"airlabs:{callsign}")
         if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else AIRLABS_CACHE_TTL):
@@ -867,7 +874,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
 
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
-    if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled:
+    if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not _skip_paid:
         with _cache_lock:
             cached = _aeroapi_cache.get(callsign)
         if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else AEROAPI_CACHE_TTL):
@@ -939,6 +946,19 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 
     origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
     destination = destination if destination.upper() not in BLANK_FIELDS else ""
+
+    # If still no route and paid APIs were eligible (not skipped, not disabled),
+    # record a combined miss so neither is called again for 2 hours.
+    if not origin and not destination and callsign and not _skip_paid and not _apis_disabled:
+        if not _in_backoff("airlabs") and not _in_backoff("aeroapi"):
+            with _cache_lock:
+                _paid_miss_cache[callsign] = now
+                cutoff = now - ROUTE_PAID_MISS_TTL
+                stale = [k for k, v in _paid_miss_cache.items() if v < cutoff]
+                for k in stale:
+                    del _paid_miss_cache[k]
+            _log(f"[route] {callsign}: both paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
+
     return origin, destination, source or "none", ""  # 4th value: override plane (empty for non-override)
 
 
