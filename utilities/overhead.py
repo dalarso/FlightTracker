@@ -2494,6 +2494,11 @@ class Overhead:
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
                 reg        = flight.registration or _cache_db_get_reg(flight.hex_code)
+                # GA/helicopters often broadcast their N-number as the callsign with
+                # no separate registration field — recognise and store it.
+                if not reg and _N_NUMBER_RE.match(callsign):
+                    reg = callsign.upper()
+                    _cache_db_set_reg(flight.hex_code, reg)
                 reg_suffix = f" {reg}" if reg else ""
                 _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
                 if callsign != _test_cs:
