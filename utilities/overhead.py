@@ -148,6 +148,40 @@ AEROAPI_RESET_DAY  = 1               # FlightAware credit resets on the 1st
 # Local airports — used for journey/zone display features.
 _LOCAL_AIRPORTS = frozenset(a.strip().upper() for a in [LOCAL_AIRPORT, "VGT", "HSH"] if a and a.strip())
 
+# ── Route cache TTL tiers ──────────────────────────────────────────────────────
+# ICAO 3-letter operator prefix determines how long a confirmed paid-API route
+# result is cached.  Scheduled commercial routes are very stable; GA and
+# helicopter routes are not.  Negative-cache (miss) entries always use
+# ROUTE_MISS_TTL regardless of operator type.
+_COMMERCIAL_PREFIXES = frozenset([
+    # US majors
+    "AAL", "DAL", "UAL", "SWA", "ASA", "JBU", "NKS", "FFT", "SCX", "AAY",
+    "HAL", "VRD",
+    # Canadian
+    "ACA", "WJA",
+    # Common international at LAS
+    "BAW", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
+])
+_REGIONAL_PREFIXES = frozenset([
+    "SKW", "ENY", "RPA", "QXE", "ASH", "PDT", "JIA", "UCA", "CPZ", "MTN",
+    "FLG", "SWG", "AGX",
+])
+
+def _route_ttl(callsign: str) -> int:
+    """
+    Return the positive-hit cache TTL for AirLabs/AeroAPI based on operator type.
+    Keyed off the ICAO 3-letter prefix (first 3 chars of callsign).
+    Unknown prefixes (GA, helicopters, charters) get ROUTE_TTL_DEFAULT.
+    """
+    if not callsign or len(callsign) < 3:
+        return ROUTE_TTL_DEFAULT
+    prefix = callsign[:3].upper()
+    if prefix in _COMMERCIAL_PREFIXES:
+        return ROUTE_TTL_COMMERCIAL
+    if prefix in _REGIONAL_PREFIXES:
+        return ROUTE_TTL_REGIONAL
+    return ROUTE_TTL_DEFAULT
+
 _DEG2RAD = math.pi / 180
 
 
@@ -201,10 +235,12 @@ def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lo
     return (d_orig + d_dest) / route_km < 1.8
 
 
-AEROAPI_CACHE_TTL  = 172800  # paid per call — cache 48 h; scheduled routes are stable
-OPENSKY_CACHE_TTL  = 3600    # free/unlimited, hex-keyed (aircraft not callsign) — keep short
-ADSBDB_CACHE_TTL   = 3600    # free/unlimited — keep short; fresh data costs nothing
-AIRLABS_CACHE_TTL  = 172800  # 1,000 calls/month limit — cache 48 h to protect quota
+OPENSKY_CACHE_TTL    = 3600    # free/unlimited, hex-keyed — keep short
+ADSBDB_CACHE_TTL     = 3600    # free/unlimited — keep short; fresh data costs nothing
+# Paid API TTLs are tiered by operator type — see _route_ttl() below.
+ROUTE_TTL_COMMERCIAL = 604800  # 7 days — major commercial airlines (stable schedules)
+ROUTE_TTL_REGIONAL   = 259200  # 3 days — regional/commuter carriers
+ROUTE_TTL_DEFAULT    = 172800  # 2 days — GA, helicopters, charters, unknown
 ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
 ROUTE_PAID_MISS_TTL = 7200  # both paid APIs confirmed empty — suppress for 2 h
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
@@ -298,7 +334,7 @@ def _load_caches():
         loaded = {"route": 0, "aeroapi": 0, "aircraft": 0}
         with _cache_lock:
             for k, v in data.get("route", {}).items():
-                if len(v) == 7 and now - v[-1] < max(ADSBDB_CACHE_TTL, AIRLABS_CACHE_TTL, OPENSKY_CACHE_TTL):
+                if len(v) == 7 and now - v[-1] < max(ADSBDB_CACHE_TTL, ROUTE_TTL_COMMERCIAL, OPENSKY_CACHE_TTL):
                     # Skip miss entries (empty origin + dest) — their short TTL
                     # (ROUTE_MISS_TTL=300s) would have expired anyway, and loading
                     # them back as hour-long hits suppresses retries that should fire.
@@ -801,7 +837,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not _skip_paid:
         with _cache_lock:
             cached = _route_cache.get(f"airlabs:{callsign}")
-        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else AIRLABS_CACHE_TTL):
+        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else _route_ttl(callsign)):
             al_origin, al_dest = cached[0], cached[1]
             al_olat, al_olon = cached[2], cached[3]
             al_dlat, al_dlon = cached[4], cached[5]
@@ -836,7 +872,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             al_origin, al_dest,
                             al_olat, al_olon, al_dlat, al_dlon,
                         )
-                        _prune_cache(_route_cache, AIRLABS_CACHE_TTL)
+                        _prune_cache(_route_cache, ROUTE_TTL_COMMERCIAL)
                 else:
                     # Unexpected status (e.g. 404, 500) — negatively cache for
                     # ROUTE_MISS_TTL to prevent repeated quota-burning calls.
@@ -847,7 +883,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                         _route_cache[f"airlabs:{callsign}"] = _cache_entry(
                             "", "", None, None, None, None,
                         )
-                        _prune_cache(_route_cache, AIRLABS_CACHE_TTL)
+                        _prune_cache(_route_cache, ROUTE_TTL_COMMERCIAL)
             except Exception:
                 pass
         else:
@@ -882,7 +918,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not _skip_paid:
         with _cache_lock:
             cached = _aeroapi_cache.get(callsign)
-        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else AEROAPI_CACHE_TTL):
+        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else _route_ttl(callsign)):
             if not origin:
                 origin = cached[0]
             if not destination:
@@ -929,7 +965,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             fa_origin, fa_dest,
                             fa_olat, fa_olon, fa_dlat, fa_dlon,
                         )
-                        _prune_cache(_aeroapi_cache, AEROAPI_CACHE_TTL)
+                        _prune_cache(_aeroapi_cache, ROUTE_TTL_COMMERCIAL)
                     if fa_origin or fa_dest:
                         fa_plausible = _route_plausible(plane_lat, plane_lon,
                                                          fa_olat, fa_olon,
@@ -954,7 +990,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     _log(f"[aeroapi] unexpected status {r.status_code} for {callsign} — negative caching")
                     with _cache_lock:
                         _aeroapi_cache[callsign] = _cache_entry("", "", None, None, None, None)
-                        _prune_cache(_aeroapi_cache, AEROAPI_CACHE_TTL)
+                        _prune_cache(_aeroapi_cache, ROUTE_TTL_COMMERCIAL)
             except Exception:
                 pass
         # else: in backoff — already logged when backoff was set
