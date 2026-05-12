@@ -376,8 +376,8 @@ _lookup_executor = ThreadPoolExecutor(max_workers=MAX_FLIGHT_LOOKUP * 2)
 
 
 def _is_live(src):
-    """True when src represents a live (non-cached, non-heuristic) API call."""
-    return ":cached" not in src and src not in ("heuristic", "none", "miss", "override")
+    """True when src represents a live (non-cached) API call."""
+    return ":cached" not in src and src not in ("none", "miss", "override")
 
 
 def _get_opensky_token():
@@ -937,16 +937,6 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 pass
         # else: in backoff — already logged when backoff was set
 
-    # ── 5. LOCAL_AIRPORT heuristic ─────────────────────────────────────────────
-    if LOCAL_AIRPORT:
-        departing = vertical_speed > 0
-        if departing and not origin:
-            origin = LOCAL_AIRPORT
-            source = source or "heuristic"
-        elif not departing and not destination:
-            destination = LOCAL_AIRPORT
-            source = source or "heuristic"
-
     origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
     destination = destination if destination.upper() not in BLANK_FIELDS else ""
     return origin, destination, source or "none", ""  # 4th value: override plane (empty for non-override)
@@ -1049,7 +1039,7 @@ def run_test_lookup(callsign, use_cache=True):
 
     use_cache=False
         Bypasses all cache reads; every API is called fresh.  Override rules
-        are still applied (step 0).  LOCAL_AIRPORT heuristic is skipped.
+        are still applied (step 0).
         AirLabs and AeroAPI quota counters ARE incremented — these are real calls.
 
     Both modes respect backoffs and the _apis_disabled kill-switch.
@@ -1189,7 +1179,7 @@ def run_test_lookup(callsign, use_cache=True):
     else:
         # ── NO-CACHE MODE ─────────────────────────────────────────────────────
         # Every API called fresh; cache is never read.  Override rules still
-        # apply first (step 0).  LOCAL_AIRPORT heuristic intentionally skipped.
+        # apply first (step 0).
         result["steps"]["mode"] = "no_cache"
 
         # ── 0. Override rules ──────────────────────────────────────────────────
