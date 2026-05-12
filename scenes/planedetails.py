@@ -23,7 +23,7 @@ class PlaneDetailsScene(object):
         if len(self._data) == 0:
             return
 
-        plane = f'{self._data[self._data_index]["plane"]}'
+        plane = self._data[self._data_index].get("display_name") or self._data[self._data_index].get("plane", "")
 
         # Draw background
         self.draw_square(
