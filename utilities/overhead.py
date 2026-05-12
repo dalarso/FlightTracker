@@ -1352,7 +1352,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         if _resolved and _resolved[0] and _resolved[1]:
             _rsrc = _resolved[6].removesuffix(":cached")  # strip any trailing :cached so it isn't doubled
             _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
-            return _resolved[0], _resolved[1], _resolved_label, ""
+            return _resolved[0], _resolved[1], _resolved_label, "", ""  # 4th: override plane  5th: override display
 
     # ── 1. adsbdb (static historical DB) ──────────────────────────────────────
     adsbdb_origin = adsbdb_dest = ""
@@ -2050,12 +2050,14 @@ def run_test_lookup(callsign, use_cache=True):
         # ── 0. Override rules ──────────────────────────────────────────────────
         _ov = _match_override(cs)
         if _ov:
-            ov_origin = (_ov.get("origin") or "").strip().upper()
-            ov_dest   = (_ov.get("destination") or "").strip().upper()
-            ov_plane  = (_ov.get("plane") or "").strip()
+            ov_origin   = (_ov.get("origin")   or "").strip().upper()
+            ov_dest     = (_ov.get("destination") or "").strip().upper()
+            ov_plane    = (_ov.get("plane")    or "").strip()
+            ov_display  = (_ov.get("display")  or "").strip()
             _log(
                 f"{tag} [override] matched '{_ov['pattern']}'"
                 f" → {ov_origin or '?'}->{ov_dest or '?'}"
+                + (f"  display='{ov_display}'" if ov_display else "")
                 + (f"  type='{ov_plane}'" if ov_plane else "")
                 + (f"  note: {_ov['note']}" if _ov.get("note") else "")
             )
@@ -2064,6 +2066,7 @@ def run_test_lookup(callsign, use_cache=True):
             result["final_origin"]      = ov_origin
             result["final_destination"] = ov_dest
             result["final_plane"]       = ov_plane
+            result["final_display"]     = ov_display
             result["route_source"]      = "override"
             if ov_plane:
                 result["type_source"]   = "override"
@@ -2396,9 +2399,12 @@ def run_test_lookup(callsign, use_cache=True):
     )
 
     # ── Display injection — 30 s window for the LED matrix ───────────────────
+    _final_plane   = result["final_plane"]
+    _final_display = result.get("final_display", "") or _final_plane
     _display_data = {
         "callsign":       cs,
-        "plane":          result["final_plane"],
+        "plane":          _final_plane,
+        "display_name":   _final_display,
         "origin":         result["final_origin"],
         "destination":    result["final_destination"],
         "altitude":       int(altitude_ft),
@@ -2542,8 +2548,10 @@ class Overhead:
                 try:
                     _td = json.loads(_pathlib.Path(TEST_DISPLAY_FILE).read_text())
                     if _td.get("expires", 0) > int(time.time()):
+                        _td_plane = _td.get("plane", "")
                         data.insert(0, {
-                            "plane":          _td.get("plane", ""),
+                            "plane":          _td_plane,
+                            "display_name":   _td.get("display_name", "") or _td_plane,
                             "origin":         _td.get("origin", ""),
                             "destination":    _td.get("destination", ""),
                             "vertical_speed": _td.get("vertical_speed", 0),
