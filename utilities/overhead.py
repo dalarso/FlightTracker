@@ -787,9 +787,13 @@ def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str,
                         _db_conn.execute(
                             """UPDATE sightings SET
                                 registration = CASE WHEN registration='' AND ?!='' THEN ? ELSE registration END,
-                                aircraft     = CASE WHEN aircraft=''     AND ?!='' THEN ? ELSE aircraft     END
+                                aircraft     = CASE WHEN (aircraft='' OR ?='override') AND ?!='' THEN ? ELSE aircraft END,
+                                route_source = CASE WHEN ?='override' THEN ? ELSE route_source END
                                WHERE date=? AND callsign=?""",
-                            (registration, registration, plane_type, plane_type, today, callsign),
+                            (registration, registration,
+                             route_src, plane_type, plane_type,
+                             route_src, route_src,
+                             today, callsign),
                         )
                         _db_conn.commit()
                     except Exception as exc:
