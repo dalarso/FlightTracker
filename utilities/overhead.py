@@ -582,6 +582,7 @@ def _airlabs_increment():
     remaining = AIRLABS_MONTHLY_LIMIT - data["value"]
     if remaining <= 50:
         _log(f"[airlabs] WARNING: {int(remaining)} calls remaining this period")
+    return int(data["value"])  # returned for inline logging
 
 
 def _aeroapi_increment():
@@ -707,6 +708,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     )
     if adsbdb_ok:
         origin, destination, source = adsbdb_origin, adsbdb_dest, _adsbdb_src
+        _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} accepted ({_adsbdb_src})")
+    elif adsbdb_origin or adsbdb_dest:
+        if not (_adsbdb_origin_local or _adsbdb_dest_local):
+            _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — no local endpoint ({_adsbdb_src})")
+        else:
+            _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — plausibility failed ({_adsbdb_src})")
+    elif _adsbdb_src == "adsbdb":  # live call that returned nothing (not a cached negative)
+        _log(f"[adsbdb] {callsign}: no data")
 
     # ── 2. OpenSky by hex (free, unlimited — queried before AirLabs) ────────────
     # OpenSky doesn't return airport coordinates, so the full geometry plausibility
@@ -746,6 +755,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             fl = max(sky_data, key=lambda f: f.get("firstSeen", 0))
                             _sky_origin = icao_to_iata(fl.get("estDepartureAirport") or "")
                             _sky_dest   = icao_to_iata(fl.get("estArrivalAirport") or "")
+                            _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'}")
+                        else:
+                            _log(f"[opensky] {callsign}: no data")
                         # Cache hit or confirmed-empty 200 — suppresses re-queries within TTL.
                         # Non-200 status codes (5xx etc.) are not cached; retry next poll.
                         with _cache_lock:
@@ -764,16 +776,21 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             # _need_airlabs below.
             _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS
             _sky_dest_local   = _sky_dest.upper()   in _LOCAL_AIRPORTS
+            _sky_accepted = []
             if _sky_origin_local and not origin:
                 origin = _sky_origin
                 source = source or _sky_src
+                _sky_accepted.append(f"origin={_sky_origin}")
             if _sky_dest_local and not destination:
                 destination = _sky_dest
                 source = source or _sky_src
-            # Through-traffic (neither endpoint local): can't verify without coords.
-            if not _sky_origin_local and not _sky_dest_local:
+                _sky_accepted.append(f"dest={_sky_dest}")
+            if _sky_accepted:
+                _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} — {', '.join(_sky_accepted)} accepted ({_sky_src})")
+            elif not _sky_origin_local and not _sky_dest_local:
+                # Through-traffic: can't verify without coords.
                 _log(
-                    f"[opensky] {_sky_origin}->{_sky_dest} not auto-trusted for {callsign}"
+                    f"[opensky] {callsign}: {_sky_origin}->{_sky_dest} not trusted"
                     f" (through-traffic, vs={vertical_speed}) — trying AirLabs"
                 )
 
@@ -798,6 +815,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             al_olat, al_olon = cached[2], cached[3]
             al_dlat, al_dlon = cached[4], cached[5]
             _al_src = "airlabs:cached"
+            if al_origin or al_dest:
+                _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} (cached)")
         elif not _in_backoff("airlabs"):
             try:
                 r = requests.get(
@@ -811,7 +830,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     _set_backoff("airlabs", secs=86400)
                     _log(f"[airlabs] auth error ({r.status_code}) — check AIRLABS_API_KEY")
                 elif r.status_code == 200:
-                    _airlabs_increment()  # informational counter only
+                    _al_count = _airlabs_increment()
                     resp = r.json().get("response") or {}
                     al_origin = resp.get("dep_iata", "") or ""
                     al_dest   = resp.get("arr_iata", "") or ""
@@ -819,6 +838,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     al_olon   = resp.get("dep_lng")
                     al_dlat   = resp.get("arr_lat")
                     al_dlon   = resp.get("arr_lng")
+                    if al_origin or al_dest:
+                        _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} [call #{_al_count}]")
+                        _al_src = "airlabs"
+                    else:
+                        _log(f"[airlabs] {callsign}: no data [call #{_al_count}]")
                     # Cache result (even empty — negative cache suppresses retries)
                     with _cache_lock:
                         _route_cache[f"airlabs:{callsign}"] = _cache_entry(
@@ -826,14 +850,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             al_olat, al_olon, al_dlat, al_dlon,
                         )
                         _prune_cache(_route_cache, AIRLABS_CACHE_TTL)
-                    if al_origin or al_dest:
-                        _al_src = "airlabs"
                 else:
                     # Unexpected status (e.g. 404, 500) — negatively cache for
                     # ROUTE_MISS_TTL to prevent repeated quota-burning calls.
                     # Use AIRLABS_CACHE_TTL for prune so we don't evict valid
                     # 1-hour entries for other callsigns already in _route_cache.
-                    _log(f"[airlabs] unexpected status {r.status_code} for {callsign} — negative caching")
+                    _log(f"[airlabs] {callsign}: unexpected status {r.status_code} — negative caching")
                     with _cache_lock:
                         _route_cache[f"airlabs:{callsign}"] = _cache_entry(
                             "", "", None, None, None, None,
@@ -842,7 +864,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             except Exception:
                 pass
         else:
-            _log("[airlabs] in backoff — skipping")
+            _log(f"[airlabs] {callsign}: in backoff — skipping")
 
     # AirLabs returns coordinates — apply the full plausibility check, then a
     # vertical-rate / local-airport trust check to reject wrong flight legs.
@@ -870,6 +892,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 if not destination:
                     destination = al_dest
                 source = _al_src
+                _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} accepted")
         else:
             _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
 
@@ -883,6 +906,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             if not destination:
                 destination = cached[1]
             source = source or "aeroapi:cached"
+            if cached[0] or cached[1]:
+                _log(f"[aeroapi] {callsign}: {cached[0] or '?'}->{cached[1] or '?'} (cached)")
         elif not _in_backoff("aeroapi"):
             try:
                 r = requests.get(
@@ -913,7 +938,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                         fa_olon   = (f.get("origin") or {}).get("longitude")
                         fa_dlat   = (f.get("destination") or {}).get("latitude")
                         fa_dlon   = (f.get("destination") or {}).get("longitude")
-                    _aeroapi_increment()  # informational counter + spend tracking
+                    _aeroapi_increment()  # logs running spend
+                    if fa_origin or fa_dest:
+                        _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'}")
+                    else:
+                        _log(f"[aeroapi] {callsign}: no flights returned")
                     with _cache_lock:
                         _aeroapi_cache[callsign] = _cache_entry(
                             fa_origin, fa_dest,
@@ -931,8 +960,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             if not destination:
                                 destination = fa_dest
                                 source = source or "aeroapi"
+                            _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} accepted")
                         else:
-                            _log(f"[aeroapi] implausible route {fa_origin}->{fa_dest} rejected for {callsign}")
+                            _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
                 else:
                     # Unexpected status (4xx/5xx other than explicitly handled codes) —
                     # negatively cache for ROUTE_MISS_TTL to prevent per-poll retries.
