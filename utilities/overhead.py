@@ -602,27 +602,29 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     Route lookup priority:
       0. Override rules — ft_overrides.json; pattern-matched against callsign.
                           Returns immediately, no API calls made at all.
-      1. adsbdb       — static historical DB; trusted when a local airport (LAS/VGT/HSH)
-                        appears on either end AND the route passes geometry plausibility
-                        OR vertical rate confirms direction (climbing=departing local,
-                        descending=arriving local).
-      2. OpenSky      — free, unlimited, real-time by ICAO24 hex.  No coordinates
-                        returned.  Each endpoint trusted independently: if it's a local
-                        airport (LAS/VGT/HSH), accept it — no vertical rate needed.
-                        Any missing endpoint falls through to AirLabs.
-                        Through-traffic (neither endpoint local) → AirLabs.
-      3. AirLabs      — real-time by callsign; returns airport coordinates enabling the
-                        full plausibility check.  Also applies a vertical-rate gate:
-                        climbing/descending with neither endpoint local → rejected.
+      1. adsbdb       — static historical DB; trusted only when the ORIGIN is a local
+                        airport (LAS/VGT/HSH) AND geometry plausibility passes.
+      2. OpenSky      — free, unlimited, real-time by ICAO24 hex.  Trusted only when
+                        the ORIGIN is a local airport.  If origin=local, dest is also
+                        accepted from the same result; a missing dest falls through to
+                        AirLabs.  Arrival-only and through-traffic are skipped.
+      3. AirLabs      — real-time by callsign; geometry plausibility check applied.
+                        Trusted only when origin is a local airport.
                         1,000 calls/month free.
-      4. FlightAware  — paid last resort; cascades on 402/429.
-      If no source supplies a validated route, origin/dest remain empty → "?".
+      4. FlightAware  — paid last resort; geometry plausibility + origin-local check.
+                        Cascades on 402/429.
+      If no source supplies a validated departure route, origin/dest → "?".
+
+    Trust rule: only routes WHERE THE PLANE IS DEPARTING a local airport are accepted.
+    ~90%+ of in-zone overhead traffic is departing LAS/VGT/HSH; arrivals and
+    through-traffic show "?" rather than risk accepting stale/wrong data.
 
     Cache format: (origin, dest, orig_lat, orig_lon, dest_lat, dest_lon, timestamp)
     Negative cache entries have empty origin/dest with None coords — used to
     avoid re-querying APIs within ROUTE_MISS_TTL when they had no data.
 
     plane_lat/plane_lon: aircraft's current position, used for plausibility checks.
+    vertical_speed: kept for API compatibility; no longer used in trust logic.
     """
     origin, destination, source = "", "", ""
     now = int(time.time())
@@ -691,27 +693,15 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             except Exception:
                 pass
 
-    # Vertical rate — computed once, shared by all trust checks below.
-    _climbing   = vertical_speed > 0
-    _descending = vertical_speed < 0
-
-    # Trust adsbdb when a local airport appears on either end AND the route can
-    # be verified by at least one of:
-    #   (a) geometry  — detour-ratio plausibility check (uses airport coordinates)
-    #   (b) climbing  — aircraft is climbing while origin is local (just departed)
-    #   (c) descending — aircraft is descending while dest is local (arriving)
-    _adsbdb_origin_local = adsbdb_origin.upper() in _LOCAL_AIRPORTS
-    _adsbdb_dest_local   = adsbdb_dest.upper()   in _LOCAL_AIRPORTS
+    # Trust adsbdb only when the ORIGIN is a local airport (plane is departing local).
+    # Arrivals (dest-only local) are not trusted — adsbdb has static historical data
+    # that often reflects a prior leg for the same callsign.
+    _adsbdb_origin_local = adsbdb_origin.upper() in _LOCAL_AIRPORTS if adsbdb_origin else False
     adsbdb_ok = (
-        (_adsbdb_origin_local or _adsbdb_dest_local)
-        and (adsbdb_origin or adsbdb_dest)
-        and (
-            _route_plausible(plane_lat, plane_lon,
+        _adsbdb_origin_local
+        and _route_plausible(plane_lat, plane_lon,
                              adsbdb_olat, adsbdb_olon,
                              adsbdb_dlat, adsbdb_dlon)
-            or (_climbing   and _adsbdb_origin_local)
-            or (_descending and _adsbdb_dest_local)
-        )
     )
     if adsbdb_ok:
         origin, destination, source = adsbdb_origin, adsbdb_dest, _adsbdb_src
@@ -719,20 +709,18 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} accepted")
     elif adsbdb_origin or adsbdb_dest:
         if _adsbdb_src != "adsbdb:cached":
-            if not (_adsbdb_origin_local or _adsbdb_dest_local):
-                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — no local endpoint")
+            if not _adsbdb_origin_local:
+                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — origin not local")
             else:
                 _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — plausibility failed")
     elif _adsbdb_src == "adsbdb":  # live call that returned nothing (not a cached negative)
         _log(f"[adsbdb] {callsign}: no data")
 
     # ── 2. OpenSky by hex (free, unlimited — queried before AirLabs) ────────────
-    # OpenSky doesn't return airport coordinates, so the full geometry plausibility
-    # check isn't possible.  However we can trust its result without coordinates
-    # when a local airport is confirmed by the aircraft's own vertical rate:
-    #
-    #   • origin in _LOCAL_AIRPORTS AND climbing   → just departed locally
-    #   • dest   in _LOCAL_AIRPORTS AND descending → arriving locally
+    # OpenSky doesn't return airport coordinates, so geometry plausibility isn't
+    # possible.  Trusted only when the ORIGIN is a local airport (departing local).
+    # If trusted, the destination is also accepted from the same result; a missing
+    # dest falls through to AirLabs.  Arrival-only and through-traffic are skipped.
     #
     _sky_origin = _sky_dest = ""
     _sky_src = "opensky"
@@ -779,29 +767,20 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     pass
 
         if _sky_origin or _sky_dest:
-            # Trust each endpoint independently: a local airport in OpenSky's flight
-            # track data is a strong enough signal on its own — no vertical rate needed.
-            # Any still-missing endpoint falls through to AirLabs automatically via
-            # _need_airlabs below.
-            _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS
-            _sky_dest_local   = _sky_dest.upper()   in _LOCAL_AIRPORTS
-            _sky_accepted = []
-            if _sky_origin_local and not origin:
-                origin = _sky_origin
+            # Only trust when the origin is a local airport (departing local).
+            # If origin is local, also accept whatever destination came with it;
+            # a missing dest falls through to AirLabs via _need_airlabs below.
+            _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
+            if _sky_origin_local:
+                if not origin:
+                    origin = _sky_origin
+                if _sky_dest and not destination:
+                    destination = _sky_dest
                 source = source or _sky_src
-                _sky_accepted.append(f"origin={_sky_origin}")
-            if _sky_dest_local and not destination:
-                destination = _sky_dest
-                source = source or _sky_src
-                _sky_accepted.append(f"dest={_sky_dest}")
-            if _sky_accepted:
-                _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} — {', '.join(_sky_accepted)} accepted ({_sky_src})")
-            elif not _sky_origin_local and not _sky_dest_local:
-                # Through-traffic: can't verify without coords.
-                _log(
-                    f"[opensky] {callsign}: {_sky_origin}->{_sky_dest} not trusted"
-                    f" (through-traffic, vs={vertical_speed}) — trying AirLabs"
-                )
+                if _sky_src != "opensky:cached":
+                    _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} accepted ({_sky_src})")
+            elif _sky_src != "opensky:cached":
+                _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
 
     # ── 3. AirLabs (real-time, 1,000 calls/month — now mainly through-traffic) ──
     # Only called when OpenSky's result wasn't auto-trusted or returned nothing.
@@ -874,26 +853,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         else:
             _log(f"[airlabs] {callsign}: in backoff — skipping")
 
-    # AirLabs returns coordinates — apply the full plausibility check, then a
-    # vertical-rate / local-airport trust check to reject wrong flight legs.
+    # AirLabs returns coordinates — apply geometry plausibility, then the
+    # departure-only trust rule: only accept when origin is a local airport.
     if al_origin or al_dest:
         al_plausible = _route_plausible(plane_lat, plane_lon,
                                          al_olat, al_olon, al_dlat, al_dlon)
         if al_plausible:
-            _al_local = (
-                (al_origin.upper() in _LOCAL_AIRPORTS if al_origin else False) or
-                (al_dest.upper()   in _LOCAL_AIRPORTS if al_dest   else False)
-            )
-            _al_climbing   = vertical_speed >  256
-            _al_descending = vertical_speed < -256
-            if (_al_climbing or _al_descending) and not _al_local:
-                if _al_src != "airlabs:cached":
-                    _dir = "climbing" if _al_climbing else "descending"
-                    _log(
-                        f"[airlabs] rejecting {al_origin}->{al_dest} for {callsign}: "
-                        f"vs={vertical_speed:.0f} ({_dir}), neither endpoint is local"
-                    )
-            else:
+            _al_origin_local = al_origin.upper() in _LOCAL_AIRPORTS if al_origin else False
+            if _al_origin_local:
                 # Guard each endpoint independently — don't overwrite a local airport
                 # that was already confirmed by a prior source (e.g. OpenSky).
                 if not origin:
@@ -904,6 +871,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 if _al_src != "airlabs:cached":
                     _count_suffix = f" [call #{_al_count}]" if _al_count else ""
                     _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} accepted{_count_suffix}")
+            else:
+                if _al_src != "airlabs:cached":
+                    _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} skipped — origin not local")
         else:
             if _al_src != "airlabs:cached":
                 _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
@@ -965,13 +935,17 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                                          fa_olat, fa_olon,
                                                          fa_dlat, fa_dlon)
                         if fa_plausible:
-                            if not origin:
-                                origin = fa_origin
-                                source = "aeroapi"
-                            if not destination:
-                                destination = fa_dest
-                                source = source or "aeroapi"
-                            _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} accepted")
+                            _fa_origin_local = fa_origin.upper() in _LOCAL_AIRPORTS if fa_origin else False
+                            if _fa_origin_local:
+                                if not origin:
+                                    origin = fa_origin
+                                    source = "aeroapi"
+                                if not destination:
+                                    destination = fa_dest
+                                    source = source or "aeroapi"
+                                _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} accepted")
+                            else:
+                                _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} skipped — origin not local")
                         else:
                             _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
                 else:
