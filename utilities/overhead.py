@@ -340,7 +340,7 @@ def _load_caches():
                     _route_cache[k] = tuple(v)
                     loaded["route"] += 1
             for k, v in data.get("aeroapi", {}).items():
-                if len(v) == 7 and now - v[-1] < AEROAPI_CACHE_TTL:
+                if len(v) == 7 and now - v[-1] < ROUTE_TTL_SCHEDULED:
                     _aeroapi_cache[k] = tuple(v)
                     loaded["aeroapi"] += 1
             for k, v in data.get("aircraft", {}).items():
@@ -873,8 +873,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 else:
                     # Unexpected status (e.g. 404, 500) — negatively cache for
                     # ROUTE_MISS_TTL to prevent repeated quota-burning calls.
-                    # Use AIRLABS_CACHE_TTL for prune so we don't evict valid
-                    # 1-hour entries for other callsigns already in _route_cache.
+                    # Use ROUTE_TTL_SCHEDULED for prune so we don't evict valid
+                    # long-cached entries for other callsigns already in _route_cache.
                     _log(f"[airlabs] {callsign}: unexpected status {r.status_code} — negative caching")
                     with _cache_lock:
                         _route_cache[f"airlabs:{callsign}"] = _cache_entry(
