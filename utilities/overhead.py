@@ -260,6 +260,7 @@ def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lo
 #   _aircraft_cache : (type_string, source_label, timestamp)
 # Empty origin+dest with None coords = negative cache entry (API had no data).
 _cache_lock     = Lock()
+_usage_lock     = Lock()   # guards _airlabs_increment / _aeroapi_increment read-then-write
 # _route_cache key scheme (three co-existing formats in the same dict):
 #   callsign           — adsbdb result, keyed by flight callsign (e.g. "SWA123")
 #   hex_code           — OpenSky result, keyed by 6-char ICAO hex (e.g. "a1b2c3")
@@ -623,9 +624,10 @@ def _cache_entry(orig, dest, olat, olon, dlat, dlon):
 
 
 def _airlabs_increment():
-    data = _read_usage(AIRLABS_USAGE_FILE, AIRLABS_RESET_DAY)
-    data["value"] = data.get("value", 0) + 1
-    _write_usage(AIRLABS_USAGE_FILE, data)
+    with _usage_lock:
+        data = _read_usage(AIRLABS_USAGE_FILE, AIRLABS_RESET_DAY)
+        data["value"] = data.get("value", 0) + 1
+        _write_usage(AIRLABS_USAGE_FILE, data)
     remaining = AIRLABS_MONTHLY_LIMIT - data["value"]
     if remaining <= 50:
         _log(f"[airlabs] WARNING: {int(remaining)} calls remaining this period")
@@ -633,9 +635,10 @@ def _airlabs_increment():
 
 
 def _aeroapi_increment():
-    data = _read_usage(AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
-    data["value"] = round(data.get("value", 0.0) + AEROAPI_COST_PER_CALL, 4)
-    _write_usage(AEROAPI_USAGE_FILE, data)
+    with _usage_lock:
+        data = _read_usage(AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
+        data["value"] = round(data.get("value", 0.0) + AEROAPI_COST_PER_CALL, 4)
+        _write_usage(AEROAPI_USAGE_FILE, data)
     _log(f"[aeroapi] period spend so far: ~${data['value']:.3f}")
 
 
@@ -879,11 +882,10 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                         )
                         _prune_cache(_route_cache, ROUTE_TTL_SCHEDULED)
                 else:
-                    # Unexpected status (e.g. 404, 500) — negatively cache for
-                    # ROUTE_MISS_TTL to prevent repeated quota-burning calls.
-                    # Use ROUTE_TTL_SCHEDULED for prune so we don't evict valid
-                    # long-cached entries for other callsigns already in _route_cache.
-                    _log(f"[airlabs] {callsign}: unexpected status {r.status_code} — negative caching")
+                    # Unexpected status (e.g. 404, 500) — count the call (AirLabs may
+                    # bill any HTTP request), negatively cache to prevent per-poll retries.
+                    _al_count = _airlabs_increment()
+                    _log(f"[airlabs] {callsign}: unexpected status {r.status_code} [call #{_al_count}] — negative caching")
                     with _cache_lock:
                         _route_cache[f"airlabs:{callsign}"] = _cache_entry(
                             "", "", None, None, None, None,
@@ -1408,7 +1410,7 @@ def run_test_lookup(callsign, use_cache=True):
                             _set_backoff("airlabs", secs=86400)
                             _log(f"{tag} [airlabs] auth error {r.status_code}")
                         elif r.status_code == 200:
-                            _airlabs_increment()
+                            _al_count = _airlabs_increment()
                             _resp = r.json().get("response") or {}
                             _al_origin = _resp.get("dep_iata", "") or ""
                             _al_dest   = _resp.get("arr_iata", "") or ""
@@ -1419,7 +1421,7 @@ def run_test_lookup(callsign, use_cache=True):
                             result["steps"]["airlabs"].update({
                                 "origin": _al_origin, "destination": _al_dest,
                             })
-                            _log(f"{tag} [airlabs] route: {_al_origin or '?'}->{_al_dest or '?'}")
+                            _log(f"{tag} [airlabs] route: {_al_origin or '?'}->{_al_dest or '?'} [call #{_al_count}]")
                             if _al_origin or _al_dest:
                                 _al_origin_local = _al_origin.upper() in _LOCAL_AIRPORTS if _al_origin else False
                                 _al_ok = _route_plausible(plane_lat, plane_lon,
@@ -1436,7 +1438,8 @@ def run_test_lookup(callsign, use_cache=True):
                                 else:
                                     _log(f"{tag} [airlabs] route implausible — rejected")
                         else:
-                            _log(f"{tag} [airlabs] status {r.status_code} — no data")
+                            _al_count = _airlabs_increment()
+                            _log(f"{tag} [airlabs] unexpected status {r.status_code} [call #{_al_count}] — no data")
                     except Exception as _e:
                         _log(f"{tag} [airlabs] error: {_e}")
                         result["steps"]["airlabs"] = {"error": str(_e)}
