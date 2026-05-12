@@ -710,7 +710,7 @@ def _cache_db_set_paid_miss(callsign: str) -> None:
             )
             _cache_conn.execute(
                 "DELETE FROM cache WHERE cache_type='paid_miss' AND expires_at<?",
-                (expires,),
+                (int(time.time()),),
             )
             _cache_conn.commit()
     except Exception:
