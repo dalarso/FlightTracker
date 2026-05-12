@@ -275,7 +275,8 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <button class="active" onclick="showTab('config',this)">⚙ Config</button>
     <button onclick="showTab('display',this)">📺 Display</button>
     <button onclick="showTab('map',this)">🗺 Zone Map</button>
-    <button onclick="showTab('apis',this)">📡 APIs</button>
+    <button onclick="showTab('apis',this)">📊 Dashboard</button>
+    <button onclick="showTab('stats',this)">📈 Stats</button>
     <button onclick="showTab('rules',this)">✏️ Rules</button>
     <button onclick="showTab('log',this)">📋 Log</button>
     <div class="nav-sep"></div>
@@ -495,6 +496,110 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
   </div>
 </div>
 
+<!-- STATS TAB -->
+<div class="tab-content" id="stats-tab">
+  <div class="apis-scroll">
+
+    <!-- ── Today card ───────────────────────────────────────────────────── -->
+    <div class="usage-card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+        <h3 id="stats-today-heading">Flights Seen Today</h3>
+        <span id="stats-api-calls" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
+        <span id="stats-total" style="font-size:36px;font-weight:700;font-family:monospace">—</span>
+        <span style="font-size:13px;color:var(--muted)" id="stats-date">—</span>
+      </div>
+      <div id="stats-top" style="margin-bottom:14px"></div>
+      <!-- 7-day sparkline -->
+      <div style="display:flex;align-items:flex-end;gap:3px;height:40px" id="stats-sparkline"></div>
+    </div>
+
+    <!-- ── Recent Flights card ───────────────────────────────────────────── -->
+    <div class="usage-card" style="margin-bottom:16px">
+      <h3 style="margin-bottom:12px">Recent Flights</h3>
+      <div id="recent-flights-list"></div>
+    </div>
+
+    <!-- ── Period / date-range card ─────────────────────────────────────── -->
+    <div class="usage-card" style="margin-bottom:16px">
+      <!-- Header row: title + date picker -->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+        <h3 id="period-title" style="flex-shrink:0">90-Day Summary</h3>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <input type="date" id="period-from"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;cursor:pointer"
+            onchange="onPeriodChange()">
+          <span style="color:var(--muted);font-size:12px">→</span>
+          <input type="date" id="period-to"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;cursor:pointer"
+            onchange="onPeriodChange()">
+          <button id="period-apply-btn" onclick="applyStatsPeriod()"
+            style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;display:none">
+            Apply
+          </button>
+          <button onclick="resetStatsPeriod()"
+            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
+            Reset
+          </button>
+        </div>
+      </div>
+
+      <!-- Period total + api calls -->
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+        <span id="period-total" style="font-size:24px;font-weight:700;font-family:monospace;color:var(--accent)">—</span>
+        <span style="font-size:12px;color:var(--muted)">flights</span>
+        <span id="period-api-calls" style="font-size:11px;color:var(--muted);margin-left:auto"></span>
+      </div>
+
+      <!-- History table -->
+      <div id="stats-history" style="margin:12px 0 16px"></div>
+
+      <!-- Rollup grids -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Airlines</div>
+          <div id="rollup-airlines"></div>
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Tail #s</div>
+          <div id="rollup-tails"></div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Routes</div>
+          <div id="rollup-routes"></div>
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Aircraft Types</div>
+          <div id="rollup-types"></div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Route Source Efficiency</div>
+        <div id="rollup-sources"></div>
+      </div>
+    </div>
+
+    <!-- ── Search card ───────────────────────────────────────────────────── -->
+    <div class="usage-card" style="margin-bottom:16px">
+      <h3 style="margin-bottom:12px">Search History</h3>
+      <div style="display:flex;gap:6px">
+        <input id="stats-search-input" type="text" placeholder="Flight #, tail, origin/dest (e.g. SWA123, N8862Q, DEN)"
+          style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 10px;color:var(--text);font-size:12px;outline:none"
+          onkeydown="if(event.key==='Enter')doStatsSearch()">
+        <button onclick="doStatsSearch()"
+          style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap">
+          Search
+        </button>
+      </div>
+      <div id="stats-search-results" style="margin-top:10px"></div>
+    </div>
+
+  </div>
+</div>
+
 <!-- RULES TAB -->
 <div class="tab-content" id="rules-tab">
   <div class="rules-scroll">
@@ -521,6 +626,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           </label>
           <button class="btn btn-primary" id="test-run-btn" onclick="runTestFlight()" style="white-space:nowrap;min-width:100px">▶ Run Test</button>
           <button class="btn btn-secondary" id="test-clear-btn" onclick="clearTestDisplay()" style="display:none;white-space:nowrap">✕ Clear Display</button>
+          <button class="btn btn-secondary" id="test-reset-btn" onclick="resetTestFlight()" style="display:none;white-space:nowrap">↺ Reset</button>
         </div>
       </div>
       <div id="test-result" style="display:none;border-top:1px solid var(--border)"></div>
@@ -631,6 +737,7 @@ function showTab(name, btn) {
   if (name === 'log')     initLog();     else stopLog();
   if (name === 'display') initMatrixPreview(); else stopMatrixPreview();
   if (name === 'apis')    initAPIsTab(); else stopAPIsTab();
+  if (name === 'stats')   loadStatsTab();
   if (name === 'rules')   initRulesTab();
 }
 
@@ -1212,6 +1319,425 @@ async function loadAPIsTab() {
   }
 }
 
+// ── Stats tab ────────────────────────────────────────────────────────────────
+let _statsPeriodDirty = false;   // true when date inputs differ from current loaded range
+
+function _isoToday() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+}
+function _isoOffset(days) {
+  const d = new Date(); d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+async function loadStatsTab() {
+  // Set date inputs to 90-day default
+  const today = _isoToday();
+  document.getElementById('period-from').value = _isoOffset(-89);
+  document.getElementById('period-to').value   = today;
+  document.getElementById('period-apply-btn').style.display = 'none';
+  _statsPeriodDirty = false;
+  try {
+    const d = await fetch('/api/stats?days=90').then(r => r.json());
+    renderTodayStats(d);
+    renderRecentFlights(d);
+    renderPeriodStats(d);
+  } catch(e) {
+    document.getElementById('stats-total').textContent = '—';
+  }
+}
+
+function onPeriodChange() {
+  _statsPeriodDirty = true;
+  document.getElementById('period-apply-btn').style.display = '';
+}
+
+async function applyStatsPeriod() {
+  const from = document.getElementById('period-from').value;
+  const to   = document.getElementById('period-to').value;
+  if (!from || !to) return;
+  document.getElementById('period-apply-btn').textContent = '…';
+  try {
+    const d = await fetch(`/api/stats?from=${from}&to=${to}`).then(r => r.json());
+    if (d.error) { alert(d.error); return; }
+    renderRecentFlights(d);
+    renderPeriodStats(d);
+    document.getElementById('period-apply-btn').style.display = 'none';
+    _statsPeriodDirty = false;
+  } catch(e) {
+    alert('Failed to load stats for that range.');
+  } finally {
+    document.getElementById('period-apply-btn').textContent = 'Apply';
+  }
+}
+
+async function resetStatsPeriod() {
+  document.getElementById('period-from').value = _isoOffset(-89);
+  document.getElementById('period-to').value   = _isoToday();
+  document.getElementById('period-apply-btn').style.display = 'none';
+  _statsPeriodDirty = false;
+  try {
+    const d = await fetch('/api/stats?days=90').then(r => r.json());
+    renderRecentFlights(d);
+    renderPeriodStats(d);
+  } catch(e) {}
+}
+
+function fmtDate(dateStr, opts) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
+}
+
+function renderTodayStats(d) {
+  // Big count + date label (changes wording in range mode)
+  const isRange = d.mode === 'range';
+  document.getElementById('stats-today-heading').textContent = isRange ? 'Flights in Period' : 'Flights Seen Today';
+  document.getElementById('stats-total').textContent = d.total ?? '—';
+  document.getElementById('stats-date').textContent  = isRange
+    ? (d.range_from && d.range_to ? `${fmtDate(d.range_from,{month:'short',day:'numeric'})} – ${fmtDate(d.range_to,{month:'short',day:'numeric',year:'numeric'})}` : '—')
+    : (d.today ? fmtDate(d.today, { weekday:'short', month:'short', day:'numeric' }) : '—');
+
+  const ac = d.api_calls || {};
+  document.getElementById('stats-api-calls').textContent =
+    `AirLabs: ${ac.airlabs ?? 0} · AeroAPI: ${ac.aeroapi ?? 0}`;
+
+  const topEl = document.getElementById('stats-top');
+  topEl.innerHTML = '';
+  (d.top_today || []).forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'usage-stat';
+    const label = item.name
+      ? `${escHtml(item.prefix)} <span style="color:var(--muted);font-size:11px">(${escHtml(item.name)})</span>`
+      : escHtml(item.prefix);
+    row.innerHTML = `<span class="label" style="font-family:monospace">${label}</span><span class="value">${item.count}</span>`;
+    topEl.appendChild(row);
+  });
+
+  // Sparkline — last 14 entries (or all if range mode)
+  const spark  = document.getElementById('stats-sparkline');
+  spark.innerHTML = '';
+  const bars   = isRange ? (d.history || []).filter(h => h.total > 0) : (d.history || []).slice(-14);
+  const maxVal = Math.max(...bars.map(h => h.total), 1);
+  const BAR_H  = 36;
+  bars.forEach(h => {
+    const px      = Math.max(2, Math.round((h.total / maxVal) * BAR_H));
+    const isToday = h.date === d.today;
+    const label   = fmtDate(h.date, { month: 'short', day: 'numeric' });
+    const bar     = document.createElement('div');
+    bar.title     = `${label}: ${h.total} flights`;
+    bar.style.cssText = `flex:1;min-width:3px;background:${isToday && !isRange ? 'var(--accent)' : 'var(--border)'};` +
+                        `height:${px}px;border-radius:2px 2px 0 0;cursor:default`;
+    spark.appendChild(bar);
+  });
+}
+
+function renderRecentFlights(d) {
+  const el = document.getElementById('recent-flights-list');
+  const all = d.recent || [];
+  const STEP = 10;
+  const INIT = 5;
+  const MAX  = 50;
+
+  function render(shown) {
+    el.innerHTML = '';
+    if (!all.length) {
+      el.innerHTML = '<span style="font-size:11px;color:var(--muted)">No flights recorded yet.</span>';
+      return;
+    }
+
+    const tbl = document.createElement('table');
+    tbl.style.cssText = 'width:100%;font-size:11px;border-collapse:collapse';
+    tbl.innerHTML = `<thead><tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+      <th style="padding:4px 6px 4px 0;font-weight:500;white-space:nowrap">Date / Time</th>
+      <th style="padding:4px 6px;font-weight:500">Flight #</th>
+      <th style="padding:4px 6px;font-weight:500">Tail #</th>
+      <th style="padding:4px 0;font-weight:500">Route</th>
+    </tr></thead><tbody></tbody>`;
+    const tbody = tbl.querySelector('tbody');
+
+    let lastDate = null;
+    all.slice(0, shown).forEach(s => {
+      if (s.date !== lastDate) {
+        lastDate = s.date;
+        const sep = document.createElement('tr');
+        sep.innerHTML = `<td colspan="4" style="padding:8px 0 3px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;border-top:1px solid var(--border)">${fmtDate(s.date, {weekday:'short',month:'short',day:'numeric'})}</td>`;
+        tbody.appendChild(sep);
+      }
+      const tr = document.createElement('tr');
+      const csHtml = `<span style="font-family:monospace;font-weight:600;color:var(--text)">${escHtml(s.callsign)}</span>`
+                   + (s.airline ? ` <span style="font-size:10px;color:var(--muted)">(${escHtml(s.airline)})</span>` : '');
+      const regHtml = s.registration
+        ? `<span style="font-family:monospace;color:var(--muted)">${escHtml(s.registration)}</span>`
+        : `<span style="color:var(--border)">—</span>`;
+      const orig = s.origin      || '?';
+      const dest = s.destination || '?';
+      const rtHtml = `<span style="font-family:monospace;color:var(--muted)">${escHtml(orig)}→${escHtml(dest)}</span>`;
+      tr.innerHTML = `
+        <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(s.time)}</td>
+        <td style="padding:4px 6px">${csHtml}</td>
+        <td style="padding:4px 6px">${regHtml}</td>
+        <td style="padding:4px 0">${rtHtml}</td>`;
+      tbody.appendChild(tr);
+    });
+    el.appendChild(tbl);
+
+    // Show-more / show-less controls
+    const remaining = Math.min(all.length, MAX) - shown;
+    const ctrl = document.createElement('div');
+    ctrl.style.cssText = 'margin-top:8px;display:flex;gap:10px;justify-content:center';
+    if (remaining > 0) {
+      const more = document.createElement('a');
+      more.href = '#';
+      more.style.cssText = 'font-size:11px;color:var(--accent);text-decoration:none';
+      more.textContent = `+${Math.min(STEP, remaining)} more`;
+      more.onclick = e => { e.preventDefault(); render(Math.min(shown + STEP, MAX)); };
+      ctrl.appendChild(more);
+    }
+    if (shown > INIT) {
+      const less = document.createElement('a');
+      less.href = '#';
+      less.style.cssText = 'font-size:11px;color:var(--muted);text-decoration:none';
+      less.textContent = 'show less';
+      less.onclick = e => { e.preventDefault(); render(INIT); };
+      ctrl.appendChild(less);
+    }
+    if (ctrl.children.length) el.appendChild(ctrl);
+  }
+
+  render(INIT);
+}
+
+function renderPeriodStats(d) {
+  const isRange = d.mode === 'range';
+  const ru = d.rollup || {};
+
+  // Period title
+  const title = isRange
+    ? `${fmtDate(d.range_from,{month:'short',day:'numeric'})} – ${fmtDate(d.range_to,{month:'short',day:'numeric',year:'numeric'})}`
+    : '90-Day Summary';
+  document.getElementById('period-title').textContent = title;
+
+  // Period total + api calls.
+  // In default mode d.total is today's count; the 90-day total lives in
+  // rollup.flights.  In range mode d.total is already the range total.
+  document.getElementById('period-total').textContent =
+    (isRange ? (d.total ?? 0) : (ru.flights ?? 0)).toLocaleString();
+  // Similarly, d.api_calls is today's calls in default mode; the server
+  // sends range_api_calls with the full-period sums for the period card.
+  const periodAc = isRange ? (d.api_calls || {}) : (d.range_api_calls || {});
+  document.getElementById('period-api-calls').textContent =
+    `AirLabs: ${periodAc.airlabs ?? 0} · AeroAPI: ${periodAc.aeroapi ?? 0}`;
+
+  // Rollup lists with incremental "show more" (step=5)
+  function fillList(elId, items, labelKey, nameKey, step) {
+    step = step || 5;
+    const all = items || [];
+    const el  = document.getElementById(elId);
+
+    function render(shown) {
+      el.innerHTML = '';
+      if (!all.length) {
+        el.innerHTML = '<span style="font-size:11px;color:var(--muted)">No data yet</span>';
+        return;
+      }
+      all.slice(0, shown).forEach((item, i) => {
+        const row = document.createElement('div');
+        row.className = 'usage-stat';
+        const raw = item[labelKey];
+        const nm  = nameKey ? item[nameKey] : '';
+        const lbl = nm
+          ? `${escHtml(raw)} <span style="color:var(--muted);font-size:11px">(${escHtml(nm)})</span>`
+          : escHtml(raw);
+        row.innerHTML =
+          `<span class="label" style="font-family:monospace">` +
+          `<span style="color:var(--border);font-size:10px;user-select:none">${i+1}.&thinsp;</span>` +
+          `${lbl}</span><span class="value">${item.count.toLocaleString()}</span>`;
+        el.appendChild(row);
+      });
+
+      const remaining = all.length - shown;
+      const ctrl = document.createElement('div');
+      ctrl.style.cssText = 'margin-top:5px;display:flex;gap:10px;justify-content:center';
+
+      if (remaining > 0) {
+        const more = document.createElement('a');
+        more.href = '#';
+        more.style.cssText = 'font-size:11px;color:var(--accent);text-decoration:none';
+        more.textContent = `+${Math.min(step, remaining)} more`;
+        more.onclick = e => { e.preventDefault(); render(shown + step); };
+        ctrl.appendChild(more);
+      }
+      if (shown > step) {
+        const less = document.createElement('a');
+        less.href = '#';
+        less.style.cssText = 'font-size:11px;color:var(--muted);text-decoration:none';
+        less.textContent = 'show less';
+        less.onclick = e => { e.preventDefault(); render(step); };
+        ctrl.appendChild(less);
+      }
+      if (ctrl.children.length) el.appendChild(ctrl);
+    }
+
+    render(step);
+  }
+  fillList('rollup-airlines', ru.airlines, 'prefix', 'name', 5);
+  fillList('rollup-tails',    ru.tails,    'reg',    null,   5);
+  fillList('rollup-routes',   ru.routes,   'route',  null,   5);
+  fillList('rollup-types',    ru.types,    'type',   null,   5);
+
+  // Source efficiency
+  const srcEl = document.getElementById('rollup-sources');
+  srcEl.innerHTML = '';
+  const sp = ru.source_pct || {};
+  if (Object.keys(sp).length) {
+    [
+      { key:'free',     label:'Free APIs',      color:'var(--green)' },
+      { key:'mixed',    label:'Free + Paid',     color:'var(--accent)' },
+      { key:'paid',     label:'Paid APIs only',  color:'#f59e0b' },
+      { key:'override', label:'Override rules',  color:'#fbbf24' },
+      { key:'none',     label:'No route found',  color:'var(--muted)' },
+    ].forEach(b => {
+      const pct = sp[b.key] ?? 0;
+      if (!pct) return;
+      const row = document.createElement('div');
+      row.style.marginBottom = '5px';
+      row.innerHTML = `
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
+          <span style="color:var(--muted)">${b.label}</span>
+          <span style="font-family:monospace;font-weight:600">${pct}%</span>
+        </div>
+        <div style="height:4px;background:var(--border);border-radius:2px">
+          <div style="height:100%;width:${pct}%;background:${b.color};border-radius:2px"></div>
+        </div>`;
+      srcEl.appendChild(row);
+    });
+  } else {
+    srcEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">No data yet</span>';
+  }
+
+  // History table — newest-first, skip all-zero rows
+  const histEl = document.getElementById('stats-history');
+  histEl.innerHTML = '';
+  const rows = [...(d.history || [])].reverse().filter(r => r.total > 0 || r.airlabs > 0 || r.aeroapi > 0);
+  if (!rows.length) { histEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">No flights in this period.</span>'; return; }
+
+  const tbl = document.createElement('table');
+  tbl.style.cssText = 'width:100%;font-size:11px;border-collapse:collapse';
+  tbl.innerHTML = `<thead><tr style="color:var(--muted);text-align:left">
+    <th style="padding:4px 0;font-weight:500">Date</th>
+    <th style="padding:4px;font-weight:500;text-align:right">Flights</th>
+    <th style="padding:4px;font-weight:500;text-align:right">AirLabs</th>
+    <th style="padding:4px 0;font-weight:500;text-align:right">AeroAPI</th>
+  </tr></thead><tbody></tbody>`;
+  const tbody = tbl.querySelector('tbody');
+  rows.forEach(r => {
+    const isToday = r.date === d.today;
+    const tr = document.createElement('tr');
+    tr.style.cssText = isToday ? 'font-weight:600;color:var(--text)' : 'color:var(--muted)';
+    const fmtApi = v => (v != null && v !== 0) ? v : (r.total > 0 ? '0' : '—');
+    tr.innerHTML = `
+      <td style="padding:3px 0">${fmtDate(r.date,{weekday:'short',month:'short',day:'numeric'})}${isToday?' ●':''}</td>
+      <td style="padding:3px 4px;text-align:right;font-family:monospace">${r.total}</td>
+      <td style="padding:3px 4px;text-align:right;font-family:monospace">${fmtApi(r.airlabs)}</td>
+      <td style="padding:3px 0;text-align:right;font-family:monospace">${fmtApi(r.aeroapi)}</td>`;
+    tbody.appendChild(tr);
+  });
+  histEl.appendChild(tbl);
+}
+
+function renderStats(d) {
+  renderTodayStats(d);
+  renderRecentFlights(d);
+  renderPeriodStats(d);
+}
+
+async function doStatsSearch() {
+  const input = document.getElementById('stats-search-input');
+  const resEl = document.getElementById('stats-search-results');
+  const q = (input.value || '').trim();
+  if (q.length < 2) {
+    resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">Enter at least 2 characters.</span>';
+    return;
+  }
+  resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">Searching…</span>';
+  try {
+    const r = await fetch(`/api/stats/search?q=${encodeURIComponent(q)}`);
+    const d = await r.json();
+    if (d.error) { resEl.innerHTML = `<span style="font-size:11px;color:var(--red)">${d.error}</span>`; return; }
+    const items = d.sightings || [];
+    if (!items.length) {
+      resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">No matches found.</span>';
+      return;
+    }
+
+    const QU = q.toUpperCase();
+
+    // Build header
+    const header = document.createElement('div');
+    header.style.cssText = 'font-size:10px;color:var(--muted);margin-bottom:8px';
+    header.innerHTML = `${d.count} sighting${d.count !== 1 ? 's' : ''} for "<strong style="color:var(--text)">${escHtml(q)}</strong>"${d.count > (d.returned ?? d.count) ? ` — showing newest ${d.returned ?? 200}` : ''}`;
+    resEl.innerHTML = '';
+    resEl.appendChild(header);
+
+    const tbl = document.createElement('table');
+    tbl.style.cssText = 'width:100%;font-size:11px;border-collapse:collapse';
+
+    // Column headers
+    tbl.innerHTML = `<thead><tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+      <th style="padding:4px 6px 4px 0;font-weight:500;white-space:nowrap">Date / Time</th>
+      <th style="padding:4px 6px;font-weight:500">Flight #</th>
+      <th style="padding:4px 6px;font-weight:500">Tail #</th>
+      <th style="padding:4px 6px;font-weight:500">Route</th>
+      <th style="padding:4px 0;font-weight:500;color:var(--muted)">Aircraft</th>
+    </tr></thead><tbody></tbody>`;
+    const tbody = tbl.querySelector('tbody');
+
+    // Group by date for visual separation
+    let lastDate = null;
+    items.forEach(s => {
+      // Date separator row
+      if (s.date !== lastDate) {
+        lastDate = s.date;
+        const sep = document.createElement('tr');
+        sep.innerHTML = `<td colspan="5" style="padding:8px 0 3px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;border-top:1px solid var(--border)">${fmtDate(s.date, {weekday:'short',month:'short',day:'numeric'})}</td>`;
+        tbody.appendChild(sep);
+      }
+
+      const tr = document.createElement('tr');
+
+      // Highlight the matched field
+      const hlCs  = QU.length >= 2 && s.callsign.includes(QU);
+      const hlReg = QU.length >= 2 && s.registration && s.registration.includes(QU);
+      const hlRt  = QU.length >= 2 && ((s.origin || '').includes(QU) || (s.destination || '').includes(QU));
+
+      const csHtml  = `<span style="font-family:monospace;font-weight:${hlCs?'700':'400'};color:${hlCs?'var(--text)':'var(--muted)'}">${escHtml(s.callsign)}</span>`
+                    + (s.airline && !hlCs ? ` <span style="font-size:10px;color:var(--muted)">(${escHtml(s.airline)})</span>` : '');
+      const regHtml = s.registration
+        ? `<span style="font-family:monospace;font-weight:${hlReg?'700':'400'};color:${hlReg?'var(--text)':'var(--muted)'}">${escHtml(s.registration)}</span>`
+        : `<span style="color:var(--border)">—</span>`;
+      const orig = s.origin      || '?';
+      const dest = s.destination || '?';
+      const rtHtml = `<span style="font-family:monospace;color:${hlRt?'var(--text)':'var(--muted)'}">${escHtml(orig)}→${escHtml(dest)}</span>`;
+      const acHtml = s.aircraft
+        ? `<span style="color:var(--muted);font-size:10px">${escHtml(s.aircraft)}</span>`
+        : '';
+
+      tr.innerHTML = `
+        <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(s.time)}</td>
+        <td style="padding:4px 6px">${csHtml}</td>
+        <td style="padding:4px 6px">${regHtml}</td>
+        <td style="padding:4px 6px">${rtHtml}</td>
+        <td style="padding:4px 0">${acHtml}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    resEl.appendChild(tbl);
+  } catch(e) {
+    resEl.innerHTML = '<span style="font-size:11px;color:var(--red)">Search failed.</span>';
+  }
+}
+
 function fmtPeriod(start, end) {
   if (!start || !end) return '—';
   // Use Date.UTC so the display date matches the server's YYYY-MM-DD string
@@ -1551,29 +2077,35 @@ const AIRLINE_NAMES = {
   'HAL':'Hawaiian Airlines',      'SCX':'Sun Country Airlines',
   // ── US Regional ───────────────────────────────────────────────
   'SKW':'SkyWest Airlines',       'RPA':'Republic Airways',
-  'ENY':'Envoy Air',              'PSA':'PSA Airlines',
+  'ENY':'Envoy Air',              'JIA':'PSA Airlines',
   'ASH':'Mesa Airlines',          'AWI':'Air Wisconsin',
   'PDT':'Piedmont Airlines',      'GJS':'GoJet Airlines',
   'QXE':'Horizon Air',            'SIL':'Silver Airways',
   'TSQ':'Trans States Airlines',  'CHQ':'Chautauqua Airlines',
   'CPZ':'Comair',                 'JZA':'Jazz Aviation',
+  'UCA':'CommutAir',              'MTN':'Mountain Air Cargo',
+  'FLG':'Frontier (charter)',
   // ── US Cargo ──────────────────────────────────────────────────
   'FDX':'FedEx Express',          'UPS':'UPS Airlines',
   'GTI':'Atlas Air',              'ABX':'ABX Air',
-  'PAC':'Polar Air Cargo',        'SOO':'Southern Air',
+  'PAC':'Polar Air Cargo',        'SOU':'Southern Air',
   'CKS':'Kalitta Air',            'ATN':'Air Transport Intl',
-  'OAE':'Omni Air International',
+  'OAE':'Omni Air International', 'ASN':'Amazon Air',
+  'WGN':'Western Global Airlines','NCR':'Northern Air Cargo',
+  'DHK':'DHL Aviation',           'AGX':'Amerijet International',
   // ── US Charter / Business ─────────────────────────────────────
   'EJA':'NetJets',                'LXJ':'Flexjet',
-  'JSX':'JSX',
+  'JSX':'JSX',                    'OCN':'Discover Airlines',
   // ── Mexico ────────────────────────────────────────────────────
   'AMX':'Aeromexico',             'VOI':'Volaris',
   'VIV':'VivaAerobus',            'AIJ':'Interjet',
-  'MXY':'Mexicana',
+  'MXY':'Breeze Airways',         'VXP':'Avelo Airlines',
+  'VRD':'Virgin America',
   // ── Canada ────────────────────────────────────────────────────
   'ACA':'Air Canada',             'WJA':'WestJet',
   'TRS':'Air Transat',            'SWG':'Sunwing Airlines',
-  'CJT':'Cargojet',
+  'CJT':'Cargojet',               'ROU':'Air Canada Rouge',
+  'POE':'Porter Airlines',        'FLE':'Flair Airlines',
   // ── UK ────────────────────────────────────────────────────────
   'BAW':'British Airways',        'VIR':'Virgin Atlantic',
   'EZY':'easyJet',                'TOM':'TUI Airways',
@@ -1594,10 +2126,12 @@ const AIRLINE_NAMES = {
   'EIN':'Aer Lingus',             'RYR':'Ryanair',
   // ── Scandinavia / Nordic ──────────────────────────────────────
   'SAS':'Scandinavian Airlines',  'FIN':'Finnair',
-  'NOZ':'Norwegian Air',          'ICE':'Icelandair',
+  'NAX':'Norwegian',              'NOZ':'Norwegian Air Sweden',
+  'ICE':'Icelandair',
   // ── Switzerland / Austria / Portugal ─────────────────────────
   'SWR':'SWISS',                  'AUA':'Austrian Airlines',
-  'TAP':'TAP Air Portugal',
+  'TAP':'TAP Air Portugal',       'EDW':'Edelweiss Air',
+  'TWY':'Solarius Aviation',
   // ── Belgium / Poland / Hungary / Czech / Romania / Greece ─────
   'BEL':'Brussels Airlines',      'LOT':'LOT Polish Airlines',
   'WZZ':'Wizz Air',               'CSA':'Czech Airlines',
@@ -1666,6 +2200,7 @@ async function runTestFlight() {
   resultEl.style.display = 'none';
   clearInterval(_testCountdownTimer);
 
+  const resetBtn = document.getElementById('test-reset-btn');
   try {
     const ctrl = new AbortController();
     const tmId = setTimeout(() => ctrl.abort(), 90000);
@@ -1683,10 +2218,12 @@ async function runTestFlight() {
     const data = await resp.json();
     renderTestResult(data);
     if (data.display_injected) clearBtn.style.display = 'inline-block';
+    resetBtn.style.display = 'inline-block';
   } catch(e) {
     resultEl.innerHTML =
       `<div style="padding:14px 18px;color:var(--red)">✗ ${escHtml(e.message || 'Request failed')}</div>`;
     resultEl.style.display = 'block';
+    resetBtn.style.display = 'inline-block';
   } finally {
     btn.disabled = false;
     btn.textContent = '▶ Run Test';
@@ -1895,6 +2432,16 @@ async function clearTestDisplay() {
   const cdEl = document.getElementById('test-countdown');
   if (cdEl) cdEl.innerHTML = '<span style="color:var(--muted)">⏹ Cleared</span>';
   showToast('✓ Test flight cleared from display', 'ok');
+}
+
+async function resetTestFlight() {
+  clearInterval(_testCountdownTimer);
+  try { await fetch('/api/test_flight', {method: 'DELETE'}); } catch(e) {}
+  document.getElementById('test-callsign').value = '';
+  document.getElementById('test-result').style.display = 'none';
+  document.getElementById('test-result').innerHTML = '';
+  document.getElementById('test-clear-btn').style.display = 'none';
+  document.getElementById('test-reset-btn').style.display = 'none';
 }
 
 function escHtml(s) {

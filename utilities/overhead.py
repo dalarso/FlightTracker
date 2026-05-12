@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import sys
 import time
 import traceback
@@ -101,6 +102,7 @@ OPENSKY_AIRCRAFT_URL = "https://opensky-network.org/api/metadata/aircraft/icao/{
 FR24_LAT      = 1
 FR24_LON      = 2
 FR24_ALT      = 4
+FR24_REG      = 9   # aircraft registration / tail number
 FR24_VERT     = 15
 FR24_CALLSIGN = 16
 
@@ -138,7 +140,6 @@ _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR    = os.path.join(_PROJECT_DIR, "..")
 AIRLABS_USAGE_FILE = os.path.join(_DATA_DIR, "airlabs_usage.json")
 AEROAPI_USAGE_FILE = os.path.join(_DATA_DIR, "aeroapi_usage.json")
-CACHE_FILE         = os.path.join(_DATA_DIR, "ft_cache.json")
 OVERRIDES_FILE     = os.path.join(_DATA_DIR, "ft_overrides.json")
 TEST_DISPLAY_FILE  = "/tmp/ft_test_display.json"   # written by run_test_lookup(); read by _grab_data()
 AIRLABS_MONTHLY_LIMIT  = 1000        # free tier: 1,000 calls/month
@@ -164,15 +165,19 @@ _AIRPORT_CITIES: dict[str, str] = {
     "SEA": "Seattle",         "PDX": "Portland",         "BOI": "Boise",
     "GEG": "Spokane",         "MFR": "Medford",          "EUG": "Eugene",
     # US Mountain / Central
+    "COS": "Colorado Springs","GJT": "Grand Junction",   "ASE": "Aspen",
+    "EGE": "Eagle/Vail",      "HDN": "Hayden/Steamboat", "PUB": "Pueblo",
     "DEN": "Denver",          "DFW": "Dallas/Fort Worth","DAL": "Dallas",
     "AUS": "Austin",          "SAT": "San Antonio",      "HOU": "Houston",
     "IAH": "Houston",         "MSP": "Minneapolis",      "MCI": "Kansas City",
     "STL": "St. Louis",       "MKE": "Milwaukee",        "ORD": "Chicago",
     "MDW": "Chicago",         "DSM": "Des Moines",       "OMA": "Omaha",
     "MSN": "Madison",         "GRR": "Grand Rapids",     "FSD": "Sioux Falls",
-    "RAP": "Rapid City",      "BIS": "Bismarck",
+    "RAP": "Rapid City",      "BIS": "Bismarck",         "GFK": "Grand Forks",
+    "FAR": "Fargo",           "ABR": "Aberdeen SD",      "LNK": "Lincoln NE",
     # US Mountain West
     "BIL": "Billings",        "MSO": "Missoula",         "GTF": "Great Falls",
+    "BZN": "Bozeman",         "IDA": "Idaho Falls",      "PIH": "Pocatello",
     "JAC": "Jackson Hole",    "SUN": "Sun Valley",       "TWF": "Twin Falls",
     # US East
     "ATL": "Atlanta",         "CLT": "Charlotte",        "MEM": "Memphis",
@@ -192,7 +197,10 @@ _AIRPORT_CITIES: dict[str, str] = {
     "CHS": "Charleston",      "GSO": "Greensboro",       "GSP": "Greenville",
     "MSY": "New Orleans",     "BHM": "Birmingham",       "MOB": "Mobile",
     "LIT": "Little Rock",     "OKC": "Oklahoma City",    "TUL": "Tulsa",
-    "XNA": "Fayetteville",
+    "XNA": "Fayetteville",    "TYS": "Knoxville",        "HSV": "Huntsville",
+    "VPS": "Destin/Ft Walton","PNS": "Pensacola",        "MLB": "Melbourne FL",
+    "ECP": "Panama City FL",  "PIE": "St. Petersburg",   "SFB": "Sanford FL",
+    "DAB": "Daytona Beach",   "AGS": "Augusta",          "CAE": "Columbia SC",
     # US Hawaii / Alaska
     "HNL": "Honolulu",        "OGG": "Maui",             "KOA": "Kona",
     "LIH": "Lihue",           "ITO": "Hilo",
@@ -273,9 +281,29 @@ _AIRLINE_NAMES: dict[str, str] = {
     "NKS": "Spirit Airlines",     "FFT": "Frontier Airlines",
     "SCX": "Sun Country Airlines","AAY": "Allegiant Air",
     "HAL": "Hawaiian Airlines",   "VRD": "Virgin America",
+    # US ULCCs / leisure
+    "MXY": "Breeze Airways",      "VXP": "Avelo Airlines",
+    "JSX": "JSX",
+    # Canadian regional / leisure
+    "ROU": "Air Canada Rouge",
+    # Charter / private aviation
+    "LXJ": "Flexjet",             "JRE": "flyExclusive",
+    "TWY": "Solarius Aviation",
+    # US cargo
+    "FDX": "FedEx Express",       "UPS": "UPS Airlines",
+    "GTI": "Atlas Air",           "ABX": "ABX Air",
+    "ASN": "Amazon Air",          "PAC": "Polar Air Cargo",
+    "CKS": "Kalitta Air",         "WGN": "Western Global Airlines",
+    "NCR": "Northern Air Cargo",  "SOU": "Southern Air",
+    "DHK": "DHL Aviation",        "AGX": "Amerijet International",
+    # US charters / military contract
+    "OAE": "Omni Air International",
+    # German leisure (Lufthansa Group)
+    "OCN": "Discover Airlines",
     # Canadian
     "ACA": "Air Canada",          "WJA": "WestJet",
     "POE": "Porter Airlines",     "FLE": "Flair Airlines",
+    "SWG": "Sunwing Airlines",
     # Mexican
     "AMX": "Aeroméxico",          "VOI": "Volaris",
     "VIV": "VivaAerobus",
@@ -286,8 +314,17 @@ _AIRLINE_NAMES: dict[str, str] = {
     "QTR": "Qatar Airways",       "SIA": "Singapore Airlines",
     "EIN": "Aer Lingus",          "IBE": "Iberia",
     "CFG": "Condor",              "EDW": "Edelweiss Air",
+    "THY": "Turkish Airlines",    "ETD": "Etihad Airways",
+    "SWR": "Swiss Int'l",         "AUA": "Austrian Airlines",
+    "NAX": "Norwegian",           "EZY": "easyJet",
+    "RYR": "Ryanair",             "TAP": "TAP Air Portugal",
+    "FIN": "Finnair",             "BEL": "Brussels Airlines",
     # Asian / Pacific
     "KAL": "Korean Air",          "QFA": "Qantas",
+    "ANA": "All Nippon Airways",  "JAL": "Japan Airlines",
+    "CPA": "Cathay Pacific",      "EVA": "EVA Air",
+    "CCA": "Air China",           "CSN": "China Southern",
+    "ANZ": "Air New Zealand",
     # Latin American
     "CMP": "Copa Airlines",       "AVA": "Avianca",
     # Regional/commuter
@@ -296,8 +333,7 @@ _AIRLINE_NAMES: dict[str, str] = {
     "ASH": "Mesa Airlines",       "PDT": "Piedmont Airlines",
     "JIA": "PSA Airlines",        "UCA": "CommutAir",
     "CPZ": "Comair",              "MTN": "Mountain Air Cargo",
-    "FLG": "Frontier (charter)",  "SWG": "Sunwing Airlines",
-    "AGX": "Amerijet International",
+    "FLG": "Frontier (charter)",
 }
 
 def _airline_display(callsign: str) -> str:
@@ -443,88 +479,415 @@ def _skip_paid_apis(callsign: str) -> bool:
     return False
 
 # ── Flight statistics ──────────────────────────────────────────────────────────
-STATS_FILE   = os.path.join(_DATA_DIR, "ft_stats.json")
+DB_FILE      = os.path.join(_DATA_DIR, "ft_flights.db")
 _stats_lock  = Lock()
-_stats_seen_today: set = set()   # (date, callsign) already counted this run
+_stats_seen_today: set = set()   # (date, callsign) already counted — survives restart via JSON
 _stats_last_date: str  = ""
+_db_conn:    sqlite3.Connection | None = None
+_cache_conn: sqlite3.Connection | None = None
 
-def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str) -> None:
+def _init_db() -> None:
     """
-    Increment the daily flight counter for this callsign's airline prefix.
-    Each (date, callsign) is counted at most once per service run.
-    Writes are atomic (tmp → rename) and guarded by _stats_lock.
+    Open (or create) the SQLite flight-sightings database and apply the schema.
+    WAL mode + NORMAL synchronous — greatly reduces SD-card write amplification
+    vs. DELETE journal mode while still being crash-safe.
+    _db_conn  : main connection for sightings + api_calls (serialised via _stats_lock).
+    _cache_conn: separate connection for the cache table (serialised via _cache_lock),
+                 allowing concurrent cache access without blocking sightings writes.
+    """
+    global _db_conn, _cache_conn
+    try:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sightings (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                seen_at      TEXT NOT NULL,
+                date         TEXT NOT NULL,
+                callsign     TEXT NOT NULL,
+                registration TEXT NOT NULL DEFAULT '',
+                origin       TEXT NOT NULL DEFAULT '',
+                destination  TEXT NOT NULL DEFAULT '',
+                aircraft     TEXT NOT NULL DEFAULT '',
+                route_source TEXT NOT NULL DEFAULT '',
+                airline      TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_seen_cs
+            ON sightings(date, callsign)
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_date         ON sightings(date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_callsign     ON sightings(callsign)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_registration ON sightings(registration)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_origin       ON sightings(origin)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_destination  ON sightings(destination)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_calls (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                date     TEXT NOT NULL,
+                api_name TEXT NOT NULL,
+                count    INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(date, api_name)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ac_date ON api_calls(date)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache (
+                key        TEXT    NOT NULL,
+                cache_type TEXT    NOT NULL,
+                origin     TEXT    NOT NULL DEFAULT '',
+                dest       TEXT    NOT NULL DEFAULT '',
+                olat       REAL,
+                olon       REAL,
+                dlat       REAL,
+                dlon       REAL,
+                value      TEXT    NOT NULL DEFAULT '',
+                source     TEXT    NOT NULL DEFAULT '',
+                expires_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (key, cache_type)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at)")
+        conn.commit()
+        _db_conn = conn
+
+        # Separate connection for cache reads/writes — serialised via _cache_lock.
+        # busy_timeout handles the rare case of both connections writing simultaneously.
+        cconn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        cconn.execute("PRAGMA journal_mode=WAL")
+        cconn.execute("PRAGMA synchronous=NORMAL")
+        cconn.execute("PRAGMA busy_timeout=5000")
+        _cache_conn = cconn
+
+        _log("[overhead] SQLite DB ready — " + DB_FILE)
+
+    except Exception:
+        _log("[overhead] WARNING: could not open SQLite DB — " + traceback.format_exc())
+
+
+# ── SQLite cache helpers ───────────────────────────────────────────────────────
+# All helpers use _cache_conn (separate from _db_conn) and are serialised via
+# _cache_lock.  Never raise — cache failures must never crash the poll loop.
+
+def _cache_db_get_route(key: str, cache_type: str):
+    """Return (origin, dest, olat, olon, dlat, dlon, source) for a fresh cache entry, or None."""
+    if _cache_conn is None:
+        return None
+    try:
+        with _cache_lock:
+            row = _cache_conn.execute(
+                """SELECT origin, dest, olat, olon, dlat, dlon, COALESCE(source, '')
+                   FROM cache WHERE key=? AND cache_type=? AND expires_at>?""",
+                (key, cache_type, int(time.time())),
+            ).fetchone()
+        return row
+    except Exception:
+        return None
+
+
+def _cache_db_set_route(key: str, cache_type: str,
+                         origin: str, dest: str,
+                         olat, olon, dlat, dlon,
+                         expires_at: int,
+                         source: str = "") -> None:
+    """Upsert a route/aeroapi cache entry, recording the originating API source."""
+    if _cache_conn is None:
+        return
+    try:
+        with _cache_lock:
+            _cache_conn.execute(
+                """INSERT OR REPLACE INTO cache
+                   (key, cache_type, origin, dest, olat, olon, dlat, dlon, expires_at, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (key, cache_type, origin or '', dest or '',
+                 olat, olon, dlat, dlon, expires_at, source or ''),
+            )
+            _cache_conn.commit()
+    except Exception:
+        pass
+
+
+def _cache_db_get_aircraft(hex_code: str):
+    """Return (type_str, source) for a fresh aircraft cache entry, or None."""
+    if _cache_conn is None:
+        return None
+    try:
+        with _cache_lock:
+            row = _cache_conn.execute(
+                """SELECT value, source FROM cache
+                   WHERE key=? AND cache_type='aircraft' AND expires_at>?""",
+                (hex_code, int(time.time())),
+            ).fetchone()
+        return row
+    except Exception:
+        return None
+
+
+def _cache_db_set_aircraft(hex_code: str, type_str: str,
+                            source: str, ttl: int) -> None:
+    """Upsert an aircraft type cache entry."""
+    if _cache_conn is None:
+        return
+    try:
+        expires = int(time.time()) + ttl
+        with _cache_lock:
+            _cache_conn.execute(
+                """INSERT OR REPLACE INTO cache
+                   (key, cache_type, value, source, expires_at)
+                   VALUES (?, 'aircraft', ?, ?, ?)""",
+                (hex_code, type_str or '', source or '', expires),
+            )
+            _cache_conn.commit()
+    except Exception:
+        pass
+
+
+def _cache_db_get_reg(hex_code: str) -> str:
+    """Return registration string for this hex code, or '' if not cached / expired."""
+    if _cache_conn is None:
+        return ''
+    try:
+        with _cache_lock:
+            row = _cache_conn.execute(
+                "SELECT value FROM cache WHERE key=? AND cache_type='reg' AND expires_at>?",
+                (hex_code, int(time.time())),
+            ).fetchone()
+        return row[0] if row else ''
+    except Exception:
+        return ''
+
+
+REG_CACHE_TTL = 365 * 24 * 3600  # 1 year — hex codes are permanent but evict if unseen
+
+def _cache_db_set_reg(hex_code: str, reg: str) -> None:
+    """Upsert a registration entry (1-year TTL — evicts aircraft not seen in a year)."""
+    if _cache_conn is None:
+        return
+    try:
+        with _cache_lock:
+            _cache_conn.execute(
+                """INSERT OR REPLACE INTO cache
+                   (key, cache_type, value, expires_at)
+                   VALUES (?, 'reg', ?, ?)""",
+                (hex_code, reg, int(time.time()) + REG_CACHE_TTL),
+            )
+            _cache_conn.commit()
+    except Exception:
+        pass
+
+
+def _cache_db_check_paid_miss(callsign: str) -> bool:
+    """Return True if callsign has a fresh paid-API-miss entry."""
+    if _cache_conn is None:
+        return False
+    try:
+        with _cache_lock:
+            row = _cache_conn.execute(
+                """SELECT 1 FROM cache
+                   WHERE key=? AND cache_type='paid_miss' AND expires_at>?""",
+                (callsign, int(time.time())),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _cache_db_set_paid_miss(callsign: str) -> None:
+    """Record that both paid APIs returned empty for callsign; prune stale entries."""
+    if _cache_conn is None:
+        return
+    try:
+        expires = int(time.time()) + ROUTE_PAID_MISS_TTL
+        with _cache_lock:
+            _cache_conn.execute(
+                """INSERT OR REPLACE INTO cache
+                   (key, cache_type, expires_at)
+                   VALUES (?, 'paid_miss', ?)""",
+                (callsign, expires),
+            )
+            _cache_conn.execute(
+                "DELETE FROM cache WHERE cache_type='paid_miss' AND expires_at<?",
+                (expires,),
+            )
+            _cache_conn.commit()
+    except Exception:
+        pass
+
+
+def _load_stats_seen_today() -> None:
+    """
+    Restore today's seen-callsign set at startup so restarts don't double-count.
+    Source: sightings table in ft_flights.db (authoritative dedup store).
+    """
+    global _stats_last_date
+    today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+    _stats_last_date = today
+    if _db_conn is not None:
+        try:
+            with _stats_lock:
+                rows = _db_conn.execute(
+                    "SELECT callsign FROM sightings WHERE date = ?", (today,)
+                ).fetchall()
+            for row in rows:
+                _stats_seen_today.add((today, row[0]))
+            if _stats_seen_today:
+                _log(f"[overhead] restored {len(_stats_seen_today)} today's sightings from DB")
+        except Exception:
+            pass
+
+
+def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str,
+                        registration: str = "", route_src: str = "") -> None:
+    """
+    Record an overhead sighting in the SQLite sightings table.
+    Each (date, callsign) is counted at most once — deduplicated in memory via
+    _stats_seen_today (rebuilt from the DB on startup).
     Never raises — stats must never crash the main poll loop.
     """
-    global _stats_seen_today, _stats_last_date
+    global _stats_last_date
     if not callsign:
         return
-    today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
-    key   = (today, callsign)
-    if key in _stats_seen_today:
-        return
-    _stats_seen_today.add(key)
-
+    today  = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+    key    = (today, callsign)
     prefix = callsign[:3].upper() if len(callsign) >= 3 else "???"
     try:
         with _stats_lock:
-            # Load
-            try:
-                with open(STATS_FILE) as f:
-                    data = json.load(f)
-            except Exception:
-                data = {}
-            day = data.setdefault(today, {"total": 0, "airlines": {}, "types": {}})
-            day["total"] = day.get("total", 0) + 1
-            day["airlines"][prefix] = day["airlines"].get(prefix, 0) + 1
-            if plane_type:
-                day["types"][plane_type] = day["types"].get(plane_type, 0) + 1
-            # Trim to last 30 days
-            cutoff = (datetime.now(_PACIFIC) - timedelta(days=30)).strftime("%Y-%m-%d")
-            data = {k: v for k, v in data.items() if k >= cutoff}
-            # Save
-            tmp = STATS_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            os.replace(tmp, STATS_FILE)
-        # Log a daily summary when day rolls over
-        if _stats_last_date and _stats_last_date != today:
-            try:
-                prev = data.get(_stats_last_date, {})
-                top  = sorted(prev.get("airlines", {}).items(), key=lambda x: -x[1])[:5]
-                top_str = ", ".join(f"{k}×{v}" for k, v in top)
-                _log(f"[stats] {_stats_last_date}: {prev.get('total', 0)} flights — top: {top_str}")
-            except Exception:
-                pass
-        _stats_last_date = today
+            # Day rollover — prune stale in-memory entries and log yesterday's summary.
+            if today != _stats_last_date:
+                _stats_seen_today.difference_update(
+                    {k for k in _stats_seen_today if k[0] != today}
+                )
+                if _stats_last_date and _db_conn is not None:
+                    try:
+                        _prev_total = _db_conn.execute(
+                            "SELECT COUNT(*) FROM sightings WHERE date=?",
+                            (_stats_last_date,),
+                        ).fetchone()[0]
+                        _prev_rows = _db_conn.execute(
+                            "SELECT airline, COUNT(*) cnt FROM sightings "
+                            "WHERE date=? GROUP BY airline ORDER BY cnt DESC LIMIT 5",
+                            (_stats_last_date,),
+                        ).fetchall()
+                        _top_str = ", ".join(f"{r[0]}×{r[1]}" for r in _prev_rows)
+                        _log(f"[stats] {_stats_last_date}: {_prev_total} flights — top: {_top_str}")
+                    except Exception:
+                        pass
+                _stats_last_date = today
+
+            # Deduplicate in memory (fast path — avoids a DB read for repeat polls).
+            if key in _stats_seen_today:
+                # Don't double-count, but still fill in fields that were empty on
+                # the original insert (registration often arrives on a later poll
+                # once airplanes.live has populated the cache).
+                if _db_conn is not None and (registration or plane_type):
+                    try:
+                        _db_conn.execute(
+                            """UPDATE sightings SET
+                                registration = CASE WHEN registration='' AND ?!='' THEN ? ELSE registration END,
+                                aircraft     = CASE WHEN aircraft=''     AND ?!='' THEN ? ELSE aircraft     END
+                               WHERE date=? AND callsign=?""",
+                            (registration, registration, plane_type, plane_type, today, callsign),
+                        )
+                        _db_conn.commit()
+                    except Exception as exc:
+                        _log(f"[overhead] DB enrich failed for {callsign}: {exc}")
+                return
+            # Persist to SQLite — INSERT OR IGNORE honours the UNIQUE INDEX on
+            # (date, callsign) so replays on re-import are harmless.
+            # Add to in-memory set AFTER a successful write so that a transient
+            # DB failure doesn't silently suppress retries for the rest of the
+            # process lifetime.  If the DB is unavailable we still track in
+            # memory to prevent double-counting during this session.
+            if _db_conn is not None:
+                try:
+                    seen_at = datetime.now(_PACIFIC).strftime("%Y-%m-%d %H:%M:%S")
+                    _db_conn.execute(
+                        """
+                        INSERT OR IGNORE INTO sightings
+                            (seen_at, date, callsign, registration,
+                             origin, destination, aircraft, route_source, airline)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (seen_at, today, callsign, registration,
+                         origin or "", dest or "", plane_type or "",
+                         route_src or "", prefix),
+                    )
+                    _db_conn.commit()
+                    _stats_seen_today.add(key)
+                except Exception as exc:
+                    _log(f"[overhead] DB insert failed for {callsign}: {exc}")
+                    # key NOT added to memory → next poll will retry the INSERT
+            else:
+                # No DB — track in memory only to avoid double-counting this session
+                _stats_seen_today.add(key)
     except Exception:
         pass  # never propagate
 
+
+def _record_api_stat(api_name: str) -> None:
+    """
+    Increment the daily API-call counter for api_name ("airlabs" or "aeroapi")
+    in the SQLite api_calls table.  Called after a successful live API call.
+    Never raises.
+    """
+    today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+    try:
+        with _stats_lock:
+            if _db_conn is not None:
+                try:
+                    _db_conn.execute(
+                        """INSERT INTO api_calls(date, api_name, count) VALUES (?, ?, 1)
+                           ON CONFLICT(date, api_name) DO UPDATE SET count = count + 1""",
+                        (today, api_name),
+                    )
+                    _db_conn.commit()
+                except Exception as exc:
+                    _log(f"[overhead] DB api_stat failed for {api_name}: {exc}")
+    except Exception:
+        pass
+
+
 # ── Route cache TTL tiers ──────────────────────────────────────────────────────
-# ICAO 3-letter operator prefix determines how long a confirmed paid-API route
-# result is cached.  Scheduled airline routes are very stable (7 days safe).
-# GA, helicopters, and charters get 1 hour — a GA plane can land, refuel, and
-# depart to a completely different destination within that window.
-# Negative-cache (miss) entries always use ROUTE_MISS_TTL regardless of type.
+# These constants are defined here (before _init_db()) so _migrate_legacy_caches()
+# can reference them at startup.  Scheduled airline routes are very stable (7 days
+# safe).  GA, helicopters, and charters get 1 hour — a GA plane can land, refuel,
+# and depart to a completely different destination within that window.
+# Negative-cache (miss) entries use ROUTE_MISS_TTL for real-time APIs (OpenSky,
+# AirLabs, AeroAPI) so they retry quickly as new data arrives.  adsbdb is a
+# static historical DB and uses ADSBDB_CACHE_TTL for both hits and misses.
 _SCHEDULED_PREFIXES = frozenset([
     # US majors
     "AAL", "DAL", "UAL", "SWA", "ASA", "JBU", "NKS", "FFT", "SCX", "AAY",
     "HAL", "VRD",
+    # US ULCCs / leisure / charter
+    "MXY", "VXP", "JSX", "TWY",
+    # Canadian regional / leisure
+    "ROU",
+    # US cargo (scheduled routes — 7-day TTL appropriate)
+    "FDX", "UPS", "GTI", "ABX", "ASN", "PAC", "CKS", "WGN", "NCR", "SOU",
+    "DHK", "AGX",
+    # US charters / military contract
+    "OCN", "OAE",
     # Canadian
-    "ACA", "WJA", "POE", "FLE",
+    "ACA", "WJA", "POE", "FLE", "SWG",
     # Mexican
     "AMX", "VOI", "VIV",
     # European
     "BAW", "VIR", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
-    "CFG", "EDW",
-    # Asian
-    "KAL",
+    "CFG", "EDW", "THY", "ETD", "SWR", "AUA", "NAX", "EZY", "RYR", "TAP",
+    "FIN", "BEL",
+    # Asian / Pacific
+    "KAL", "ANA", "JAL", "CPA", "EVA", "CCA", "CSN", "ANZ",
     # Latin American
     "CMP", "AVA",
     # Oceania
     "QFA",
     # Regional/commuter
     "SKW", "ENY", "RPA", "QXE", "ASH", "PDT", "JIA", "UCA", "CPZ", "MTN",
-    "FLG", "SWG", "AGX",
+    "FLG",
 ])
 
 OPENSKY_CACHE_TTL    = 3600    # free/unlimited, hex-keyed — keep short
@@ -536,7 +899,15 @@ ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has 
 ROUTE_PAID_MISS_TTL = 7200  # both paid APIs confirmed empty — suppress for 2 h
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
 AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every poll cycle
-CACHE_MAX_SIZE     = 500    # evict oldest entries beyond this
+
+# Open (or create) the SQLite DB — must run before _load_stats_seen_today()
+# so the sightings table is available for the dedup rebuild.
+# Must also run AFTER the TTL constants above, since _migrate_legacy_caches()
+# references them during the one-time ft_cache.json import on first boot.
+_init_db()
+# Restore today's seen-callsigns from the sightings table (falls back to ft_stats.json).
+_load_stats_seen_today()
+
 
 def _route_ttl(callsign: str) -> int:
     """
@@ -604,23 +975,14 @@ def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lo
     return (d_orig + d_dest) / route_km < 1.8
 
 
-# All caches store tuples where the LAST element is always the timestamp,
-# making _prune_cache's v[-1] access safe and consistent:
-#   _route_cache    : (origin, dest, orig_lat, orig_lon, dest_lat, dest_lon, timestamp)
-#   _aeroapi_cache  : (origin, dest, orig_lat, orig_lon, dest_lat, dest_lon, timestamp)
-#   _aircraft_cache : (type_string, source_label, timestamp)
-# Empty origin+dest with None coords = negative cache entry (API had no data).
-_cache_lock     = Lock()
-_usage_lock     = Lock()   # guards _airlabs_increment / _aeroapi_increment read-then-write
-# _route_cache key scheme (three co-existing formats in the same dict):
-#   callsign           — adsbdb result, keyed by flight callsign (e.g. "SWA123")
-#   hex_code           — OpenSky result, keyed by 6-char ICAO hex (e.g. "a1b2c3")
-#   "airlabs:callsign" — AirLabs result, prefixed to avoid collisions with adsbdb entries
-_route_cache      = {}
-_aeroapi_cache    = {}
-_aircraft_cache   = {}
-_paid_miss_cache  = {}   # callsign → epoch; both AirLabs+AeroAPI confirmed empty
-_opensky_token  = {"value": None, "expires_at": 0, "fetching": False}
+# ── Locks and in-memory session state ─────────────────────────────────────────
+_cache_lock  = Lock()   # guards _cache_conn + _opensky_token
+_usage_lock  = Lock()   # guards _airlabs_increment / _aeroapi_increment read-then-write
+# Cache key scheme used in the 'route' cache_type:
+#   callsign           — adsbdb result  (e.g. "SWA123")
+#   hex_code           — OpenSky result (e.g. "a1b2c3")
+#   "airlabs:callsign" — AirLabs result (prefixed to avoid collisions with adsbdb)
+_opensky_token = {"value": None, "expires_at": 0, "fetching": False}
 
 # ── API backoff state ──────────────────────────────────────────────────────────
 # Driven by actual HTTP responses, not local counters.
@@ -639,94 +1001,6 @@ def _set_backoff(api_name: str, secs: int = 3600) -> None:
     _log(f"[{api_name}] backing off for {secs // 60} min")
 
 
-# ── Cache helpers ──────────────────────────────────────────────────────────────
-
-def _prune_cache(cache, ttl):
-    """Remove stale entries and enforce CACHE_MAX_SIZE. Must be called under _cache_lock."""
-    if len(cache) <= CACHE_MAX_SIZE // 2:
-        return  # cache is small — skip O(N) sweep
-    now = int(time.time())
-    stale = [k for k, v in cache.items() if now - v[-1] > ttl]
-    for k in stale:
-        del cache[k]
-    if len(cache) > CACHE_MAX_SIZE:
-        oldest = sorted(cache, key=lambda k: cache[k][-1])
-        for k in oldest[:len(cache) - CACHE_MAX_SIZE]:
-            del cache[k]
-
-
-def _save_caches():
-    """
-    Persist route and aircraft caches to disk so they survive service restarts.
-    JSON doesn't support tuples, so entries are serialised as lists and
-    converted back to tuples on load.  Uses an atomic tmp→rename write.
-    """
-    with _cache_lock:
-        route_snap      = dict(_route_cache)
-        aeroapi_snap    = dict(_aeroapi_cache)
-        aircraft_snap   = dict(_aircraft_cache)
-        paid_miss_snap  = dict(_paid_miss_cache)
-    data = {
-        "route":     {k: list(v) for k, v in route_snap.items()},
-        "aeroapi":   {k: list(v) for k, v in aeroapi_snap.items()},
-        "aircraft":  {k: list(v) for k, v in aircraft_snap.items()},
-        "paid_miss": paid_miss_snap,   # {callsign: epoch timestamp}
-    }
-    try:
-        tmp = CACHE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, CACHE_FILE)
-    except Exception as e:
-        _log(f"[cache] WARNING: failed to save persistent cache: {e}")
-
-
-def _load_caches():
-    """
-    Load persisted caches from disk on startup.
-    Stale entries are discarded; the TTL logic in get_route / get_aircraft_type
-    handles freshness correctly because timestamps are embedded in every entry.
-    """
-    try:
-        with open(CACHE_FILE) as f:
-            data = json.load(f)
-        now = int(time.time())
-        loaded = {"route": 0, "aeroapi": 0, "aircraft": 0, "paid_miss": 0}
-        with _cache_lock:
-            for k, v in data.get("route", {}).items():
-                if len(v) == 7 and now - v[-1] < max(ADSBDB_CACHE_TTL, ROUTE_TTL_SCHEDULED, OPENSKY_CACHE_TTL):
-                    # Skip miss entries (empty origin + dest) — their short TTL
-                    # (ROUTE_MISS_TTL=300s) would have expired anyway, and loading
-                    # them back as hour-long hits suppresses retries that should fire.
-                    if not v[0] and not v[1]:
-                        continue
-                    _route_cache[k] = tuple(v)
-                    loaded["route"] += 1
-            for k, v in data.get("aeroapi", {}).items():
-                if len(v) == 7 and now - v[-1] < ROUTE_TTL_SCHEDULED:
-                    _aeroapi_cache[k] = tuple(v)
-                    loaded["aeroapi"] += 1
-            for k, v in data.get("aircraft", {}).items():
-                if len(v) == 3 and now - v[-1] < AIRCRAFT_CACHE_TTL:
-                    _aircraft_cache[k] = tuple(v)
-                    loaded["aircraft"] += 1
-            for k, v in data.get("paid_miss", {}).items():
-                if isinstance(v, (int, float)) and now - v < ROUTE_PAID_MISS_TTL:
-                    _paid_miss_cache[k] = int(v)
-                    loaded["paid_miss"] += 1
-        _log(
-            f"[cache] loaded {loaded['route']} route, "
-            f"{loaded['aeroapi']} aeroapi, {loaded['aircraft']} aircraft, "
-            f"{loaded['paid_miss']} paid-miss entries"
-        )
-    except FileNotFoundError:
-        pass  # first run — nothing to load
-    except Exception as e:
-        _log(f"[cache] failed to load persisted cache: {e}")
-
-
-# Load persisted caches on import so the first poll after a restart is warm.
-_load_caches()
 
 # ── Override rules ─────────────────────────────────────────────────────────────
 # Loaded on demand with mtime-based invalidation so edits via the web UI take
@@ -813,7 +1087,8 @@ def _get_opensky_token():
             with _cache_lock:
                 _opensky_token["value"] = data["access_token"]
                 _opensky_token["expires_at"] = now + data.get("expires_in", 300)
-            return _opensky_token["value"]
+                token_value = _opensky_token["value"]
+            return token_value
     except Exception:
         pass
     finally:
@@ -837,13 +1112,14 @@ def icao_to_iata(code):
 # ── Flight model ───────────────────────────────────────────────────────────────
 
 class Flight:
-    def __init__(self, lat, lon, altitude, vertical_speed, callsign, hex_code=""):
+    def __init__(self, lat, lon, altitude, vertical_speed, callsign, hex_code="", registration=""):
         self.latitude = lat
         self.longitude = lon
         self.altitude = altitude
         self.vertical_speed = vertical_speed
         self.callsign = callsign
         self.hex_code = hex_code
+        self.registration = registration.strip().upper() if registration else ""
 
     @classmethod
     def from_fr24(cls, hex_code, entry):
@@ -853,6 +1129,7 @@ class Flight:
             if not lat or not lon:
                 return None
             alt = entry[FR24_ALT]
+            reg = entry[FR24_REG] if len(entry) > FR24_REG else ""
             return cls(
                 lat=lat,
                 lon=lon,
@@ -860,6 +1137,7 @@ class Flight:
                 vertical_speed=entry[FR24_VERT] if isinstance(entry[FR24_VERT], (int, float)) else 0,
                 callsign=(entry[FR24_CALLSIGN] or "").strip(),
                 hex_code=hex_code,
+                registration=reg or "",
             )
         except (IndexError, TypeError):
             return None
@@ -878,6 +1156,7 @@ class Flight:
             vertical_speed=ac.get("baro_rate", ac.get("geom_rate", 0)) or 0,
             callsign=(ac.get("flight") or "").strip(),
             hex_code=ac.get("hex", ""),
+            registration=ac.get("registration", "") or "",
         )
 
 
@@ -976,20 +1255,17 @@ def _write_usage(path, data):
         _log(f"[usage] WARNING: failed to write {os.path.basename(path)}: {e}")
 
 
-def _cache_entry(orig, dest, olat, olon, dlat, dlon):
-    """Build a route cache tuple. Timestamp is always last for _prune_cache."""
-    return (orig, dest, olat, olon, dlat, dlon, int(time.time()))
-
-
 def _airlabs_increment():
     with _usage_lock:
         data = _read_usage(AIRLABS_USAGE_FILE, AIRLABS_RESET_DAY)
         data["value"] = data.get("value", 0) + 1
         _write_usage(AIRLABS_USAGE_FILE, data)
-    remaining = AIRLABS_MONTHLY_LIMIT - data["value"]
+        remaining = AIRLABS_MONTHLY_LIMIT - data["value"]
+        count     = int(data["value"])
     if remaining <= 50:
         _log(f"[airlabs] WARNING: {int(remaining)} calls remaining this period")
-    return int(data["value"])  # returned for inline logging
+    _record_api_stat("airlabs")
+    return count  # returned for inline logging
 
 
 def _aeroapi_increment():
@@ -998,24 +1274,28 @@ def _aeroapi_increment():
         data["value"] = round(data.get("value", 0.0) + AEROAPI_COST_PER_CALL, 4)
         _write_usage(AEROAPI_USAGE_FILE, data)
     _log(f"[aeroapi] period spend so far: ~${data['value']:.3f}")
+    _record_api_stat("aeroapi")
 
 
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None):
     """
     Route lookup priority:
-      0. Override rules — ft_overrides.json; pattern-matched against callsign.
-                          Returns immediately, no API calls made at all.
-      1. adsbdb       — static historical DB; trusted only when the ORIGIN is a local
-                        airport (LAS/VGT/HSH) AND geometry plausibility passes.
-      2. OpenSky      — free, unlimited, real-time by ICAO24 hex.  Trusted only when
-                        the ORIGIN is a local airport.  If origin=local, dest is also
-                        accepted from the same result; a missing dest falls through to
-                        AirLabs.  Arrival-only and through-traffic are skipped.
-      3. AirLabs      — real-time by callsign; geometry plausibility check applied.
-                        Trusted only when origin is a local airport.
-                        1,000 calls/month free.
-      4. FlightAware  — paid last resort; geometry plausibility + origin-local check.
-                        Cascades on 402/429.
+      0.  Override rules — ft_overrides.json; pattern-matched against callsign.
+                           Returns immediately, no API calls made at all.
+      0.5 Resolved-route cache (scheduled airlines only) — written at the end of
+                           any successful full-route resolution; checked before
+                           any API work so repeat daily flights skip the chain.
+      1.  adsbdb       — static historical DB; trusted only when the ORIGIN is a
+                         local airport (LAS/VGT/HSH) AND geometry plausibility passes.
+      2.  OpenSky      — free, unlimited, real-time by ICAO24 hex.  Trusted only when
+                         the ORIGIN is a local airport.  If origin=local, dest is also
+                         accepted from the same result; a missing dest falls through to
+                         AirLabs.  Arrival-only and through-traffic are skipped.
+      3.  AirLabs      — real-time by callsign; geometry plausibility check applied.
+                         Trusted only when origin is a local airport.
+                         1,000 calls/month free.
+      4.  FlightAware  — paid last resort; geometry plausibility + origin-local check.
+                         Cascades on 402/429.
       If no source supplies a validated departure route, origin/dest → "?".
 
     Trust rule: only routes WHERE THE PLANE IS DEPARTING a local airport are accepted.
@@ -1051,18 +1331,34 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         )
         return ov_origin, ov_dest, "override", ov_plane
 
+    # ── 0.5. Resolved-route cache (scheduled airlines only) ───────────────────
+    # When we successfully resolve both endpoints for a scheduled airline
+    # callsign (from any combination of sources), the final result is cached
+    # here at the scheduled-airline TTL (7 days).  A hit here skips the entire
+    # API chain — no adsbdb, OpenSky, AirLabs, or AeroAPI calls are made.
+    #
+    # This prevents AirLabs call burns on repeat sightings of daily flights
+    # where OpenSky sometimes returns a full route (so AirLabs is never called
+    # and its 7-day cache is never written) and sometimes returns only partial
+    # data (triggering a live AirLabs call to fill the missing endpoint).
+    if callsign and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED:
+        _resolved = _cache_db_get_route(callsign, 'resolved')
+        if _resolved and _resolved[0] and _resolved[1]:
+            _rsrc = _resolved[6].removesuffix(":cached")  # strip any trailing :cached so it isn't doubled
+            _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
+            return _resolved[0], _resolved[1], _resolved_label, ""
+
     # ── 1. adsbdb (static historical DB) ──────────────────────────────────────
     adsbdb_origin = adsbdb_dest = ""
     adsbdb_olat = adsbdb_olon = adsbdb_dlat = adsbdb_dlon = None
     _adsbdb_src = "adsbdb"
 
     if callsign:
-        with _cache_lock:
-            cached = _route_cache.get(callsign)
-        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else ADSBDB_CACHE_TTL):
-            adsbdb_origin, adsbdb_dest = cached[0], cached[1]
-            adsbdb_olat, adsbdb_olon = cached[2], cached[3]
-            adsbdb_dlat, adsbdb_dlon = cached[4], cached[5]
+        _cached_adsbdb = _cache_db_get_route(callsign, 'route')
+        if _cached_adsbdb:
+            adsbdb_origin, adsbdb_dest = _cached_adsbdb[0], _cached_adsbdb[1]
+            adsbdb_olat, adsbdb_olon = _cached_adsbdb[2], _cached_adsbdb[3]
+            adsbdb_dlat, adsbdb_dlon = _cached_adsbdb[4], _cached_adsbdb[5]
             _adsbdb_src = "adsbdb:cached"
         else:
             try:
@@ -1077,21 +1373,23 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     adsbdb_olon   = _fr_orig.get("longitude")
                     adsbdb_dlat   = _fr_dest.get("latitude")
                     adsbdb_dlon   = _fr_dest.get("longitude")
-                    # Cache hit or confirmed miss (no flightroute in DB)
-                    with _cache_lock:
-                        _route_cache[callsign] = _cache_entry(
-                            adsbdb_origin, adsbdb_dest,
-                            adsbdb_olat, adsbdb_olon, adsbdb_dlat, adsbdb_dlon,
-                        )
-                        _prune_cache(_route_cache, ADSBDB_CACHE_TTL)
+                    # Cache the result.  Use ADSBDB_CACHE_TTL (1 hr) for both
+                    # hits and misses — adsbdb is a static historical DB and a
+                    # "no route" answer won't change between polls the way a
+                    # real-time API might.  ROUTE_MISS_TTL (5 min) is only
+                    # appropriate for live data sources.
+                    _cache_db_set_route(callsign, 'route',
+                                        adsbdb_origin, adsbdb_dest,
+                                        adsbdb_olat, adsbdb_olon, adsbdb_dlat, adsbdb_dlon,
+                                        int(time.time()) + ADSBDB_CACHE_TTL,
+                                        source="adsbdb")
                 elif r.status_code == 404:
-                    # Callsign not in adsbdb — cache as miss so we don't re-query every poll.
-                    # Use ADSBDB_CACHE_TTL (not ROUTE_MISS_TTL) so this prune doesn't evict
-                    # valid 1-hour cache entries for other callsigns.  The freshness check on
-                    # read still uses ROUTE_MISS_TTL for empty entries (see get_route above).
-                    with _cache_lock:
-                        _route_cache[callsign] = _cache_entry("", "", None, None, None, None)
-                        _prune_cache(_route_cache, ADSBDB_CACHE_TTL)
+                    # Callsign not in adsbdb's static DB — also cache for the
+                    # full hour; the DB doesn't gain new entries between polls.
+                    _cache_db_set_route(callsign, 'route',
+                                        "", "", None, None, None, None,
+                                        int(time.time()) + ADSBDB_CACHE_TTL,
+                                        source="adsbdb")
                 # 5xx / unexpected: don't cache — transient error, retry next poll
             except Exception:
                 pass
@@ -1129,10 +1427,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     _sky_src = "opensky"
     # OpenSky is free/unlimited — intentionally excluded from the _apis_disabled kill-switch.
     if not (origin and destination) and OPENSKY_CLIENT_ID and hex_code and not _in_backoff("opensky"):
-        with _cache_lock:
-            cached = _route_cache.get(hex_code)
-        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else OPENSKY_CACHE_TTL):
-            _sky_origin, _sky_dest = cached[0], cached[1]
+        _cached_sky = _cache_db_get_route(hex_code, 'route')
+        if _cached_sky:
+            _sky_origin, _sky_dest = _cached_sky[0], _cached_sky[1]
             _sky_src = "opensky:cached"
         else:
             token = _get_opensky_token()
@@ -1159,12 +1456,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             _log(f"[opensky] {callsign}: no data")
                         # Cache hit or confirmed-empty 200 — suppresses re-queries within TTL.
                         # Non-200 status codes (5xx etc.) are not cached; retry next poll.
-                        with _cache_lock:
-                            _route_cache[hex_code] = _cache_entry(
-                                _sky_origin, _sky_dest,
-                                None, None, None, None,  # OpenSky returns no airport coords
-                            )
-                            _prune_cache(_route_cache, OPENSKY_CACHE_TTL)
+                        _sky_ttl = OPENSKY_CACHE_TTL if (_sky_origin or _sky_dest) else ROUTE_MISS_TTL
+                        _cache_db_set_route(hex_code, 'route',
+                                            _sky_origin, _sky_dest,
+                                            None, None, None, None,
+                                            int(time.time()) + _sky_ttl,
+                                            source="opensky")
                 except Exception:
                     pass
 
@@ -1184,29 +1481,55 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             elif _sky_src != "opensky:cached":
                 _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
 
+    # ── 2b. Free-API consensus (non-local departures / arrivals) ─────────────────
+    # adsbdb keys by callsign; OpenSky keys by hex code — two independent sources.
+    # If both return the exact same non-local route AND it passes the geometry
+    # plausibility check (using adsbdb's airport coordinates), trust it without
+    # burning a paid API call.  Both origin AND destination must agree; partial
+    # matches fall through to AirLabs as before.
+    if not (origin and destination):
+        if (adsbdb_origin and _sky_origin
+                and adsbdb_origin == _sky_origin
+                and adsbdb_dest and _sky_dest
+                and adsbdb_dest == _sky_dest):
+            _consensus_plausible = _route_plausible(
+                plane_lat, plane_lon,
+                adsbdb_olat, adsbdb_olon,
+                adsbdb_dlat, adsbdb_dlon,
+            )
+            if _consensus_plausible:
+                origin      = adsbdb_origin
+                destination = adsbdb_dest
+                # Mark as cached when both underlying sources were cache hits —
+                # _is_live() uses this to skip the inter-flight rate-limit delay.
+                _consensus_cached = (_adsbdb_src == "adsbdb:cached" and _sky_src == "opensky:cached")
+                source      = "adsbdb+opensky:cached" if _consensus_cached else "adsbdb+opensky"
+                _log(f"[route] {_airline_display(callsign)}: {_route_display(origin, destination)} accepted — free APIs agree")
+            else:
+                _log(f"[route] {callsign}: free APIs agree on {adsbdb_origin}->{adsbdb_dest} but route implausible — escalating to paid")
+
     # ── 3. AirLabs (real-time, 1,000 calls/month — now mainly through-traffic) ──
-    # Only called when OpenSky's result wasn't auto-trusted or returned nothing.
-    # Returns airport coordinates, enabling the full plausibility check.
+    # Only called when free APIs didn't resolve the route (no data, disagreement,
+    # or implausible geometry).  Returns airport coordinates for plausibility check.
     # Skipped when the callsign is in _paid_miss_cache — both paid APIs already
     # confirmed empty within ROUTE_PAID_MISS_TTL (2 h), no point burning quota.
     _need_airlabs = not (origin and destination)
-    _skip_paid = _skip_paid_apis(callsign)   # N-numbers and military never have paid-API data
-    if _need_airlabs and callsign and not _skip_paid:
-        with _cache_lock:
-            _paid_miss_ts = _paid_miss_cache.get(callsign, 0)
-        _skip_paid = _skip_paid or (now - _paid_miss_ts) < ROUTE_PAID_MISS_TTL
+    # N-numbers, military, and callsigns that have hit both paid APIs with empty results
+    # recently are all skipped — compute once up front to avoid re-evaluating inside guards.
+    _skip_paid = _skip_paid_apis(callsign) or (
+        bool(callsign) and _cache_db_check_paid_miss(callsign)
+    )
     al_origin = al_dest = ""
     al_olat = al_olon = al_dlat = al_dlon = None
     _al_src   = "airlabs"
     _al_count = 0  # tracks live call count; > 0 means a real API call was made
 
     if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not _skip_paid:
-        with _cache_lock:
-            cached = _route_cache.get(f"airlabs:{callsign}")
-        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else _route_ttl(callsign)):
-            al_origin, al_dest = cached[0], cached[1]
-            al_olat, al_olon = cached[2], cached[3]
-            al_dlat, al_dlon = cached[4], cached[5]
+        _cached_al = _cache_db_get_route(f"airlabs:{callsign}", 'route')
+        if _cached_al:
+            al_origin, al_dest = _cached_al[0], _cached_al[1]
+            al_olat, al_olon = _cached_al[2], _cached_al[3]
+            al_dlat, al_dlon = _cached_al[4], _cached_al[5]
             _al_src = "airlabs:cached"
             # No log — suppress cached-hit spam; live fetches produce a log below
         elif not _in_backoff("airlabs"):
@@ -1236,62 +1559,81 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     if not (al_origin or al_dest):
                         _log(f"[airlabs] {callsign}: no data [call #{_al_count}]")
                     # Cache result (even empty — negative cache suppresses retries)
-                    with _cache_lock:
-                        _route_cache[f"airlabs:{callsign}"] = _cache_entry(
-                            al_origin, al_dest,
-                            al_olat, al_olon, al_dlat, al_dlon,
-                        )
-                        _prune_cache(_route_cache, ROUTE_TTL_SCHEDULED)
+                    _al_ttl = _route_ttl(callsign) if (al_origin or al_dest) else ROUTE_MISS_TTL
+                    _cache_db_set_route(f"airlabs:{callsign}", 'route',
+                                        al_origin, al_dest,
+                                        al_olat, al_olon, al_dlat, al_dlon,
+                                        int(time.time()) + _al_ttl,
+                                        source="airlabs")
                 else:
                     # Unexpected status (e.g. 404, 500) — count the call (AirLabs may
                     # bill any HTTP request), negatively cache to prevent per-poll retries.
                     _al_count = _airlabs_increment()
                     _log(f"[airlabs] {callsign}: unexpected status {r.status_code} [call #{_al_count}] — negative caching")
-                    with _cache_lock:
-                        _route_cache[f"airlabs:{callsign}"] = _cache_entry(
-                            "", "", None, None, None, None,
-                        )
-                        _prune_cache(_route_cache, ROUTE_TTL_SCHEDULED)
+                    _cache_db_set_route(f"airlabs:{callsign}", 'route',
+                                        "", "", None, None, None, None,
+                                        int(time.time()) + ROUTE_MISS_TTL,
+                                        source="airlabs")
             except Exception:
                 pass
         else:
             _log(f"[airlabs] {callsign}: in backoff — skipping")
 
-    # AirLabs returns coordinates — apply geometry plausibility, then the
-    # departure-only trust rule: only accept when origin is a local airport.
+    # AirLabs returns coordinates — apply geometry plausibility only.
+    # Paid APIs trust any plausible route (arrivals and through-traffic included);
+    # origin-local restriction applies only to free APIs (adsbdb, OpenSky).
     if al_origin or al_dest:
         al_plausible = _route_plausible(plane_lat, plane_lon,
                                          al_olat, al_olon, al_dlat, al_dlon)
         if al_plausible:
-            _al_origin_local = al_origin.upper() in _LOCAL_AIRPORTS if al_origin else False
-            if _al_origin_local:
-                # Guard each endpoint independently — don't overwrite a local airport
-                # that was already confirmed by a prior source (e.g. OpenSky).
+            _al_filled_dest = not destination
+            if source and _al_filled_dest:
+                # A free API already set the origin; AirLabs is filling the missing
+                # destination.  But if AirLabs' own origin disagrees with what the
+                # free API found, the two sources describe different routes — mixing
+                # them would produce a nonsensical "FreeSrc_origin→AirLabs_dest" route.
+                # In that case, prefer AirLabs' complete authoritative route instead.
+                if al_origin and origin and al_origin.upper() != origin.upper():
+                    _log(f"[airlabs] origin conflict ({origin} vs {al_origin}) — preferring AirLabs complete route")
+                    origin = al_origin
+                    destination = al_dest
+                    source = _al_src
+                else:
+                    # Origins agree (or AirLabs returned no origin) — fill dest only
+                    # and credit both sources in the tag.
+                    if not origin:
+                        origin = al_origin
+                    destination = al_dest
+                    source = f"{source}+airlabs"
+            else:
                 if not origin:
                     origin = al_origin
                 if not destination:
                     destination = al_dest
                 source = source or _al_src
-                if _al_src != "airlabs:cached":
-                    _count_suffix = f" [call #{_al_count}]" if _al_count else ""
-                    _log(f"[airlabs] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
-            else:
-                if _al_src != "airlabs:cached":
-                    _log(f"[airlabs] {callsign}: {al_origin or '?'}->{al_dest or '?'} skipped — origin not local")
+            if _al_src != "airlabs:cached":
+                _count_suffix = f" [call #{_al_count}]" if _al_count else ""
+                _log(f"[airlabs] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
         else:
             if _al_src != "airlabs:cached":
                 _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
 
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
     if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not _skip_paid:
-        with _cache_lock:
-            cached = _aeroapi_cache.get(callsign)
-        if cached and now - cached[-1] < (ROUTE_MISS_TTL if not cached[0] else _route_ttl(callsign)):
-            if not origin:
-                origin = cached[0]
-            if not destination:
-                destination = cached[1]
-            source = source or "aeroapi:cached"
+        _cached_fa = _cache_db_get_route(callsign, 'aeroapi')
+        if _cached_fa:
+            # Apply geometry plausibility even on cache hits — a 7-day-old AeroAPI
+            # result for the same callsign could be from a different prior flight leg.
+            _cached_plausible = not _cached_fa[0] or _route_plausible(
+                plane_lat, plane_lon, _cached_fa[2], _cached_fa[3],
+                _cached_fa[4], _cached_fa[5]
+            )
+            if _cached_plausible:
+                if not origin:
+                    origin = _cached_fa[0]
+                if not destination:
+                    destination = _cached_fa[1]
+                source = source or "aeroapi:cached"
             # No log — suppress cached-hit spam; live fetches produce a log below
         elif not _in_backoff("aeroapi"):
             try:
@@ -1328,36 +1670,50 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     _aeroapi_increment()  # logs running spend
                     if not (fa_origin or fa_dest):
                         _log(f"[aeroapi] {callsign}: no flights returned")
-                    with _cache_lock:
-                        _aeroapi_cache[callsign] = _cache_entry(
-                            fa_origin, fa_dest,
-                            fa_olat, fa_olon, fa_dlat, fa_dlon,
-                        )
-                        _prune_cache(_aeroapi_cache, ROUTE_TTL_SCHEDULED)
+                    _fa_ttl = _route_ttl(callsign) if (fa_origin or fa_dest) else ROUTE_MISS_TTL
+                    _cache_db_set_route(callsign, 'aeroapi',
+                                        fa_origin, fa_dest,
+                                        fa_olat, fa_olon, fa_dlat, fa_dlon,
+                                        int(time.time()) + _fa_ttl,
+                                        source="aeroapi")
                     if fa_origin or fa_dest:
                         fa_plausible = _route_plausible(plane_lat, plane_lon,
                                                          fa_olat, fa_olon,
                                                          fa_dlat, fa_dlon)
                         if fa_plausible:
-                            _fa_origin_local = fa_origin.upper() in _LOCAL_AIRPORTS if fa_origin else False
-                            if _fa_origin_local:
+                            # Paid APIs trust any plausible route — no origin-local restriction.
+                            _fa_filled_dest = not destination
+                            if source and _fa_filled_dest:
+                                # If AeroAPI's origin conflicts with the one already set by a
+                                # prior source, prefer AeroAPI's complete authoritative route
+                                # rather than mixing a free-API origin with AeroAPI's destination.
+                                if fa_origin and origin and fa_origin.upper() != origin.upper():
+                                    _log(f"[aeroapi] origin conflict ({origin} vs {fa_origin}) — preferring AeroAPI complete route")
+                                    origin = fa_origin
+                                    destination = fa_dest
+                                    source = "aeroapi"
+                                else:
+                                    if not origin:
+                                        origin = fa_origin
+                                    destination = fa_dest
+                                    source = f"{source}+aeroapi"
+                            else:
                                 if not origin:
                                     origin = fa_origin
                                 if not destination:
                                     destination = fa_dest
-                                source = "aeroapi"
-                                _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
-                            else:
-                                _log(f"[aeroapi] {callsign}: {fa_origin or '?'}->{fa_dest or '?'} skipped — origin not local")
+                                source = source or "aeroapi"
+                            _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
                         else:
                             _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
                 else:
                     # Unexpected status (4xx/5xx other than explicitly handled codes) —
                     # negatively cache for ROUTE_MISS_TTL to prevent per-poll retries.
                     _log(f"[aeroapi] unexpected status {r.status_code} for {callsign} — negative caching")
-                    with _cache_lock:
-                        _aeroapi_cache[callsign] = _cache_entry("", "", None, None, None, None)
-                        _prune_cache(_aeroapi_cache, ROUTE_TTL_SCHEDULED)
+                    _cache_db_set_route(callsign, 'aeroapi',
+                                        "", "", None, None, None, None,
+                                        int(time.time()) + ROUTE_MISS_TTL,
+                                        source="aeroapi")
             except Exception:
                 pass
         # else: in backoff — already logged when backoff was set
@@ -1370,15 +1726,52 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if (not origin and not destination and callsign and not _skip_paid and not _apis_disabled
             and (AIRLABS_API_KEY or FLIGHTAWARE_API_KEY)):
         if not _in_backoff("airlabs") and not _in_backoff("aeroapi"):
-            with _cache_lock:
-                _paid_miss_cache[callsign] = now
-                cutoff = now - ROUTE_PAID_MISS_TTL
-                stale = [k for k, v in _paid_miss_cache.items() if v < cutoff]
-                for k in stale:
-                    del _paid_miss_cache[k]
+            _cache_db_set_paid_miss(callsign)
             _log(f"[route] {callsign}: both paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
 
+    # ── Resolved-route cache write ─────────────────────────────────────────────
+    # If both endpoints are now known for a scheduled airline, cache the final
+    # result so future sightings of the same daily flight skip the full API
+    # chain — even when individual upstream caches (e.g. OpenSky's 1-hour TTL)
+    # have expired or only have partial data.
+    if (origin and destination and callsign
+            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED):
+        _cache_db_set_route(callsign, 'resolved',
+                            origin, destination,
+                            None, None, None, None,
+                            int(time.time()) + ROUTE_TTL_SCHEDULED,
+                            source=source.removesuffix(":cached"))
+
     return origin, destination, source or "none", ""  # 4th value: override plane (empty for non-override)
+
+
+def _try_opensky_reg(hex_code: str) -> None:
+    """
+    Best-effort: call OpenSky metadata endpoint for registration only.
+    Called when airplanes.live has type data but no 'r' field, and on cache hits
+    where the type is known but no reg has been cached yet.
+    Permanent hex→tail mapping — stops being called once reg is cached.
+    No-op if reg is already cached, on error, 429, or global opensky_meta backoff.
+    """
+    if _in_backoff("opensky_meta"):
+        return
+    # Re-check the cache before the HTTP call — prevents duplicate in-flight requests
+    # when two threads encounter the same aircraft simultaneously (both see no reg,
+    # both enter this function; the second thread sees the reg the first just wrote).
+    if _cache_db_get_reg(hex_code):
+        return
+    try:
+        r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
+        if r.status_code == 200:
+            _meta_reg = (r.json().get("registration") or "").strip().upper()
+            if _meta_reg:
+                _cache_db_set_reg(hex_code, _meta_reg)
+        elif r.status_code == 429:
+            _set_backoff("opensky_meta", secs=3600)
+        elif r.status_code in (401, 403):
+            _set_backoff("opensky_meta", secs=86400)
+    except Exception:
+        pass
 
 
 def get_aircraft_type(hex_code):
@@ -1387,22 +1780,25 @@ def get_aircraft_type(hex_code):
       1. airplanes.live /v2/hex/{hex}  (best coverage, has desc field)
       2. adsbdb /v0/aircraft/{hex}     (static DB, manufacturer + type)
       3. OpenSky metadata /api/metadata/aircraft/icao/{hex}  (public, no token)
-    Cache tuple: (type_string, source_label, timestamp) — timestamp last for _prune_cache.
+    Cache: type_string and source_label stored in the SQLite cache table.
     Returns (type_string, source_label).
+
+    Registration side-effect: whenever a type is found but no reg is cached,
+    _try_opensky_reg() is called to fill in the tail # from OpenSky metadata.
+    The result is cached permanently so it is only fetched once per hex code.
     """
     if not hex_code:
         return "", "none"
 
-    now = int(time.time())
-    with _cache_lock:
-        cached = _aircraft_cache.get(hex_code)
-    # cached[0]=type, cached[1]=source, cached[2]=timestamp
-    if cached:
-        age = now - cached[2]
-        if cached[0] and age < AIRCRAFT_CACHE_TTL:
-            return cached[0], f"{cached[1]}:cached"   # known type, still fresh
-        if not cached[0] and age < AIRCRAFT_MISS_TTL:
-            return "", "miss:cached"                   # recent miss — don't retry all 3 APIs yet
+    _cached_ac = _cache_db_get_aircraft(hex_code)
+    if _cached_ac is not None:
+        type_str, ac_source = _cached_ac
+        if type_str:
+            # Type is cached but reg may not be — fill it in opportunistically.
+            if not _cache_db_get_reg(hex_code):
+                _try_opensky_reg(hex_code)
+            return type_str, f"{ac_source}:cached"   # known type, still fresh
+        return "", "miss:cached"                       # recent miss — don't retry all 3 APIs yet
 
     # 1. airplanes.live
     try:
@@ -1410,12 +1806,15 @@ def get_aircraft_type(hex_code):
         if r.status_code == 200:
             ac_list = r.json().get("ac", [])
             if ac_list:
-                ac = ac_list[0]
+                ac    = ac_list[0]
                 plane = ac.get("desc", "") or ac.get("t", "") or ""
+                reg   = (ac.get("r") or "").strip().upper()
+                if reg:
+                    _cache_db_set_reg(hex_code, reg)   # permanent; hex → tail never changes
+                else:
+                    _try_opensky_reg(hex_code)         # airplanes.live has no 'r' — fall back to OpenSky metadata
                 if plane:
-                    with _cache_lock:
-                        _aircraft_cache[hex_code] = (plane, "airplanes.live", now)
-                        _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+                    _cache_db_set_aircraft(hex_code, plane, "airplanes.live", AIRCRAFT_CACHE_TTL)
                     return plane, "airplanes.live"
     except Exception:
         pass
@@ -1429,24 +1828,27 @@ def get_aircraft_type(hex_code):
             type_name = ac.get("type", "") or ""
             plane = _translate_type(f"{manufacturer} {type_name}".strip())
             if plane:
-                with _cache_lock:
-                    _aircraft_cache[hex_code] = (plane, "adsbdb", now)
-                    _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+                _cache_db_set_aircraft(hex_code, plane, "adsbdb", AIRCRAFT_CACHE_TTL)
                 return plane, "adsbdb"
     except Exception:
         pass
 
     # 3. OpenSky aircraft metadata (public endpoint — no token required)
+    # This endpoint returns both aircraft type AND registration, so we extract
+    # the registration here as a free fallback even when the type lookup misses.
     if not _in_backoff("opensky_meta"):
         try:
             r = requests.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
             if r.status_code == 200:
                 data = r.json()
+                # Cache registration regardless of whether type is found — it's
+                # a permanent hex→tail mapping that benefits future sightings.
+                _meta_reg = (data.get("registration") or "").strip().upper()
+                if _meta_reg:
+                    _cache_db_set_reg(hex_code, _meta_reg)
                 plane = _translate_type((data.get("model") or data.get("typecode") or "").strip())
                 if plane:
-                    with _cache_lock:
-                        _aircraft_cache[hex_code] = (plane, "opensky:meta", now)
-                        _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+                    _cache_db_set_aircraft(hex_code, plane, "opensky:meta", AIRCRAFT_CACHE_TTL)
                     return plane, "opensky:meta"
             elif r.status_code == 429:
                 _set_backoff("opensky_meta", secs=3600)
@@ -1455,12 +1857,29 @@ def get_aircraft_type(hex_code):
         except Exception:
             pass
 
-    # Cache the miss so all 3 APIs aren't retried on every poll cycle.
+    # 4. airplanes.live /v2/reg/{reg} — fallback when hex-based lookup missed but
+    #    we know the registration (e.g. from fr24feed or the reg cache).
+    #    Queries by tail # instead of live hex, so it works even when the aircraft
+    #    isn't currently in airplanes.live's ADS-B feed.
+    reg = _cache_db_get_reg(hex_code)
+    if reg:
+        try:
+            r = requests.get(f"https://api.airplanes.live/v2/reg/{reg}", timeout=5)
+            if r.status_code == 200:
+                ac_list = r.json().get("ac", [])
+                if ac_list:
+                    ac    = ac_list[0]
+                    plane = _translate_type(ac.get("desc", "") or ac.get("t", "") or "")
+                    if plane:
+                        _cache_db_set_aircraft(hex_code, plane, "airplanes.live:reg", AIRCRAFT_CACHE_TTL)
+                        return plane, "airplanes.live:reg"
+        except Exception:
+            pass
+
+    # Cache the miss so all 4 APIs aren't retried on every poll cycle.
     # AIRCRAFT_MISS_TTL (5 min) keeps retries reasonable without hammering the
     # APIs for aircraft that genuinely have no type data yet (e.g. new deliveries).
-    with _cache_lock:
-        _aircraft_cache[hex_code] = ("", "miss", now)
-        _prune_cache(_aircraft_cache, AIRCRAFT_CACHE_TTL)
+    _cache_db_set_aircraft(hex_code, "", "miss", AIRCRAFT_MISS_TTL)
     return "", "miss"
 
 
@@ -1652,6 +2071,7 @@ def run_test_lookup(callsign, use_cache=True):
             # ── 1. adsbdb route (fresh) ────────────────────────────────────────
             _adsbdb_origin = _adsbdb_dest = ""
             _adsbdb_olat = _adsbdb_olon = _adsbdb_dlat = _adsbdb_dlon = None
+            _sky_origin = _sky_dest = ""   # initialised here; set in step 2 if OpenSky runs
             try:
                 r = requests.get(ADSBDB_CALLSIGN_URL.format(cs), timeout=5)
                 result["steps"]["adsbdb_route"] = {"status": r.status_code}
@@ -1742,14 +2162,39 @@ def run_test_lookup(callsign, use_cache=True):
                                         else:
                                             _log(f"{tag} [opensky] skipped — origin not local ({_sky_origin or '?'})")
                                 else:
-                                    _log(f"{tag} [opensky] no flight history in last 24h")
+                                    _log(f"{tag} [opensky] no flight history in last 6h")
                                     result["steps"]["opensky"]["no_data"] = True
                         except Exception as _e:
                             _log(f"{tag} [opensky] error: {_e}")
                             result["steps"]["opensky"] = {"error": str(_e)}
 
+            # ── 2b. Free-API consensus (mirrors get_route logic) ───────────────
+            if not (result["final_origin"] and result["final_destination"]):
+                if (_adsbdb_origin and _sky_origin
+                        and _adsbdb_origin == _sky_origin
+                        and _adsbdb_dest and _sky_dest
+                        and _adsbdb_dest == _sky_dest):
+                    _con_ok = _route_plausible(plane_lat, plane_lon,
+                                               _adsbdb_olat, _adsbdb_olon,
+                                               _adsbdb_dlat, _adsbdb_dlon)
+                    result["steps"]["consensus"] = {
+                        "origin": _adsbdb_origin, "destination": _adsbdb_dest,
+                        "plausible": _con_ok,
+                    }
+                    if _con_ok:
+                        result["final_origin"]      = _adsbdb_origin
+                        result["final_destination"] = _adsbdb_dest
+                        result["route_source"]      = "adsbdb+opensky"
+                        _route_resolved             = True
+                        _log(f"{tag} [consensus] {_adsbdb_origin}->{_adsbdb_dest} — free APIs agree")
+                    else:
+                        _log(f"{tag} [consensus] {_adsbdb_origin}->{_adsbdb_dest} — agreed but implausible")
+
             # ── 3. AirLabs (fresh, counts quota, respects backoff + kill-switch) ─
-            if not (result["final_origin"] and result["final_destination"]) and AIRLABS_API_KEY and cs:
+            _test_skip_paid = _skip_paid_apis(cs)
+            if _test_skip_paid:
+                _log(f"{tag} [airlabs] skipping — N-number or military callsign")
+            if not (result["final_origin"] and result["final_destination"]) and AIRLABS_API_KEY and cs and not _test_skip_paid:
                 if _in_backoff("airlabs"):
                     _log(f"{tag} [airlabs] in backoff — skipping")
                     result["steps"]["airlabs"] = {"skipped": "backoff"}
@@ -1787,18 +2232,18 @@ def run_test_lookup(callsign, use_cache=True):
                             })
                             _log(f"{tag} [airlabs] route: {_al_origin or '?'}->{_al_dest or '?'} [call #{_al_count}]")
                             if _al_origin or _al_dest:
-                                _al_origin_local = _al_origin.upper() in _LOCAL_AIRPORTS if _al_origin else False
                                 _al_ok = _route_plausible(plane_lat, plane_lon,
                                                            _al_olat, _al_olon, _al_dlat, _al_dlon)
-                                result["steps"]["airlabs"]["origin_local"] = _al_origin_local
+                                result["steps"]["airlabs"]["origin_local"] = (
+                                    _al_origin.upper() in _LOCAL_AIRPORTS if _al_origin else False
+                                )
                                 result["steps"]["airlabs"]["plausible"] = _al_ok
-                                if _al_origin_local and _al_ok:
+                                # Paid APIs trust any plausible route — no origin-local restriction.
+                                if _al_ok:
                                     result["final_origin"]      = result["final_origin"] or _al_origin
                                     result["final_destination"] = result["final_destination"] or _al_dest
                                     result["route_source"]      = "airlabs"
                                     _route_resolved             = True
-                                elif not _al_origin_local:
-                                    _log(f"{tag} [airlabs] skipped — origin not local ({_al_origin or '?'})")
                                 else:
                                     _log(f"{tag} [airlabs] route implausible — rejected")
                         else:
@@ -1809,7 +2254,9 @@ def run_test_lookup(callsign, use_cache=True):
                         result["steps"]["airlabs"] = {"error": str(_e)}
 
             # ── 4. AeroAPI (fresh, counts spend, respects backoff + kill-switch) ─
-            if not (result["final_origin"] and result["final_destination"]) and FLIGHTAWARE_API_KEY and cs:
+            if _test_skip_paid:
+                result["steps"]["aeroapi"] = {"skipped": "n_number_or_military"}
+            if not (result["final_origin"] and result["final_destination"]) and FLIGHTAWARE_API_KEY and cs and not _test_skip_paid:
                 if _in_backoff("aeroapi"):
                     _log(f"{tag} [aeroapi] in backoff — skipping")
                     result["steps"]["aeroapi"] = {"skipped": "backoff"}
@@ -1850,18 +2297,18 @@ def run_test_lookup(callsign, use_cache=True):
                                 })
                                 _log(f"{tag} [aeroapi] route: {_fa_origin or '?'}->{_fa_dest or '?'}")
                                 if _fa_origin or _fa_dest:
-                                    _fa_origin_local = _fa_origin.upper() in _LOCAL_AIRPORTS if _fa_origin else False
                                     _fa_ok = _route_plausible(plane_lat, plane_lon,
                                                                _fa_olat, _fa_olon, _fa_dlat, _fa_dlon)
-                                    result["steps"]["aeroapi"]["origin_local"] = _fa_origin_local
+                                    result["steps"]["aeroapi"]["origin_local"] = (
+                                        _fa_origin.upper() in _LOCAL_AIRPORTS if _fa_origin else False
+                                    )
                                     result["steps"]["aeroapi"]["plausible"] = _fa_ok
-                                    if _fa_origin_local and _fa_ok:
+                                    # Paid APIs trust any plausible route — no origin-local restriction.
+                                    if _fa_ok:
                                         result["final_origin"]      = result["final_origin"] or _fa_origin
                                         result["final_destination"] = result["final_destination"] or _fa_dest
                                         result["route_source"]      = "aeroapi"
                                         _route_resolved             = True
-                                    elif not _fa_origin_local:
-                                        _log(f"{tag} [aeroapi] skipped — origin not local ({_fa_origin or '?'})")
                                     else:
                                         _log(f"{tag} [aeroapi] route implausible — rejected")
                             else:
@@ -1906,6 +2353,14 @@ def run_test_lookup(callsign, use_cache=True):
                 result["steps"]["opensky_meta"] = {"status": r.status_code}
                 if r.status_code == 200:
                     _odata = r.json()
+                    # Extract registration — permanent mapping, cache it even in
+                    # test mode so future real flights benefit from this lookup.
+                    _ometa_reg = (_odata.get("registration") or "").strip().upper()
+                    if _ometa_reg:
+                        _cache_db_set_reg(hex_code, _ometa_reg)
+                        if not result["tail"]:
+                            result["tail"] = _ometa_reg
+                        result["steps"]["opensky_meta"]["registration"] = _ometa_reg
                     _otype = (_odata.get("model") or _odata.get("typecode") or "").strip()
                     result["steps"]["opensky_meta"]["type"] = _otype
                     if _otype:
@@ -2001,6 +2456,17 @@ class Overhead:
             flights = sorted(in_zone_flights, key=distance_from_flight_to_home)
 
             prev_was_live = False
+            # Determine if a test lookup is active — if so, its callsign must
+            # not be counted in stats even if the same aircraft happens to be
+            # physically in the zone at the same time.
+            _test_cs = ""
+            try:
+                _td_check = json.loads(_pathlib.Path(TEST_DISPLAY_FILE).read_text())
+                if _td_check.get("expires", 0) > int(time.time()):
+                    _test_cs = (_td_check.get("callsign") or "").strip().upper()
+            except Exception:
+                pass
+
             for i, flight in enumerate(flights[:MAX_FLIGHT_LOOKUP]):
                 # Only rate-limit when the *previous* flight made a live API call.
                 # Cached lookups need no courtesy delay.
@@ -2027,8 +2493,11 @@ class Overhead:
                 plane    = plane    if plane.upper()    not in BLANK_FIELDS else ""
                 callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
 
-                _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'")
-                _record_flight_stat(callsign, plane, origin, destination)
+                reg        = flight.registration or _cache_db_get_reg(flight.hex_code)
+                reg_suffix = f" {reg}" if reg else ""
+                _log(f"[route:{route_src}] [type:{type_src}] {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
+                if callsign != _test_cs:
+                    _record_flight_stat(callsign, plane, origin, destination, reg, route_src)
 
                 prev_was_live = _is_live(route_src) or _is_live(type_src)
 
@@ -2079,12 +2548,8 @@ class Overhead:
                 except Exception:
                     pass
 
-                # Persist caches only when in-zone flights were processed.
-                # Route and type lookups only happen for in-zone flights, so
-                # an empty result means the caches are unchanged from the last
-                # write — skipping the write reduces unnecessary SD card I/O.
-                if data:
-                    _save_caches()
+                # Cache writes happen immediately in each SQLite cache helper —
+                # no periodic flush needed.
 
                 with self._lock:
                     self._data = data
