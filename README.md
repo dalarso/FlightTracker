@@ -175,13 +175,13 @@ Full CRUD for the override rule table:
 ```python
 # ── Location ────────────────────────────────────────────────────────────────
 ZONE_HOME = {
-    "tl_y": 36.158990,   # Top-Left Latitude
-    "tl_x": -115.315170, # Top-Left Longitude
-    "br_y": 36.114720,   # Bottom-Right Latitude
-    "br_x": -115.260950  # Bottom-Right Longitude
+    "tl_y": 0.000000,   # Top-Left Latitude
+    "tl_x": 0.000000,   # Top-Left Longitude
+    "br_y": 0.000000,   # Bottom-Right Latitude
+    "br_x": 0.000000,   # Bottom-Right Longitude
 }
-LOCATION_HOME = [36.14326, -115.30785, 0.87173]  # lat, lon, alt (km)
-RECEIVER_HOST = "10.0.2.49"  # IP of your dump1090 / fr24feed host
+LOCATION_HOME = [0.000000, 0.000000, 0.000]  # lat, lon, alt (km)
+RECEIVER_HOST = "localhost"  # IP of your dump1090 / fr24feed host
 
 # ── Display ──────────────────────────────────────────────────────────────────
 MIN_ALTITUDE    = 100    # feet — filters out ground traffic
@@ -189,24 +189,24 @@ MAX_ALTITUDE    = 15000  # feet — filters out high-altitude overflights
 BRIGHTNESS      = 80     # 0–100
 GPIO_SLOWDOWN   = 2      # 0–4, increase if flickering
 HAT_PWM_ENABLED = True   # requires solder bridge on HAT
-JOURNEY_CODE_SELECTED = "LAS"   # local airport shown in bold
+JOURNEY_CODE_SELECTED = "XXX"   # your nearest airport IATA code
 JOURNEY_BLANK_FILLER  = " ? "   # placeholder for unknown airports
 
 # ── Weather ──────────────────────────────────────────────────────────────────
-WEATHER_LOCATION    = "spring%20valley,nv,us"
+WEATHER_LOCATION    = "your%20city,state,us"
 OPENWEATHER_API_KEY = ""        # optional — free tier at openweathermap.org
 TEMPERATURE_UNITS   = "imperial"
 
 # ── Free APIs ────────────────────────────────────────────────────────────────
 OPENSKY_CLIENT_ID     = ""  # opensky-network.org
 OPENSKY_CLIENT_SECRET = ""
-LOCAL_AIRPORTS        = "LAS,VGT,HSH"  # comma-separated — controls route trust
+LOCAL_AIRPORTS        = "XXX,YYY"  # comma-separated IATA codes — controls route trust
 
 # ── AirLabs (freemium — 1,000 calls/month per key) ──────────────────────────
 AIRLABS_API_KEY        = ""   # primary key — airlabs.co
 AIRLABS_API_KEY_2      = ""   # secondary key (optional) — same service, separate quota
 AIRLABS2_MONTHLY_LIMIT = 1000
-AIRLABS2_RESET_DAY     = 9    # day of month your billing period resets
+AIRLABS2_RESET_DAY     = 1    # day of month your billing period resets
 
 # ── FlightAware AeroAPI (paid last resort) ───────────────────────────────────
 FLIGHTAWARE_API_KEY = ""   # aeroapi.flightaware.com
