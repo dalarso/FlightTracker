@@ -1,5 +1,7 @@
 # ✈ FlightTracker — RGB Matrix Flight Display with Intelligent Route Intelligence
 
+> **⚠️ Disclaimer: I am not a developer.** This project was built entirely using [Claude Code](https://claude.ai/code) (Anthropic's AI coding assistant). It works well for my specific setup, but it has not been formally tested, audited, or hardened for general use. **Use at your own risk.** Pull requests and issue reports are welcome, but I may not be able to diagnose or fix problems beyond my own environment.
+
 A heavily extended fork of [Colin Waddell's](https://blog.colinwaddell.com/flight-tracker/) RGB Matrix Flight Tracker. Colin built the original display hardware integration, the animation engine, the ADS-B receiver polling, and the core concept of showing overhead flights on an LED matrix. All of that remains the heart of this project.
 
 **Original project:** [github.com/ColinWaddell/FlightTracker](https://github.com/ColinWaddell/FlightTracker)  
@@ -12,6 +14,10 @@ A heavily extended fork of [Colin Waddell's](https://blog.colinwaddell.com/fligh
 ## What this fork adds
 
 This version takes the original display concept and builds a full flight intelligence stack around it — a multi-tier API routing engine, a SQLite-backed data layer, and a web-based management UI. The goal is to show not just *what* is overhead, but *where it came from and where it's going* — reliably, efficiently, and with minimal API spend.
+
+### My specific use case
+
+I live in Las Vegas directly under a departure corridor from LAS (Harry Reid International). Roughly **90% of the traffic I see is a commercial departure out of LAS** — scheduled airline flights with filed flight plans. The routing logic reflects this: free historical databases are trusted conservatively (they can't know today's specific flight assignment), while real-time paid APIs are used as the authoritative source for commercial routes. If your local traffic skews toward GA aircraft or you're not near a major hub, you may find the free-API trust rules are more permissive than you need — or less. The `LOCAL_AIRPORTS` config and the override rules table give you the main levers to tune this.
 
 ---
 
@@ -85,6 +91,20 @@ Paid real-time route lookup, capped and tracked monthly. Only called when all fr
 
 ### Paid-Miss Cache
 When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppression entry is written. Prevents repeated quota burns on GA or obscure flights that will never have a filed route.
+
+### Cache TTL Reference
+
+| Cache type | TTL | Notes |
+|---|---|---|
+| Resolved commercial route | 7 days | Set by `RESOLVED_ROUTE_TTL` — once origin+destination confirmed by any trusted source |
+| AirLabs / AeroAPI result | 7 days (commercial) / 1 hour (GA) | Same TTL as resolved route when committed |
+| adsbdb result | 1 hour | Cached but not committed for commercial flights |
+| OpenSky result | 1 hour | Cached but not committed for commercial flights |
+| Paid-miss (no route found) | 2 hours | Suppresses redundant paid API calls for unresolvable callsigns |
+| Aircraft type / registration | Indefinite | Hardware doesn't change — permanent mapping |
+| AirLabs 402 backoff | Until billing period resets | Clears automatically on reset day; no restart needed |
+
+TTLs can be overridden in `config.py` — see `RESOLVED_ROUTE_TTL` and `GA_ROUTE_TTL`.
 
 ### Cross-Check & Accuracy Tracking
 For commercial flights where adsbdb had a route, the result is compared against what the paid APIs returned and stored in the `free_api_checks` table. The web UI shows a running match-rate percentage — useful for understanding how reliable the free historical DB is for your local traffic.
