@@ -1513,25 +1513,44 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     now = int(time.time())
     _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)  # evaluate once — two callers below
 
+    # Override display/type fields — populated if any override rule matches;
+    # returned at the end so partial overrides (missing endpoints) still carry
+    # display name and aircraft type through the free-API fill-in path.
+    _ov_plane   = ""
+    _ov_display = ""
+    _override_partial = False  # True → skip paid APIs but still try free APIs
+
     # ── 0. Override rules — bypass ALL API lookups for known callsigns ─────────
     # Rules are defined in ft_overrides.json and managed via the web UI.
     # Patterns are case-insensitive; * is a wildcard (e.g. JANET* matches any
-    # Janet flight).  An override returns immediately — no adsbdb, OpenSky,
-    # AirLabs, or FlightAware calls are made.
+    # Janet flight).
+    # • Full override (both origin + destination set): return immediately.
+    # • Partial override (one or both endpoints missing): seed what we have,
+    #   continue through the free APIs (adsbdb, OpenSky) to fill blanks, but
+    #   skip paid APIs (AirLabs, AeroAPI) — overrides are typically GA/special
+    #   flights that paid APIs won't have on record anyway.
     _ov = _match_override(callsign)
     if _ov:
-        ov_origin   = (_ov.get("origin")   or "").strip().upper()
+        ov_origin   = (_ov.get("origin")      or "").strip().upper()
         ov_dest     = (_ov.get("destination") or "").strip().upper()
-        ov_plane    = (_ov.get("plane")    or "").strip()  # type stored in stats (empty = use API result)
-        ov_display  = (_ov.get("display")  or "").strip()  # label shown on flight display only
+        _ov_plane   = (_ov.get("plane")       or "").strip()
+        _ov_display = (_ov.get("display")     or "").strip()
         _log(
             f"[override] {callsign} matched '{_ov['pattern']}'"
             f" → {ov_origin or '?'}->{ov_dest or '?'}"
-            + (f"  display='{ov_display}'" if ov_display else "")
-            + (f"  type='{ov_plane}'" if ov_plane else "")
+            + (f"  display='{_ov_display}'" if _ov_display else "")
+            + (f"  type='{_ov_plane}'" if _ov_plane else "")
             + (f"  ({_ov['note']})" if _ov.get("note") else "")
         )
-        return ov_origin, ov_dest, "override", ov_plane, ov_display
+        if ov_origin and ov_dest:
+            # Both endpoints known — no API calls needed.
+            return ov_origin, ov_dest, "override", _ov_plane, _ov_display
+        # Partial — seed available endpoints and fall through to free APIs.
+        origin      = ov_origin
+        destination = ov_dest
+        source      = "override" if (ov_origin or ov_dest) else ""
+        _override_partial = True
+        _log(f"[override] {callsign}: partial override — polling free APIs to fill missing endpoint(s)")
 
     # ── 0.5. Resolved-route cache (scheduled airlines only) ───────────────────
     # When we successfully resolve both endpoints for a scheduled airline
@@ -1730,7 +1749,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     _need_airlabs = not (origin and destination)
     # N-numbers, military, and callsigns that have hit both paid APIs with empty results
     # recently are all skipped — compute once up front to avoid re-evaluating inside guards.
-    _skip_paid = _skip_paid_apis(callsign) or (
+    _skip_paid = _skip_paid_apis(callsign) or _override_partial or (
         bool(callsign) and _cache_db_check_paid_miss(callsign)
     )
     al_origin = al_dest = ""
@@ -2083,7 +2102,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                             int(time.time()) + ROUTE_TTL_SCHEDULED,
                             source=source.removesuffix(":cached"))
 
-    return origin, destination, source or "none", "", ""  # 4th: override plane  5th: override display
+    return origin, destination, source or "none", _ov_plane, _ov_display
 
 
 def _try_opensky_reg(hex_code: str) -> None:
