@@ -661,6 +661,19 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
         <h3 id="period-title" style="flex-shrink:0">90-Day Summary</h3>
         <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <button onclick="quickPeriod('yesterday')"
+            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
+            Yesterday
+          </button>
+          <button onclick="quickPeriod('7d')"
+            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
+            7 Days
+          </button>
+          <button onclick="quickPeriod('30d')"
+            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
+            30 Days
+          </button>
+          <span style="color:var(--border);font-size:12px">|</span>
           <input type="date" id="period-from"
             style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;cursor:pointer"
             onchange="onPeriodChange()">
@@ -674,7 +687,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           </button>
           <button onclick="resetStatsPeriod()"
             style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
-            Reset
+            90 Days
           </button>
         </div>
       </div>
@@ -1578,6 +1591,32 @@ async function resetStatsPeriod() {
   _statsPeriodDirty = false;
   try {
     const d = await fetch('/api/stats?days=90').then(r => r.json());
+    renderRecentFlights(d);
+    renderPeriodStats(d);
+  } catch(e) {}
+}
+
+async function quickPeriod(preset) {
+  const today = _serverToday || _isoToday();
+  let from, to;
+  if (preset === 'yesterday') {
+    from = to = _isoOffset(-1);
+  } else if (preset === '7d') {
+    from = _isoOffset(-6);
+    to   = today;
+  } else if (preset === '30d') {
+    from = _isoOffset(-29);
+    to   = today;
+  } else {
+    return;
+  }
+  document.getElementById('period-from').value = from;
+  document.getElementById('period-to').value   = to;
+  document.getElementById('period-apply-btn').style.display = 'none';
+  _statsPeriodDirty = false;
+  try {
+    const d = await fetch(`/api/stats?from=${from}&to=${to}`).then(r => r.json());
+    if (d.error) return;
     renderRecentFlights(d);
     renderPeriodStats(d);
   } catch(e) {}
