@@ -35,11 +35,25 @@ BASE_DIR = Path(__file__).parent.parent
 CONFIG_PATH      = BASE_DIR / "config.py"
 PAUSE_FLAG       = Path("/tmp/ft_paused")
 NIGHT_FLAG       = Path("/tmp/ft_night")
-APIS_DISABLED_FLAG = Path("/tmp/ft_apis_disabled")
+APIS_DISABLED_FLAG    = Path("/tmp/ft_apis_disabled")
+ADSBDB_DISABLED_FLAG  = Path("/tmp/ft_adsbdb_disabled")
+OPENSKY_DISABLED_FLAG = Path("/tmp/ft_opensky_disabled")
+AIRLABS_DISABLED_FLAG  = Path("/tmp/ft_airlabs_disabled")
+AIRLABS2_DISABLED_FLAG = Path("/tmp/ft_airlabs2_disabled")
+AEROAPI_DISABLED_FLAG  = Path("/tmp/ft_aeroapi_disabled")
+
+_API_FLAGS: dict[str, Path] = {
+    "adsbdb":      ADSBDB_DISABLED_FLAG,
+    "opensky":     OPENSKY_DISABLED_FLAG,
+    "airlabs":     AIRLABS_DISABLED_FLAG,
+    "airlabs2":    AIRLABS2_DISABLED_FLAG,
+    "flightaware": AEROAPI_DISABLED_FLAG,
+}
 FLIGHT_DATA_FILE = Path("/tmp/ft_data.json")
 
-AIRLABS_USAGE_FILE = BASE_DIR / "airlabs_usage.json"
-AEROAPI_USAGE_FILE = BASE_DIR / "aeroapi_usage.json"
+AIRLABS_USAGE_FILE  = BASE_DIR / "airlabs_usage.json"
+AIRLABS2_USAGE_FILE = BASE_DIR / "airlabs2_usage.json"
+AEROAPI_USAGE_FILE  = BASE_DIR / "aeroapi_usage.json"
 OVERRIDES_FILE     = BASE_DIR / "ft_overrides.json"
 DB_FILE            = BASE_DIR / "ft_flights.db"
 
@@ -57,6 +71,7 @@ AIRLINE_NAMES: dict[str, str] = {
     "ROU": "Air Canada Rouge",
     "LXJ": "Flexjet",             "JRE": "flyExclusive",
     "JSX": "JSX",                 "TWY": "Solarius Aviation",
+    "JAN": "Janet Airlines",
     "FDX": "FedEx Express",       "UPS": "UPS Airlines",
     "GTI": "Atlas Air",           "ABX": "ABX Air",
     "ASN": "Amazon Air",          "PAC": "Polar Air Cargo",
@@ -104,9 +119,20 @@ _KNOWN_KEYS = {
     "ZONE_HOME", "LOCATION_HOME", "WEATHER_LOCATION", "OPENWEATHER_API_KEY",
     "TEMPERATURE_UNITS", "MIN_ALTITUDE", "MAX_ALTITUDE", "BRIGHTNESS",
     "GPIO_SLOWDOWN", "NIGHT_BRIGHTNESS", "TIMEZONE", "JOURNEY_CODE_SELECTED",
-    "JOURNEY_BLANK_FILLER", "HAT_PWM_ENABLED", "RECEIVER_HOST", "LOCAL_AIRPORT",
+    "JOURNEY_BLANK_FILLER", "HAT_PWM_ENABLED", "RECEIVER_HOST", "LOCAL_AIRPORTS",
+    "LOCAL_AIRPORT",  # deprecated single-value key — kept here so it's NOT written as an "extra key" when migrating old configs
     "OPENSKY_CLIENT_ID", "OPENSKY_CLIENT_SECRET", "FLIGHTAWARE_API_KEY",
-    "AIRLABS_API_KEY",
+    "AIRLABS_API_KEY", "AIRLABS_API_KEY_2",
+    # Display extras
+    "LOADING_LED_ENABLED", "LOADING_LED_GPIO_PIN", "RAINFALL_ENABLED",
+    # Billing tracking
+    "FEEDER_MONTHLY_CREDIT",
+    "AIRLABS_MONTHLY_LIMIT", "AIRLABS_RESET_DAY",
+    "AIRLABS2_MONTHLY_LIMIT", "AIRLABS2_RESET_DAY",
+    "AEROAPI_RESET_DAY",
+    # Cache TTLs
+    "ADSBDB_CACHE_TTL", "OPENSKY_CACHE_TTL",
+    "ROUTE_TTL_SCHEDULED", "ROUTE_TTL_DEFAULT", "ROUTE_MISS_TTL", "ROUTE_PAID_MISS_TTL",
 }
 
 # Secret/key fields that must never be overwritten with an empty string.
@@ -115,7 +141,7 @@ _KNOWN_KEYS = {
 # wipe the real key stored on disk.
 _SENSITIVE_KEYS = {
     "OPENWEATHER_API_KEY", "OPENSKY_CLIENT_SECRET",
-    "FLIGHTAWARE_API_KEY", "AIRLABS_API_KEY",
+    "FLIGHTAWARE_API_KEY", "AIRLABS_API_KEY", "AIRLABS_API_KEY_2",
 }
 
 
@@ -191,14 +217,30 @@ HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
 
 RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST", "localhost")))}
 
-LOCAL_AIRPORT = {repr(str(existing.get("LOCAL_AIRPORT", "")))}
+LOCAL_AIRPORTS = {repr(str(existing.get("LOCAL_AIRPORTS", existing.get("LOCAL_AIRPORT", ""))))}
 OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID", "")))}
 OPENSKY_CLIENT_SECRET = {repr(str(existing.get("OPENSKY_CLIENT_SECRET", "")))}
 FLIGHTAWARE_API_KEY = {repr(str(existing.get("FLIGHTAWARE_API_KEY", "")))}
 AIRLABS_API_KEY = {repr(str(existing.get("AIRLABS_API_KEY", "")))}
+AIRLABS_API_KEY_2 = {repr(str(existing.get("AIRLABS_API_KEY_2", "")))}
 TIMEZONE = {repr(str(existing.get("TIMEZONE", "America/Los_Angeles")))}
+LOADING_LED_ENABLED = {bool(existing.get("LOADING_LED_ENABLED", False))}
+LOADING_LED_GPIO_PIN = {int(existing.get("LOADING_LED_GPIO_PIN", 25))}
+RAINFALL_ENABLED = {bool(existing.get("RAINFALL_ENABLED", False))}
+FEEDER_MONTHLY_CREDIT = {float(existing.get("FEEDER_MONTHLY_CREDIT", 10.00))}
+AIRLABS_MONTHLY_LIMIT = {int(existing.get("AIRLABS_MONTHLY_LIMIT", 1000))}
+AIRLABS_RESET_DAY = {int(existing.get("AIRLABS_RESET_DAY", 9))}
+AIRLABS2_MONTHLY_LIMIT = {int(existing.get("AIRLABS2_MONTHLY_LIMIT", 1000))}
+AIRLABS2_RESET_DAY = {int(existing.get("AIRLABS2_RESET_DAY", 9))}
+AEROAPI_RESET_DAY = {int(existing.get("AEROAPI_RESET_DAY", 1))}
+ADSBDB_CACHE_TTL = {int(existing.get("ADSBDB_CACHE_TTL", 3600))}
+OPENSKY_CACHE_TTL = {int(existing.get("OPENSKY_CACHE_TTL", 3600))}
+ROUTE_TTL_SCHEDULED = {int(existing.get("ROUTE_TTL_SCHEDULED", 604800))}
+ROUTE_TTL_DEFAULT = {int(existing.get("ROUTE_TTL_DEFAULT", 3600))}
+ROUTE_MISS_TTL = {int(existing.get("ROUTE_MISS_TTL", 300))}
+ROUTE_PAID_MISS_TTL = {int(existing.get("ROUTE_PAID_MISS_TTL", 7200))}
 """
-    # Preserve any extra keys (e.g. LOADING_LED_ENABLED) not in the template
+    # Preserve any extra keys not managed by this template (e.g. custom user keys)
     for k, v in existing.items():
         if k not in _KNOWN_KEYS and not k.startswith("_"):
             content += f"{k} = {repr(v)}\n"
@@ -264,7 +306,29 @@ def display_night():
 
 @app.route("/api/apis/toggle", methods=["POST"])
 def apis_toggle():
-    """Toggle the combined kill-switch for all limited/paid APIs (AirLabs + FlightAware)."""
+    """Toggle an API on or off.
+
+    Body: { "api": "adsbdb"|"opensky"|"airlabs"|"flightaware" }
+    Omit body (or send {}) to toggle the combined paid-API kill-switch (legacy).
+    """
+    data = request.json or {}
+    api  = data.get("api", "").lower()
+
+    if api in _API_FLAGS:
+        flag = _API_FLAGS[api]
+        if flag.exists():
+            flag.unlink()
+            _log(f"[web] {api} enabled")
+        else:
+            flag.touch()
+            _log(f"[web] {api} disabled")
+        return jsonify({
+            "ok":      True,
+            "api":     api,
+            "enabled": not flag.exists(),
+        })
+
+    # Legacy: no api → toggle the combined kill-switch
     if APIS_DISABLED_FLAG.exists():
         APIS_DISABLED_FLAG.unlink()
         _log("[web] limited APIs enabled")
@@ -272,6 +336,84 @@ def apis_toggle():
         APIS_DISABLED_FLAG.touch()
         _log("[web] limited APIs disabled")
     return jsonify({"ok": True, "apis_disabled": APIS_DISABLED_FLAG.exists()})
+
+
+@app.route("/api/cache/clear", methods=["POST"])
+def cache_clear():
+    """Delete cached route entries for one API (or all).
+
+    Body: { "api": "adsbdb"|"opensky"|"airlabs"|"flightaware"|"resolved"|"all" }
+    Returns: { "ok": true, "deleted": N }
+    """
+    data = request.json or {}
+    api  = (data.get("api") or "").lower()
+
+    # Cache keys for airlabs1 are 'airlabs:{cs}'; for airlabs2 'airlabs2:{cs}'.
+    # Source-based LIKE must distinguish them — 'airlabs' is a substring of 'airlabs2'
+    # so airlabs clear uses NOT LIKE '%airlabs2%' to avoid over-clearing.
+    _source_map = {
+        "adsbdb":      "DELETE FROM cache WHERE cache_type='route' AND source LIKE '%adsbdb%'",
+        "opensky":     "DELETE FROM cache WHERE cache_type='route' AND source LIKE '%opensky%'",
+        "airlabs":     "DELETE FROM cache WHERE cache_type='route' AND "
+                       "(key LIKE 'airlabs:%' OR (source LIKE '%airlabs%' AND source NOT LIKE '%airlabs2%'))",
+        "airlabs2":    "DELETE FROM cache WHERE cache_type='route' AND "
+                       "(key LIKE 'airlabs2:%' OR source LIKE '%airlabs2%')",
+        "flightaware": "DELETE FROM cache WHERE cache_type='aeroapi'",
+        "resolved":    "DELETE FROM cache WHERE cache_type='resolved'",
+        "all":         "DELETE FROM cache WHERE cache_type IN ('route','aeroapi','resolved')",
+    }
+    if api not in _source_map:
+        return jsonify({"error": f"Unknown api '{api}'. Valid: {', '.join(_source_map)}"}), 400
+
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        deleted = conn.execute(_source_map[api]).rowcount
+        conn.commit()
+        conn.close()
+        _log(f"[web] cache cleared for '{api}': {deleted} entries removed")
+        return jsonify({"ok": True, "deleted": deleted})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/cache/stats", methods=["GET"])
+def cache_stats():
+    """Return the count of live (non-expired) cache entries per API.
+
+    Composite-source entries (e.g. 'adsbdb+opensky') are counted in every
+    participating API bucket so the totals reflect true cache coverage.
+    """
+    now = int(time.time())
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT cache_type, source, COUNT(*) cnt FROM cache WHERE expires_at>? GROUP BY cache_type, source",
+            (now,)
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    counts = {"adsbdb": 0, "opensky": 0, "airlabs": 0, "airlabs2": 0, "flightaware": 0, "resolved": 0}
+    for r in rows:
+        ct, src = r["cache_type"], r["source"] or ""
+        cnt = r["cnt"]
+        if ct == "aeroapi":
+            counts["flightaware"] += cnt
+        elif ct == "resolved":
+            counts["resolved"] += cnt
+        elif ct == "route":
+            # Split on '+' for exact component matching — avoids 'airlabs' matching 'airlabs2'
+            parts = set(src.split("+"))
+            if "adsbdb"   in parts: counts["adsbdb"]   += cnt
+            if "opensky"  in parts: counts["opensky"]  += cnt
+            if "airlabs"  in parts: counts["airlabs"]  += cnt
+            if "airlabs2" in parts: counts["airlabs2"] += cnt
+    return jsonify(counts)
 
 
 @app.route("/api/flights", methods=["GET"])
@@ -745,6 +887,66 @@ def stats_search():
     })
 
 
+@app.route("/api/free-api-accuracy", methods=["GET"])
+def free_api_accuracy():
+    """Accuracy report: adsbdb (free) vs. paid-API route cross-checks."""
+    if not DB_FILE.exists():
+        return jsonify({"error": "Database unavailable"}), 503
+    conn = None
+    try:
+        today      = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+        thirty_ago = (datetime.now(_PACIFIC) - timedelta(days=29)).strftime("%Y-%m-%d")
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.row_factory = sqlite3.Row
+
+        def _row_stats(row):
+            total     = row["total"]     or 0
+            matches   = int(row["matches"]   or 0)
+            mismatches= int(row["mismatches"]or 0)
+            pct       = round(matches / total * 100, 1) if total else None
+            return {"total": total, "matches": matches, "mismatches": mismatches, "pct": pct}
+
+        # ── Today ──────────────────────────────────────────────────────────
+        t = conn.execute(
+            """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
+               FROM free_api_checks WHERE date=?""", (today,)
+        ).fetchone()
+
+        # ── 30-day ─────────────────────────────────────────────────────────
+        t30 = conn.execute(
+            """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
+               FROM free_api_checks WHERE date>=?""", (thirty_ago,)
+        ).fetchone()
+
+        # ── Last 10 mismatches ──────────────────────────────────────────────
+        mm = conn.execute(
+            """SELECT seen_at, callsign, free_route, paid_route
+               FROM free_api_checks WHERE matched=0
+               ORDER BY id DESC LIMIT 10"""
+        ).fetchall()
+
+        # ── Daily breakdown ─────────────────────────────────────────────────
+        daily = conn.execute(
+            """SELECT date, COUNT(*) total, SUM(matched) matches
+               FROM free_api_checks WHERE date>=?
+               GROUP BY date ORDER BY date""", (thirty_ago,)
+        ).fetchall()
+
+        return jsonify({
+            "today":           _row_stats(t),
+            "thirty_day":      _row_stats(t30),
+            "last_mismatches": [dict(r) for r in mm],
+            "daily":           [{"date": r["date"], "total": r["total"],
+                                 "matches": r["matches"] or 0} for r in daily],
+        })
+    except Exception as e:
+        _log(f"[server] free-api-accuracy error: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.route("/api/display", methods=["GET"])
 def display_status():
     try:
@@ -819,7 +1021,7 @@ def service_start():
 
 def _billing_period_start(reset_day):
     """Return the current billing period start as YYYY-MM-DD."""
-    today = datetime.now()
+    today = datetime.now(_PACIFIC)
     if today.day >= reset_day:
         return today.replace(day=reset_day).strftime("%Y-%m-%d")
     first_of_month = today.replace(day=1)
@@ -831,7 +1033,7 @@ def _billing_period_start(reset_day):
 
 def _billing_period_end(reset_day):
     """Return the last day of the current billing period as YYYY-MM-DD."""
-    today = datetime.now()
+    today = datetime.now(_PACIFIC)
     # Determine year/month of the next reset date
     if today.day >= reset_day:
         y = today.year + 1 if today.month == 12 else today.year
@@ -859,33 +1061,102 @@ def _read_usage_file(path, reset_day):
 @app.route("/api/usage", methods=["GET"])
 def api_usage():
     """Return current billing-period API usage and estimated costs."""
-    al  = _read_usage_file(AIRLABS_USAGE_FILE, AIRLABS_RESET_DAY)
-    fa  = _read_usage_file(AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
+    try:
+        _cfg = read_config()
+    except Exception:
+        _cfg = {}
+    _al_limit      = int(_cfg.get("AIRLABS_MONTHLY_LIMIT",  AIRLABS_MONTHLY_LIMIT))
+    _al_reset_day  = int(_cfg.get("AIRLABS_RESET_DAY",      AIRLABS_RESET_DAY))
+    _al2_limit     = int(_cfg.get("AIRLABS2_MONTHLY_LIMIT", 1000))
+    _al2_reset_day = int(_cfg.get("AIRLABS2_RESET_DAY",     9))
+    _fa_reset_day  = int(_cfg.get("AEROAPI_RESET_DAY",      AEROAPI_RESET_DAY))
+    _fa_credit     = float(_cfg.get("FEEDER_MONTHLY_CREDIT", FEEDER_MONTHLY_CREDIT))
+
+    al   = _read_usage_file(AIRLABS_USAGE_FILE,  _al_reset_day)
+    al2  = _read_usage_file(AIRLABS2_USAGE_FILE, _al2_reset_day)
+    fa   = _read_usage_file(AEROAPI_USAGE_FILE,  _fa_reset_day)
     al_calls  = int(al.get("value", 0))
+    al2_calls = int(al2.get("value", 0))
     fa_spend  = round(float(fa.get("value", 0.0)), 4)
     fa_calls  = round(fa_spend / AEROAPI_COST_PER_CALL)
 
     return jsonify({
         "airlabs": {
             "calls":        al_calls,
-            "limit":        AIRLABS_MONTHLY_LIMIT,
-            "remaining":    max(0, AIRLABS_MONTHLY_LIMIT - al_calls),
-            "pct_used":     round(al_calls / AIRLABS_MONTHLY_LIMIT * 100, 1),
+            "limit":        _al_limit,
+            "remaining":    max(0, _al_limit - al_calls),
+            "pct_used":     round(al_calls / _al_limit * 100, 1) if _al_limit else 0,
             "period_start": al.get("period_start"),
-            "period_end":   _billing_period_end(AIRLABS_RESET_DAY),
-            "resets_day":   AIRLABS_RESET_DAY,
+            "period_end":   _billing_period_end(_al_reset_day),
+            "resets_day":   _al_reset_day,
+        },
+        "airlabs2": {
+            "calls":        al2_calls,
+            "limit":        _al2_limit,
+            "remaining":    max(0, _al2_limit - al2_calls),
+            "pct_used":     round(al2_calls / _al2_limit * 100, 1) if _al2_limit else 0,
+            "period_start": al2.get("period_start"),
+            "period_end":   _billing_period_end(_al2_reset_day),
+            "resets_day":   _al2_reset_day,
         },
         "flightaware": {
             "calls":          int(fa_calls),
             "est_spend":      fa_spend,
-            "monthly_credit": FEEDER_MONTHLY_CREDIT,
-            "remaining":      round(max(0.0, FEEDER_MONTHLY_CREDIT - fa_spend), 4),
-            "pct_used":       round(fa_spend / FEEDER_MONTHLY_CREDIT * 100, 1),
+            "monthly_credit": _fa_credit,
+            "remaining":      round(max(0.0, _fa_credit - fa_spend), 4),
+            "pct_used":       round(fa_spend / _fa_credit * 100, 1) if _fa_credit else 0,
             "period_start":   fa.get("period_start"),
-            "period_end":     _billing_period_end(AEROAPI_RESET_DAY),
-            "resets_day":     AEROAPI_RESET_DAY,
+            "period_end":     _billing_period_end(_fa_reset_day),
+            "resets_day":     _fa_reset_day,
         },
     })
+
+
+@app.route("/api/usage/adjust", methods=["POST"])
+def api_usage_adjust():
+    """Manually correct the tracked usage count for the current billing period.
+
+    Payload: { "api": "airlabs"|"flightaware", "value": <number> }
+      - airlabs   → value is call count (integer)
+      - flightaware → value is dollar spend (float, e.g. 4.253)
+    """
+    data = request.json or {}
+    api  = data.get("api")
+    try:
+        value = float(data.get("value", -1))
+        if value < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "value must be a non-negative number"}), 400
+    if api not in ("airlabs", "airlabs2", "flightaware"):
+        return jsonify({"error": "Unknown api; expected 'airlabs', 'airlabs2', or 'flightaware'"}), 400
+
+    try:
+        _cfg = read_config()
+    except Exception:
+        _cfg = {}
+    _al_reset_day  = int(_cfg.get("AIRLABS_RESET_DAY",  AIRLABS_RESET_DAY))
+    _al2_reset_day = int(_cfg.get("AIRLABS2_RESET_DAY", 9))
+    _fa_reset_day  = int(_cfg.get("AEROAPI_RESET_DAY",  AEROAPI_RESET_DAY))
+
+    if api == "airlabs":
+        path      = AIRLABS_USAGE_FILE
+        period    = _billing_period_start(_al_reset_day)
+        write_val = int(round(value))          # stored as integer call count
+    elif api == "airlabs2":
+        path      = AIRLABS2_USAGE_FILE
+        period    = _billing_period_start(_al2_reset_day)
+        write_val = int(round(value))          # stored as integer call count
+    else:
+        path      = AEROAPI_USAGE_FILE
+        period    = _billing_period_start(_fa_reset_day)
+        write_val = round(value, 4)            # stored as dollar spend
+
+    # Atomic write — temp file then rename so a crash mid-write can't corrupt the file
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps({"period_start": period, "value": write_val}, indent=2))
+    tmp.replace(path)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/apis", methods=["GET"])
@@ -897,110 +1168,194 @@ def api_stack():
     except Exception:
         pass
 
+    _adsbdb_ttl  = int(cfg.get("ADSBDB_CACHE_TTL",     3600))
+    _opensky_ttl = int(cfg.get("OPENSKY_CACHE_TTL",    3600))
+    _sched_ttl   = int(cfg.get("ROUTE_TTL_SCHEDULED",  604800))
+    _default_ttl = int(cfg.get("ROUTE_TTL_DEFAULT",    3600))
+    _miss_ttl    = int(cfg.get("ROUTE_MISS_TTL",       300))
+    _paid_miss   = int(cfg.get("ROUTE_PAID_MISS_TTL",  7200))
+
+    def _fmt_ttl(s):
+        if s >= 86400: return f"{s // 86400}d"
+        if s >= 3600:  return f"{s // 3600}h"
+        if s >= 60:    return f"{s // 60}m"
+        return f"{s}s"
+
     # Estimates based on observed log data: ~5–10 unique flights/hour in zone,
     # 1-hour cache TTL, adsbdb handles most LAS-origin commercial traffic directly.
     return jsonify({
         "stack": [
             {
-                "priority":    1,
-                "name":        "adsbdb",
-                "type":        "Route data (static historical DB)",
-                "url":         "https://api.adsbdb.com",
-                "cost":        "Free — no key required",
-                "key_set":     False,
+                "priority":     1,
+                "name":         "adsbdb",
+                "api_key":      "adsbdb",
+                "type":         "Route data (static historical DB)",
+                "url":          "https://api.adsbdb.com",
+                "cost":         "Free — no key required",
+                "key_set":      False,
                 "requires_key": False,
-                "notes":    "Queried for every new callsign. Result trusted immediately "
-                            "when origin is LAS or VGT AND passes a geographic plausibility "
-                            "check. Handles the majority of LAS-departure commercial traffic. "
-                            "Est. ~20–40 live calls/day (cache TTL 1 hr).",
+                "disabled":     ADSBDB_DISABLED_FLAG.exists(),
+                "cache_ttl":    _adsbdb_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_adsbdb_ttl),
+                "notes":    "Queried for every callsign (result cached to avoid repeat calls). "
+                            "Trusted for GA / non-scheduled flights when origin is a configured "
+                            "local airport AND passes a plausibility check. "
+                            "Commercial airline callsigns (scheduled prefix) are NOT trusted — "
+                            "adsbdb's static historical DB can reflect a prior leg flown by the "
+                            "same aircraft on a different day. AirLabs / AeroAPI are used instead "
+                            "and their result is logged against adsbdb for visibility. "
+                            f"Cache TTL: {_fmt_ttl(_adsbdb_ttl)}.",
             },
             {
-                "priority": 2,
-                "name":     "OpenSky",
-                "type":     "Route data (real-time, by hex — free, unlimited)",
-                "url":      "https://opensky-network.org",
-                "cost":        "Free with credentials — no monthly limit",
-                "key_set":     bool(cfg.get("OPENSKY_CLIENT_ID")),
+                "priority":     2,
+                "name":         "OpenSky",
+                "api_key":      "opensky",
+                "type":         "Route data (real-time, by hex — free, unlimited)",
+                "url":          "https://opensky-network.org",
+                "cost":         "Free with credentials — no monthly limit",
+                "key_set":      bool(cfg.get("OPENSKY_CLIENT_ID")),
                 "requires_key": True,
+                "disabled":     OPENSKY_DISABLED_FLAG.exists(),
+                "cache_ttl":    _opensky_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_opensky_ttl),
                 "notes":    "Queried before AirLabs to conserve the monthly quota. "
-                            "Trusted without coordinate verification when a local airport "
-                            "(LAS/VGT) is confirmed by the aircraft's vertical rate: "
-                            "climbing + local origin, or descending + local dest. "
-                            "Covers ~90% of traffic (LAS/VGT departures & arrivals). "
-                            "Through-traffic with non-local endpoints falls through to "
-                            "AirLabs. Returns no airport coordinates, so the geometry "
-                            "plausibility check is replaced by the vertical-rate rule. "
-                            "Est. ~20–40 live calls/day.",
+                            "Result trusted when origin is a configured local airport "
+                            "(LOCAL_AIRPORTS) — only departures are accepted. "
+                            f"Cache TTL: {_fmt_ttl(_opensky_ttl)}.",
             },
             {
-                "priority": 3,
-                "name":     "AirLabs",
-                "type":     "Route data (real-time, by callsign)",
-                "url":      "https://airlabs.co",
-                "cost":        "Free — 1,000 calls/month",
-                "key_set":     bool(cfg.get("AIRLABS_API_KEY")),
+                "priority":     3,
+                "name":         "AirLabs",
+                "api_key":      "airlabs",
+                "type":         "Route data (real-time, by callsign)",
+                "url":          "https://airlabs.co",
+                "cost":         f"Free — {int(cfg.get('AIRLABS_MONTHLY_LIMIT', AIRLABS_MONTHLY_LIMIT)):,} calls/month",
+                "key_set":      bool(cfg.get("AIRLABS_API_KEY")),
                 "requires_key": True,
-                "notes":    "Now mainly handles through-traffic that OpenSky couldn't "
-                            "auto-trust. Returns airport coordinates, enabling the full "
-                            "geometry plausibility check. Requires an ICAO callsign "
-                            "(e.g. SWA1137) — won't match tail-number registrations "
-                            "(e.g. N911WY). Est. ~2–5 live calls/day; ~60–150/month.",
+                "disabled":     AIRLABS_DISABLED_FLAG.exists(),
+                "cache_ttl":    _sched_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
+                "notes":    "Handles through-traffic that OpenSky couldn't auto-trust. "
+                            "Returns airport coordinates for geometry plausibility. "
+                            f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
+                            f"Per-callsign miss cache: {_fmt_ttl(_miss_ttl)}. "
+                            "Falls back to AirLabs 2 automatically when this key's quota is exhausted.",
             },
             {
-                "priority": 4,
-                "name":     "FlightAware AeroAPI",
-                "type":     "Route data (real-time, paid)",
-                "url":      "https://aeroapi.flightaware.com",
-                "cost":        f"${FEEDER_MONTHLY_CREDIT:.2f}/month feeder credit — ${AEROAPI_COST_PER_CALL:.3f}/call thereafter",
-                "key_set":     bool(cfg.get("FLIGHTAWARE_API_KEY")),
+                "priority":     4,
+                "name":         "AirLabs 2",
+                "api_key":      "airlabs2",
+                "type":         "Route data (real-time, secondary key)",
+                "url":          "https://airlabs.co",
+                "cost":         f"Free — {int(cfg.get('AIRLABS2_MONTHLY_LIMIT', 1000)):,} calls/month",
+                "key_set":      bool(cfg.get("AIRLABS_API_KEY_2")),
                 "requires_key": True,
-                "notes":    "True last resort — only called when all free sources return "
-                            "no route. Cascades automatically on 402 (credit exhausted) "
-                            "or 429. With healthy upstream sources, expect <5 calls/day.",
+                "disabled":     AIRLABS2_DISABLED_FLAG.exists(),
+                "cache_ttl":    _sched_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
+                "notes":    "Secondary AirLabs key — called when AirLabs 1 did not make a live "
+                            "200 call (in backoff, cache hit with no data, disabled, or not configured). "
+                            "Skipped if AirLabs 1 made a live call and returned empty (same backend). "
+                            "Preserves AeroAPI quota when AirLabs 1 runs dry. "
+                            f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
+                            f"Per-callsign miss cache: {_fmt_ttl(_miss_ttl)}. "
+                            f"Combined paid-API miss suppression: {_fmt_ttl(_paid_miss)}.",
             },
             {
-                "priority": 5,
-                "name":     "LOCAL_AIRPORT heuristic",
-                "type":     "Heuristic fallback",
-                "url":      None,
-                "cost":        "Free",
-                "key_set":     bool(cfg.get("LOCAL_AIRPORT")),
+                "priority":     5,
+                "name":         "FlightAware AeroAPI",
+                "api_key":      "flightaware",
+                "type":         "Route data (real-time, paid)",
+                "url":          "https://aeroapi.flightaware.com",
+                "cost":         f"${float(cfg.get('FEEDER_MONTHLY_CREDIT', FEEDER_MONTHLY_CREDIT)):.2f}/month feeder credit — ${AEROAPI_COST_PER_CALL:.3f}/call thereafter",
+                "key_set":      bool(cfg.get("FLIGHTAWARE_API_KEY")),
                 "requires_key": True,
-                "notes":    "Fills one missing endpoint using vertical speed when all "
-                            "APIs have returned nothing: climbing → LOCAL_AIRPORT is "
-                            "origin; descending → LOCAL_AIRPORT is destination.",
+                "disabled":     AEROAPI_DISABLED_FLAG.exists(),
+                "cache_ttl":    _sched_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
+                "notes":    "True last resort — only called when all free sources and both AirLabs "
+                            "keys return no route. Cascades automatically on 402 (credit exhausted) or 429. "
+                            f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
+                            f"Miss suppression: {_fmt_ttl(_paid_miss)}.",
             },
             {
-                "priority": 0,
-                "name":     "airplanes.live",
-                "type":     "Aircraft type lookup (not in route chain)",
-                "url":      "https://api.airplanes.live",
-                "cost":        "Free — no key required",
-                "key_set":     False,
+                "priority":     6,
+                "name":         "LOCAL_AIRPORTS trust filter",
+                "api_key":      None,
+                "type":         "Trust filter (not a data source)",
+                "url":          None,
+                "cost":         "Free",
+                "key_set":      bool(cfg.get("LOCAL_AIRPORTS") or cfg.get("LOCAL_AIRPORT")),
                 "requires_key": False,
-                "notes":    "Used for aircraft type/model (e.g. 'BOEING 737-800'). "
-                            "Separate from the route chain; falls back to adsbdb "
-                            "aircraft endpoint if needed. Results cached 24 hr. "
-                            "Est. ~20–40 live calls/day.",
+                "disabled":     False,
+                "cache_ttl":    None,
+                "cache_ttl_fmt": None,
+                "notes":    "Routes from adsbdb and OpenSky are only accepted when the "
+                            "departure airport is one of the configured LOCAL_AIRPORTS. "
+                            "Paid APIs (AirLabs, AeroAPI) use geometry plausibility instead.",
             },
-        ]
+            {
+                "priority":     0,
+                "name":         "airplanes.live",
+                "api_key":      None,
+                "type":         "Aircraft type lookup (not in route chain)",
+                "url":          "https://api.airplanes.live",
+                "cost":         "Free — no key required",
+                "key_set":      False,
+                "requires_key": False,
+                "disabled":     False,
+                "cache_ttl":    86400,
+                "cache_ttl_fmt": "24h",
+                "notes":    "Used for aircraft type/model (e.g. 'BOEING 737-800'). "
+                            "Separate from the route chain; falls back to adsbdb aircraft endpoint. "
+                            "Results cached 24 hr.",
+            },
+        ],
+        "ttls": {
+            "adsbdb_cache":       _adsbdb_ttl,
+            "opensky_cache":      _opensky_ttl,
+            "route_scheduled":    _sched_ttl,
+            "route_default":      _default_ttl,
+            "route_miss":         _miss_ttl,
+            "route_paid_miss":    _paid_miss,
+        },
     })
 
 
 @app.route("/api/overrides", methods=["GET"])
 def get_overrides():
-    """Return the current override rules list."""
+    """Return the current override rules list from SQLite."""
+    conn = None
     try:
-        return jsonify(json.loads(OVERRIDES_FILE.read_text()))
-    except FileNotFoundError:
-        return jsonify([])
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        rows = conn.execute(
+            "SELECT pattern, origin, destination, display, plane, note "
+            "FROM overrides ORDER BY position, id"
+        ).fetchall()
+        return jsonify([
+            {
+                "pattern":     r[0],
+                "origin":      r[1],
+                "destination": r[2],
+                "display":     r[3],
+                "plane":       r[4],
+                "note":        r[5],
+            }
+            for r in rows
+        ])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/api/overrides", methods=["POST"])
 def save_overrides():
-    """Replace the full override rules list."""
+    """Replace the full override rules list in SQLite and bump the version counter."""
+    conn = None
     try:
         data = request.json
         if not isinstance(data, list):
@@ -1008,25 +1363,43 @@ def save_overrides():
         for rule in data:
             if not isinstance(rule, dict) or not rule.get("pattern", "").strip():
                 return jsonify({"error": "Each rule must have a non-empty 'pattern'"}), 400
-        # Normalise: uppercase pattern, strip whitespace from airport codes
-        clean = []
-        for rule in data:
-            clean.append({
-                "pattern":     rule["pattern"].strip().upper(),
-                "origin":      rule.get("origin", "").strip().upper(),
-                "destination": rule.get("destination", "").strip().upper(),
-                "display":     rule.get("display", "").strip(),
-                "plane":       rule.get("plane", "").strip(),
-                "note":        rule.get("note", "").strip(),
-            })
-        tmp = str(OVERRIDES_FILE) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(clean, f, indent=2)
-        os.replace(tmp, str(OVERRIDES_FILE))
-        _log(f"[web] overrides saved ({len(clean)} rules)")
+        # Normalise: uppercase pattern and airport codes, strip whitespace
+        clean = [
+            (
+                pos,
+                rule["pattern"].strip().upper(),
+                rule.get("origin",      "").strip().upper(),
+                rule.get("destination", "").strip().upper(),
+                rule.get("display",     "").strip(),
+                rule.get("plane",       "").strip(),
+                rule.get("note",        "").strip(),
+            )
+            for pos, rule in enumerate(data)
+        ]
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("DELETE FROM overrides")
+        conn.executemany(
+            "INSERT INTO overrides (position, pattern, origin, destination, display, plane, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            clean,
+        )
+        # Ensure version row exists, then increment it so overhead.py reloads on next poll
+        conn.execute("INSERT OR IGNORE INTO overrides_meta (key, value) VALUES ('version', '0')")
+        conn.execute(
+            "UPDATE overrides_meta "
+            "SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) "
+            "WHERE key='version'"
+        )
+        conn.commit()
+        _log(f"[web] overrides saved to DB ({len(clean)} rules)")
         return jsonify({"ok": True, "count": len(clean)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/api/test_flight", methods=["POST"])
@@ -1034,7 +1407,7 @@ def test_flight():
     """
     Run a full no-cache API lookup for testing.  Same pipeline as a real
     overhead flight — override rules, adsbdb, OpenSky, AirLabs, AeroAPI —
-    with two exceptions: no cache reads/writes, and the LOCAL_AIRPORT
+    with two exceptions: no cache reads/writes, and the LOCAL_AIRPORTS
     heuristic is skipped.  All log lines are prefixed [TEST:{callsign}].
 
     The result is also written to /tmp/ft_test_display.json so the next

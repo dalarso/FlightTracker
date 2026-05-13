@@ -51,9 +51,15 @@ except (ImportError, NameError):
         RECEIVER_HOST = "localhost"
 
 try:
-    from config import LOCAL_AIRPORT
+    from config import LOCAL_AIRPORTS
 except (ImportError, NameError):
-    LOCAL_AIRPORT = ""
+    LOCAL_AIRPORTS = ""
+
+# Backward-compat: if only the old single-value key exists, use it as a seed.
+try:
+    from config import LOCAL_AIRPORT as _LOCAL_AIRPORT_LEGACY
+except (ImportError, NameError):
+    _LOCAL_AIRPORT_LEGACY = ""
 
 try:
     from config import OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET
@@ -70,6 +76,11 @@ try:
     from config import AIRLABS_API_KEY
 except (ImportError, NameError):
     AIRLABS_API_KEY = None
+
+try:
+    from config import AIRLABS_API_KEY_2
+except (ImportError, NameError):
+    AIRLABS_API_KEY_2 = None
 
 
 try:
@@ -108,7 +119,12 @@ FR24_CALLSIGN = 16
 
 RATE_LIMIT_DELAY   = 1
 FLIGHT_DATA_FILE   = "/tmp/ft_data.json"
-APIS_DISABLED_FLAG = "/tmp/ft_apis_disabled"   # combined kill-switch for limited APIs
+APIS_DISABLED_FLAG    = "/tmp/ft_apis_disabled"   # combined kill-switch (AirLabs + AeroAPI)
+ADSBDB_DISABLED_FLAG  = "/tmp/ft_adsbdb_disabled"
+OPENSKY_DISABLED_FLAG = "/tmp/ft_opensky_disabled"
+AIRLABS_DISABLED_FLAG  = "/tmp/ft_airlabs_disabled"
+AIRLABS2_DISABLED_FLAG = "/tmp/ft_airlabs2_disabled"
+AEROAPI_DISABLED_FLAG  = "/tmp/ft_aeroapi_disabled"
 MAX_FLIGHT_LOOKUP  = 5
 EARTH_RADIUS_KM    = 6371
 BLANK_FIELDS       = frozenset(["", "N/A", "NONE"])
@@ -138,17 +154,44 @@ def _rotate_log_if_needed():
 # Persistent files — stored in project dir so they survive reboots
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR    = os.path.join(_PROJECT_DIR, "..")
-AIRLABS_USAGE_FILE = os.path.join(_DATA_DIR, "airlabs_usage.json")
+AIRLABS_USAGE_FILE  = os.path.join(_DATA_DIR, "airlabs_usage.json")
+AIRLABS2_USAGE_FILE = os.path.join(_DATA_DIR, "airlabs2_usage.json")
 AEROAPI_USAGE_FILE = os.path.join(_DATA_DIR, "aeroapi_usage.json")
 OVERRIDES_FILE     = os.path.join(_DATA_DIR, "ft_overrides.json")
 TEST_DISPLAY_FILE  = "/tmp/ft_test_display.json"   # written by run_test_lookup(); read by _grab_data()
-AIRLABS_MONTHLY_LIMIT  = 1000        # free tier: 1,000 calls/month
-AEROAPI_COST_PER_CALL  = 0.005       # $0.005 per AeroAPI call (informational only)
-AIRLABS_RESET_DAY  = 9               # AirLabs billing period resets on the 9th
-AEROAPI_RESET_DAY  = 1               # FlightAware credit resets on the 1st
+AEROAPI_COST_PER_CALL  = 0.005       # $0.005 per AeroAPI call (platform rate — not user-configurable)
+
+# Billing tracking constants — can be overridden in config.py (managed via web config page)
+try:
+    from config import AIRLABS_MONTHLY_LIMIT
+except (ImportError, NameError):
+    AIRLABS_MONTHLY_LIMIT = 1000     # free tier: 1,000 calls/month
+
+try:
+    from config import AIRLABS_RESET_DAY
+except (ImportError, NameError):
+    AIRLABS_RESET_DAY = 9            # AirLabs billing period resets on the 9th
+
+try:
+    from config import AIRLABS2_MONTHLY_LIMIT
+except (ImportError, NameError):
+    AIRLABS2_MONTHLY_LIMIT = 1000    # free tier: 1,000 calls/month
+
+try:
+    from config import AIRLABS2_RESET_DAY
+except (ImportError, NameError):
+    AIRLABS2_RESET_DAY = 9           # AirLabs 2 billing period resets on the 9th
+
+try:
+    from config import AEROAPI_RESET_DAY
+except (ImportError, NameError):
+    AEROAPI_RESET_DAY = 1            # FlightAware credit resets on the 1st
 
 # Local airports — used for journey/zone display features.
-_LOCAL_AIRPORTS = frozenset(a.strip().upper() for a in [LOCAL_AIRPORT, "VGT", "HSH"] if a and a.strip())
+# LOCAL_AIRPORTS is a comma-separated string (e.g. "LAS,VGT,HSH") set in config.py.
+# Falls back gracefully to the old single-value LOCAL_AIRPORT key for compatibility.
+_raw_airports = LOCAL_AIRPORTS if LOCAL_AIRPORTS else _LOCAL_AIRPORT_LEGACY
+_LOCAL_AIRPORTS = frozenset(a.strip().upper() for a in _raw_airports.split(",") if a.strip())
 
 # ── Airport city names (IATA code → city) for log display only ───────────────
 _AIRPORT_CITIES: dict[str, str] = {
@@ -289,6 +332,8 @@ _AIRLINE_NAMES: dict[str, str] = {
     # Charter / private aviation
     "LXJ": "Flexjet",             "JRE": "flyExclusive",
     "TWY": "Solarius Aviation",
+    # Las Vegas special (government contractor — Groom Lake / Area 51 shuttle)
+    "JAN": "Janet Airlines",
     # US cargo
     "FDX": "FedEx Express",       "UPS": "UPS Airlines",
     "GTI": "Atlas Air",           "ABX": "ABX Air",
@@ -551,6 +596,68 @@ def _init_db() -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS overrides (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                position    INTEGER NOT NULL DEFAULT 0,
+                pattern     TEXT    NOT NULL,
+                origin      TEXT    NOT NULL DEFAULT '',
+                destination TEXT    NOT NULL DEFAULT '',
+                display     TEXT    NOT NULL DEFAULT '',
+                plane       TEXT    NOT NULL DEFAULT '',
+                note        TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS overrides_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '0'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS free_api_checks (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                seen_at    TEXT NOT NULL,
+                date       TEXT NOT NULL,
+                callsign   TEXT NOT NULL,
+                free_route TEXT NOT NULL DEFAULT '',
+                paid_route TEXT NOT NULL DEFAULT '',
+                matched    INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fac_date ON free_api_checks(date)"
+        )
+        # One-time migration from ft_overrides.json → DB (runs only when table is empty)
+        existing = conn.execute("SELECT COUNT(*) FROM overrides").fetchone()[0]
+        if existing == 0 and os.path.exists(OVERRIDES_FILE):
+            try:
+                with open(OVERRIDES_FILE) as _f:
+                    _rules = json.load(_f)
+                if isinstance(_rules, list):
+                    for _pos, _rule in enumerate(_rules):
+                        conn.execute(
+                            "INSERT INTO overrides "
+                            "(position, pattern, origin, destination, display, plane, note) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                _pos,
+                                _rule.get("pattern",     "").strip().upper(),
+                                _rule.get("origin",      "").strip().upper(),
+                                _rule.get("destination", "").strip().upper(),
+                                _rule.get("display",     "").strip(),
+                                _rule.get("plane",       "").strip(),
+                                _rule.get("note",        "").strip(),
+                            ),
+                        )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO overrides_meta (key, value) VALUES ('version', '1')"
+                    )
+                    _log(f"[overhead] migrated {len(_rules)} override rules from JSON to DB")
+            except Exception:
+                # Clear any partially-inserted rows so the next boot can retry cleanly
+                conn.execute("DELETE FROM overrides")
+                _log("[overhead] WARNING: override migration failed — " + traceback.format_exc())
         conn.commit()
         _db_conn = conn
 
@@ -757,9 +864,7 @@ def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str,
         with _stats_lock:
             # Day rollover — prune stale in-memory entries and log yesterday's summary.
             if today != _stats_last_date:
-                _stats_seen_today.difference_update(
-                    {k for k in _stats_seen_today if k[0] != today}
-                )
+                _stats_seen_today.clear()
                 if _stats_last_date and _db_conn is not None:
                     try:
                         _prev_total = _db_conn.execute(
@@ -854,6 +959,34 @@ def _record_api_stat(api_name: str) -> None:
         pass
 
 
+def _record_free_api_check(callsign: str, free_route: str,
+                            paid_route: str, matched: bool) -> None:
+    """
+    Persist one adsbdb vs. paid-API cross-check result to free_api_checks.
+    Only called for commercial flights where both sides had data.
+    Runs under _stats_lock using _db_conn — same serialisation as sightings.
+    Never raises.
+    """
+    if _db_conn is None:
+        return
+    try:
+        _now    = datetime.now(_PACIFIC)
+        _seen   = _now.strftime("%Y-%m-%d %H:%M:%S")
+        _date   = _now.strftime("%Y-%m-%d")
+        with _stats_lock:
+            _db_conn.execute(
+                """INSERT INTO free_api_checks
+                       (seen_at, date, callsign, free_route, paid_route, matched)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (_seen, _date, callsign or "",
+                 free_route or "", paid_route or "",
+                 1 if matched else 0),
+            )
+            _db_conn.commit()
+    except Exception:
+        pass  # never propagate — stat writes must not affect route resolution
+
+
 # ── Route cache TTL tiers ──────────────────────────────────────────────────────
 # These constants are defined here (before _init_db()) so _migrate_legacy_caches()
 # can reference them at startup.  Scheduled airline routes are very stable (7 days
@@ -894,13 +1027,37 @@ _SCHEDULED_PREFIXES = frozenset([
     "FLG",
 ])
 
-OPENSKY_CACHE_TTL    = 3600    # free/unlimited, hex-keyed — keep short
-ADSBDB_CACHE_TTL     = 3600    # free/unlimited — keep short; fresh data costs nothing
-# Paid API TTLs are tiered by operator type — see _route_ttl() which follows.
-ROUTE_TTL_SCHEDULED  = 604800  # 7 days — commercial + regional airlines (stable schedules)
-ROUTE_TTL_DEFAULT    = 3600    # 1 hour — GA, helicopters, charters, unknown (can re-depart)
-ROUTE_MISS_TTL     = 300    # negative cache: retry after 5 min when an API has no data
-ROUTE_PAID_MISS_TTL = 7200  # both paid APIs confirmed empty — suppress for 2 h
+# Cache TTLs — all overridable via config.py; defaults below.
+try:
+    from config import ADSBDB_CACHE_TTL
+except (ImportError, NameError):
+    ADSBDB_CACHE_TTL = 3600         # free/unlimited — keep short; fresh data costs nothing
+
+try:
+    from config import OPENSKY_CACHE_TTL
+except (ImportError, NameError):
+    OPENSKY_CACHE_TTL = 3600        # free/unlimited, hex-keyed — keep short
+
+try:
+    from config import ROUTE_TTL_SCHEDULED
+except (ImportError, NameError):
+    ROUTE_TTL_SCHEDULED = 604800    # 7 days — commercial + regional airlines (stable schedules)
+
+try:
+    from config import ROUTE_TTL_DEFAULT
+except (ImportError, NameError):
+    ROUTE_TTL_DEFAULT = 3600        # 1 hour — GA, helicopters, charters, unknown (can re-depart)
+
+try:
+    from config import ROUTE_MISS_TTL
+except (ImportError, NameError):
+    ROUTE_MISS_TTL = 300            # negative cache: retry after 5 min when an API has no data
+
+try:
+    from config import ROUTE_PAID_MISS_TTL
+except (ImportError, NameError):
+    ROUTE_PAID_MISS_TTL = 7200      # both paid APIs confirmed empty — suppress for 2 h
+
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
 AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every poll cycle
 
@@ -993,6 +1150,7 @@ _opensky_token = {"value": None, "expires_at": 0, "fetching": False}
 # In-memory only — resets on service restart, which is intentional
 # (a fresh restart should retry APIs rather than carry over a stale block).
 _api_backoff: dict[str, float] = {}  # api_name -> epoch time to stop backing off
+_api_credit_exhausted: dict[str, str] = {}  # api_name -> billing period string when a 402 was received
 
 def _in_backoff(api_name: str) -> bool:
     """True if we should skip this API because it recently told us to back off."""
@@ -1004,38 +1162,63 @@ def _set_backoff(api_name: str, secs: int = 3600) -> None:
     _api_backoff[api_name] = time.time() + secs
     _log(f"[{api_name}] backing off for {secs // 60} min")
 
+def _check_period_reset(api_name: str, reset_day: int) -> None:
+    """If this API is in backoff due to a 402 and a new billing period has since
+    started, clear the backoff so the API resumes immediately rather than waiting
+    up to 24 h for the old backoff timer to expire."""
+    if api_name not in _api_credit_exhausted or not _in_backoff(api_name):
+        return
+    current_period = _billing_period_start(reset_day)
+    if _api_credit_exhausted[api_name] != current_period:
+        _api_backoff.pop(api_name, None)
+        _api_credit_exhausted.pop(api_name, None)
+        _log(f"[{api_name}] new billing period — credit backoff cleared, resuming")
+
 
 
 # ── Override rules ─────────────────────────────────────────────────────────────
-# Loaded on demand with mtime-based invalidation so edits via the web UI take
-# effect on the very next poll without needing a service restart.
-# _overrides_lock guards the shared globals against concurrent worker threads.
-_overrides_lock:  Lock  = Lock()
-_overrides_cache: list  = []
-_overrides_mtime: float = 0.0
+# Stored in SQLite (overrides + overrides_meta tables).  A version counter in
+# overrides_meta is incremented on every save; _load_overrides() checks it on
+# each call and reloads from DB only when it has changed.
+# Lock ordering (always outermost → innermost): _overrides_lock → _cache_lock.
+_overrides_lock:   Lock = Lock()
+_overrides_cache:  list = []
+_overrides_version: int = -1   # -1 = not yet loaded from DB
+
 
 def _load_overrides() -> list:
-    """Return the current override rules, reloading from disk when the file changes.
+    """Return the current override rules, reloading from DB when the version counter changes.
     Thread-safe: callers may be any of the ThreadPoolExecutor worker threads.
-    Returns a snapshot copy so callers can iterate without holding the lock.
+    Returns a snapshot copy so callers can iterate without holding either lock.
     """
-    global _overrides_cache, _overrides_mtime
+    global _overrides_cache, _overrides_version
     with _overrides_lock:
-        try:
-            mtime = os.path.getmtime(OVERRIDES_FILE)
-            if mtime != _overrides_mtime:
-                with open(OVERRIDES_FILE) as f:
-                    data = json.load(f)
-                if not isinstance(data, list):
-                    _log("[override] WARNING: overrides file is not a JSON array — ignoring")
-                    data = []
-                _overrides_cache = data
-                _overrides_mtime = mtime
-        except FileNotFoundError:
-            _overrides_cache = []
-            _overrides_mtime = 0.0
-        except Exception as e:
-            _log(f"[override] WARNING: failed to load overrides: {e}")
+        if _cache_conn is not None:
+            try:
+                with _cache_lock:
+                    row = _cache_conn.execute(
+                        "SELECT value FROM overrides_meta WHERE key='version'"
+                    ).fetchone()
+                    db_version = int(row[0]) if row else 0
+                    if db_version != _overrides_version:
+                        rows = _cache_conn.execute(
+                            "SELECT pattern, origin, destination, display, plane, note "
+                            "FROM overrides ORDER BY position, id"
+                        ).fetchall()
+                        _overrides_cache = [
+                            {
+                                "pattern":     r[0],
+                                "origin":      r[1],
+                                "destination": r[2],
+                                "display":     r[3],
+                                "plane":       r[4],
+                                "note":        r[5],
+                            }
+                            for r in rows
+                        ]
+                        _overrides_version = db_version
+            except Exception as e:
+                _log(f"[override] WARNING: failed to load overrides from DB: {e}")
         return list(_overrides_cache)  # snapshot — caller iterates without the lock
 
 
@@ -1224,7 +1407,7 @@ def _billing_period_start(reset_day):
     e.g. reset_day=9 on May 15 → '2026-05-09'
          reset_day=9 on May 3  → '2026-04-09'
     """
-    today = datetime.now()
+    today = datetime.now(_PACIFIC)
     if today.day >= reset_day:
         return today.replace(day=reset_day).strftime("%Y-%m-%d")
     # Before reset day this month — period started last month
@@ -1267,8 +1450,21 @@ def _airlabs_increment():
         remaining = AIRLABS_MONTHLY_LIMIT - data["value"]
         count     = int(data["value"])
     if remaining <= 50:
-        _log(f"[airlabs] WARNING: {int(remaining)} calls remaining this period")
+        _log(f"[airlabs-1] WARNING: {int(remaining)} calls remaining this period")
     _record_api_stat("airlabs")
+    return count  # returned for inline logging
+
+
+def _airlabs2_increment():
+    with _usage_lock:
+        data = _read_usage(AIRLABS2_USAGE_FILE, AIRLABS2_RESET_DAY)
+        data["value"] = data.get("value", 0) + 1
+        _write_usage(AIRLABS2_USAGE_FILE, data)
+        remaining = AIRLABS2_MONTHLY_LIMIT - data["value"]
+        count     = int(data["value"])
+    if remaining <= 50:
+        _log(f"[airlabs-2] WARNING: {int(remaining)} calls remaining this period")
+    _record_api_stat("airlabs2")
     return count  # returned for inline logging
 
 
@@ -1290,7 +1486,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                            any successful full-route resolution; checked before
                            any API work so repeat daily flights skip the chain.
       1.  adsbdb       — static historical DB; trusted only when the ORIGIN is a
-                         local airport (LAS/VGT/HSH) AND geometry plausibility passes.
+                         local airport (see LOCAL_AIRPORTS in config.py) AND geometry plausibility passes.
       2.  OpenSky      — free, unlimited, real-time by ICAO24 hex.  Trusted only when
                          the ORIGIN is a local airport.  If origin=local, dest is also
                          accepted from the same result; a missing dest falls through to
@@ -1303,8 +1499,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
       If no source supplies a validated departure route, origin/dest → "?".
 
     Trust rule: only routes WHERE THE PLANE IS DEPARTING a local airport are accepted.
-    ~90%+ of in-zone overhead traffic is departing LAS/VGT/HSH; arrivals and
-    through-traffic show "?" rather than risk accepting stale/wrong data.
+    ~90%+ of in-zone overhead traffic is departing a configured local airport;
+    arrivals and through-traffic show "?" rather than risk accepting stale/wrong data.
 
     Cache format: (origin, dest, orig_lat, orig_lon, dest_lat, dest_lon, timestamp)
     Negative cache entries have empty origin/dest with None coords — used to
@@ -1359,7 +1555,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     adsbdb_olat = adsbdb_olon = adsbdb_dlat = adsbdb_dlon = None
     _adsbdb_src = "adsbdb"
 
-    if callsign:
+    if callsign and not os.path.exists(ADSBDB_DISABLED_FLAG):
         _cached_adsbdb = _cache_db_get_route(callsign, 'route')
         if _cached_adsbdb:
             adsbdb_origin, adsbdb_dest = _cached_adsbdb[0], _cached_adsbdb[1]
@@ -1400,12 +1596,19 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             except Exception:
                 pass
 
-    # Trust adsbdb only when the ORIGIN is a local airport (plane is departing local).
-    # Arrivals (dest-only local) are not trusted — adsbdb has static historical data
-    # that often reflects a prior leg for the same callsign.
+    # Trust adsbdb only for GA / non-commercial flights.
+    # Scheduled airlines (callsign prefix in _SCHEDULED_PREFIXES) are NOT trusted from
+    # adsbdb — its static historical DB maps to hex codes, and the same aircraft (hex)
+    # flies different routes on different days, making historical data unreliable for
+    # commercial ops.  The result is still cached to suppress repeat API calls, but
+    # AirLabs / AeroAPI must be the authority — they run regardless and their answer wins.
+    # For GA (N-numbers, non-scheduled prefixes) adsbdb remains trusted as before.
+    _adsbdb_commercial   = (bool(callsign) and len(callsign) >= 3
+                             and callsign[:3].upper() in _SCHEDULED_PREFIXES)
     _adsbdb_origin_local = adsbdb_origin.upper() in _LOCAL_AIRPORTS if adsbdb_origin else False
     adsbdb_ok = (
-        _adsbdb_origin_local
+        not _adsbdb_commercial           # commercial flights require paid-API confirmation
+        and _adsbdb_origin_local
         and _route_plausible(plane_lat, plane_lon,
                              adsbdb_olat, adsbdb_olon,
                              adsbdb_dlat, adsbdb_dlon)
@@ -1416,7 +1619,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _log(f"[adsbdb] {_airline_display(callsign)}: {_route_display(adsbdb_origin, adsbdb_dest)} accepted")
     elif adsbdb_origin or adsbdb_dest:
         if _adsbdb_src != "adsbdb:cached":
-            if not _adsbdb_origin_local:
+            if _adsbdb_commercial:
+                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} not trusted — commercial; deferring to AirLabs/AeroAPI")
+            elif not _adsbdb_origin_local:
                 _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — origin not local")
             else:
                 _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — plausibility failed")
@@ -1432,7 +1637,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     _sky_origin = _sky_dest = ""
     _sky_src = "opensky"
     # OpenSky is free/unlimited — intentionally excluded from the _apis_disabled kill-switch.
-    if not (origin and destination) and OPENSKY_CLIENT_ID and hex_code and not _in_backoff("opensky"):
+    if not (origin and destination) and OPENSKY_CLIENT_ID and hex_code and not _in_backoff("opensky") and not os.path.exists(OPENSKY_DISABLED_FLAG):
         _cached_sky = _cache_db_get_route(hex_code, 'route')
         if _cached_sky:
             _sky_origin, _sky_dest = _cached_sky[0], _cached_sky[1]
@@ -1473,17 +1678,20 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 
         if _sky_origin or _sky_dest:
             # Only trust when the origin is a local airport (departing local).
-            # If origin is local, also accept whatever destination came with it;
-            # a missing dest falls through to AirLabs via _need_airlabs below.
+            # For commercial callsigns, log what OpenSky found but don't commit —
+            # AirLabs / AeroAPI are the authority (same policy as adsbdb above).
             _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
             if _sky_origin_local:
-                if not origin:
-                    origin = _sky_origin
-                if _sky_dest and not destination:
-                    destination = _sky_dest
-                source = source or _sky_src
                 if _sky_src != "opensky:cached":
                     _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
+                if not _adsbdb_commercial:
+                    # GA / non-scheduled: commit origin and destination
+                    if not origin:
+                        origin = _sky_origin
+                    if _sky_dest and not destination:
+                        destination = _sky_dest
+                    source = source or _sky_src
+                # Commercial: data is logged above but not committed — AirLabs/AeroAPI confirm
             elif _sky_src != "opensky:cached":
                 _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
 
@@ -1493,7 +1701,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # plausibility check (using adsbdb's airport coordinates), trust it without
     # burning a paid API call.  Both origin AND destination must agree; partial
     # matches fall through to AirLabs as before.
-    if not (origin and destination):
+    if not (origin and destination) and not _adsbdb_commercial:
         if (adsbdb_origin and _sky_origin
                 and adsbdb_origin == _sky_origin
                 and adsbdb_dest and _sky_dest
@@ -1530,8 +1738,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     _al_src   = "airlabs"
     _al_count = 0  # tracks live call count; > 0 means a real API call was made
 
-    if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not _skip_paid:
+    if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not os.path.exists(AIRLABS_DISABLED_FLAG) and not _skip_paid:
         _cached_al = _cache_db_get_route(f"airlabs:{callsign}", 'route')
+        _check_period_reset("airlabs", AIRLABS_RESET_DAY)
         if _cached_al:
             al_origin, al_dest = _cached_al[0], _cached_al[1]
             al_olat, al_olon = _cached_al[2], _cached_al[3]
@@ -1549,10 +1758,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     _set_backoff("airlabs", secs=3600)
                 elif r.status_code == 402:
                     _set_backoff("airlabs", secs=86400)
-                    _log("[airlabs] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
+                    _api_credit_exhausted["airlabs"] = _billing_period_start(AIRLABS_RESET_DAY)
+                    _log("[airlabs-1] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
                 elif r.status_code in (401, 403):
                     _set_backoff("airlabs", secs=86400)
-                    _log(f"[airlabs] auth error ({r.status_code}) — check AIRLABS_API_KEY")
+                    _log(f"[airlabs-1] auth error ({r.status_code}) — check AIRLABS_API_KEY")
                 elif r.status_code == 200:
                     _al_count = _airlabs_increment()
                     resp = r.json().get("response") or {}
@@ -1563,7 +1773,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     al_dlat   = resp.get("arr_lat")
                     al_dlon   = resp.get("arr_lng")
                     if not (al_origin or al_dest):
-                        _log(f"[airlabs] {callsign}: no data [call #{_al_count}]")
+                        _log(f"[airlabs-1] {callsign}: no data [call #{_al_count}]")
                     # Cache result (even empty — negative cache suppresses retries)
                     _al_ttl = _route_ttl(callsign) if (al_origin or al_dest) else ROUTE_MISS_TTL
                     _cache_db_set_route(f"airlabs:{callsign}", 'route',
@@ -1575,7 +1785,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                     # Unexpected status (e.g. 404, 500) — count the call (AirLabs may
                     # bill any HTTP request), negatively cache to prevent per-poll retries.
                     _al_count = _airlabs_increment()
-                    _log(f"[airlabs] {callsign}: unexpected status {r.status_code} [call #{_al_count}] — negative caching")
+                    _log(f"[airlabs-1] {callsign}: unexpected status {r.status_code} [call #{_al_count}] — negative caching")
                     _cache_db_set_route(f"airlabs:{callsign}", 'route',
                                         "", "", None, None, None, None,
                                         int(time.time()) + ROUTE_MISS_TTL,
@@ -1583,7 +1793,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             except Exception:
                 pass
         else:
-            _log(f"[airlabs] {callsign}: in backoff — skipping")
+            _log(f"[airlabs-1] {callsign}: in backoff — skipping")
 
     # AirLabs returns coordinates — apply geometry plausibility only.
     # Paid APIs trust any plausible route (arrivals and through-traffic included);
@@ -1600,7 +1810,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 # them would produce a nonsensical "FreeSrc_origin→AirLabs_dest" route.
                 # In that case, prefer AirLabs' complete authoritative route instead.
                 if al_origin and origin and al_origin.upper() != origin.upper():
-                    _log(f"[airlabs] origin conflict ({origin} vs {al_origin}) — preferring AirLabs complete route")
+                    _log(f"[airlabs-1] origin conflict ({origin} vs {al_origin}) — preferring AirLabs-1 complete route")
                     origin = al_origin
                     destination = al_dest
                     source = _al_src
@@ -1619,13 +1829,108 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 source = source or _al_src
             if _al_src != "airlabs:cached":
                 _count_suffix = f" [call #{_al_count}]" if _al_count else ""
-                _log(f"[airlabs] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
+                _log(f"[airlabs-1] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
         else:
             if _al_src != "airlabs:cached":
-                _log(f"[airlabs] implausible route {al_origin}->{al_dest} rejected for {callsign}")
+                _log(f"[airlabs-1] implausible route {al_origin}->{al_dest} rejected for {callsign}")
+
+    # ── 3b. AirLabs 2 (secondary key — fallback when AirLabs 1 is in backoff) ──
+    # Only tried when AirLabs 1 didn't make a live 200 call this invocation
+    # (_al_count == 0 covers: in-backoff, disabled, not configured, or cache-hit).
+    # Both keys call the same AirLabs backend, so a live AirLabs 1 empty response
+    # means AirLabs 2 would return the same — skip it and preserve quota.
+    al2_origin = al2_dest = ""
+    al2_olat = al2_olon = al2_dlat = al2_dlon = None
+    _al2_src   = "airlabs2"
+    _al2_count = 0
+
+    if (not (origin and destination) and _al_count == 0
+            and AIRLABS_API_KEY_2 and callsign
+            and not _apis_disabled and not os.path.exists(AIRLABS2_DISABLED_FLAG)
+            and not _skip_paid):
+        _cached_al2 = _cache_db_get_route(f"airlabs2:{callsign}", 'route')
+        _check_period_reset("airlabs2", AIRLABS2_RESET_DAY)
+        if _cached_al2:
+            al2_origin, al2_dest = _cached_al2[0], _cached_al2[1]
+            al2_olat, al2_olon = _cached_al2[2], _cached_al2[3]
+            al2_dlat, al2_dlon = _cached_al2[4], _cached_al2[5]
+            _al2_src = "airlabs2:cached"
+        elif not _in_backoff("airlabs2"):
+            try:
+                r = requests.get(
+                    AIRLABS_URL,
+                    params={"flight_icao": callsign, "api_key": AIRLABS_API_KEY_2},
+                    timeout=5,
+                )
+                if r.status_code == 429:
+                    _set_backoff("airlabs2", secs=3600)
+                elif r.status_code == 402:
+                    _set_backoff("airlabs2", secs=86400)
+                    _api_credit_exhausted["airlabs2"] = _billing_period_start(AIRLABS2_RESET_DAY)
+                    _log("[airlabs-2] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
+                elif r.status_code in (401, 403):
+                    _set_backoff("airlabs2", secs=86400)
+                    _log(f"[airlabs-2] auth error ({r.status_code}) — check AIRLABS_API_KEY_2")
+                elif r.status_code == 200:
+                    _al2_count = _airlabs2_increment()
+                    resp = r.json().get("response") or {}
+                    al2_origin = resp.get("dep_iata", "") or ""
+                    al2_dest   = resp.get("arr_iata", "") or ""
+                    al2_olat   = resp.get("dep_lat")
+                    al2_olon   = resp.get("dep_lng")
+                    al2_dlat   = resp.get("arr_lat")
+                    al2_dlon   = resp.get("arr_lng")
+                    if not (al2_origin or al2_dest):
+                        _log(f"[airlabs-2] {callsign}: no data [call #{_al2_count}]")
+                    _al2_ttl = _route_ttl(callsign) if (al2_origin or al2_dest) else ROUTE_MISS_TTL
+                    _cache_db_set_route(f"airlabs2:{callsign}", 'route',
+                                        al2_origin, al2_dest,
+                                        al2_olat, al2_olon, al2_dlat, al2_dlon,
+                                        int(time.time()) + _al2_ttl,
+                                        source="airlabs2")
+                else:
+                    _al2_count = _airlabs2_increment()
+                    _log(f"[airlabs-2] {callsign}: unexpected status {r.status_code} [call #{_al2_count}] — negative caching")
+                    _cache_db_set_route(f"airlabs2:{callsign}", 'route',
+                                        "", "", None, None, None, None,
+                                        int(time.time()) + ROUTE_MISS_TTL,
+                                        source="airlabs2")
+            except Exception:
+                pass
+        else:
+            _log(f"[airlabs-2] {callsign}: in backoff — skipping")
+
+    if al2_origin or al2_dest:
+        al2_plausible = _route_plausible(plane_lat, plane_lon,
+                                          al2_olat, al2_olon, al2_dlat, al2_dlon)
+        if al2_plausible:
+            _al2_filled_dest = not destination
+            if source and _al2_filled_dest:
+                if al2_origin and origin and al2_origin.upper() != origin.upper():
+                    _log(f"[airlabs-2] origin conflict ({origin} vs {al2_origin}) — preferring AirLabs-2 complete route")
+                    origin = al2_origin
+                    destination = al2_dest
+                    source = _al2_src
+                else:
+                    if not origin:
+                        origin = al2_origin
+                    destination = al2_dest
+                    source = f"{source}+airlabs2"
+            else:
+                if not origin:
+                    origin = al2_origin
+                if not destination:
+                    destination = al2_dest
+                source = source or _al2_src
+            if _al2_src != "airlabs2:cached":
+                _count_suffix = f" [call #{_al2_count}]" if _al2_count else ""
+                _log(f"[airlabs-2] {_airline_display(callsign)}: {_route_display(al2_origin, al2_dest)} accepted{_count_suffix}")
+        else:
+            if _al2_src != "airlabs2:cached":
+                _log(f"[airlabs-2] implausible route {al2_origin}->{al2_dest} rejected for {callsign}")
 
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
-    if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not _skip_paid:
+    if not (origin and destination) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not os.path.exists(AEROAPI_DISABLED_FLAG) and not _skip_paid:
         _cached_fa = _cache_db_get_route(callsign, 'aeroapi')
         if _cached_fa:
             # Apply geometry plausibility even on cache hits — a 7-day-old AeroAPI
@@ -1727,13 +2032,43 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
     destination = destination if destination.upper() not in BLANK_FIELDS else ""
 
-    # If still no route and paid APIs were eligible (not skipped, not disabled),
-    # record a combined miss so neither is called again for 2 hours.
-    if (not origin and not destination and callsign and not _skip_paid and not _apis_disabled
-            and (AIRLABS_API_KEY or FLIGHTAWARE_API_KEY)):
-        if not _in_backoff("airlabs") and not _in_backoff("aeroapi"):
-            _cache_db_set_paid_miss(callsign)
-            _log(f"[route] {callsign}: both paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
+    # If still no route and all eligible paid APIs returned empty, record a combined
+    # miss so none are called again for ROUTE_PAID_MISS_TTL.
+    # The AirLabs "chain" (key 1 or key 2) counts as one paid tier — if at least one
+    # was eligible AND AeroAPI was eligible, the full paid stack has been exhausted.
+    _airlabs_was_eligible = (
+        bool(AIRLABS_API_KEY) and not _apis_disabled
+        and not os.path.exists(AIRLABS_DISABLED_FLAG)
+        and not _skip_paid and not _in_backoff("airlabs")
+    )
+    _airlabs2_was_eligible = (
+        bool(AIRLABS_API_KEY_2) and not _apis_disabled
+        and not os.path.exists(AIRLABS2_DISABLED_FLAG)
+        and not _skip_paid and not _in_backoff("airlabs2")
+    )
+    _aeroapi_was_eligible = (
+        bool(FLIGHTAWARE_API_KEY) and not _apis_disabled
+        and not os.path.exists(AEROAPI_DISABLED_FLAG)
+        and not _skip_paid and not _in_backoff("aeroapi")
+    )
+    if (not origin and not destination and callsign
+            and (_airlabs_was_eligible or _airlabs2_was_eligible)
+            and _aeroapi_was_eligible):
+        _cache_db_set_paid_miss(callsign)
+        _log(f"[route] {callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
+
+    # Cross-check log — for commercial flights where adsbdb had data, report whether
+    # the paid APIs confirmed or overrode it (GA flights never enter this branch).
+    if _adsbdb_commercial and (adsbdb_origin or adsbdb_dest) and (origin or destination):
+        _db_route   = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
+        _paid_route = f"{origin or '?'}->{destination or '?'}"
+        _matched    = ((adsbdb_origin or "").upper() == (origin or "").upper()
+                       and (adsbdb_dest or "").upper() == (destination or "").upper())
+        if _matched:
+            _log(f"[adsbdb] {callsign}: paid APIs confirmed adsbdb route ({_paid_route})")
+        else:
+            _log(f"[adsbdb] {callsign}: paid APIs overrode adsbdb — was {_db_route}, now {_paid_route}")
+        _record_free_api_check(callsign, _db_route, _paid_route, _matched)
 
     # ── Resolved-route cache write ─────────────────────────────────────────────
     # If both endpoints are now known for a scheduled airline, cache the final
@@ -2204,14 +2539,14 @@ def run_test_lookup(callsign, use_cache=True):
             # ── 3. AirLabs (fresh, counts quota, respects backoff + kill-switch) ─
             _test_skip_paid = _skip_paid_apis(cs)
             if _test_skip_paid:
-                _log(f"{tag} [airlabs] skipping — N-number or military callsign")
+                _log(f"{tag} [airlabs-1] skipping — N-number or military callsign")
             if not (result["final_origin"] and result["final_destination"]) and AIRLABS_API_KEY and cs and not _test_skip_paid:
                 if _in_backoff("airlabs"):
-                    _log(f"{tag} [airlabs] in backoff — skipping")
+                    _log(f"{tag} [airlabs-1] in backoff — skipping")
                     result["steps"]["airlabs"] = {"skipped": "backoff"}
-                elif _apis_disabled:
-                    _log(f"{tag} [airlabs] APIs disabled — skipping")
-                    result["steps"]["airlabs"] = {"skipped": "apis_disabled"}
+                elif _apis_disabled or os.path.exists(AIRLABS_DISABLED_FLAG):
+                    _log(f"{tag} [airlabs-1] disabled — skipping")
+                    result["steps"]["airlabs"] = {"skipped": "disabled"}
                 else:
                     try:
                         r = requests.get(
@@ -2222,13 +2557,14 @@ def run_test_lookup(callsign, use_cache=True):
                         result["steps"]["airlabs"] = {"status": r.status_code}
                         if r.status_code == 429:
                             _set_backoff("airlabs", secs=3600)
-                            _log(f"{tag} [airlabs] 429 — rate limited")
+                            _log(f"{tag} [airlabs-1] 429 — rate limited")
                         elif r.status_code == 402:
                             _set_backoff("airlabs", secs=86400)
-                            _log(f"{tag} [airlabs] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
+                            _api_credit_exhausted["airlabs"] = _billing_period_start(AIRLABS_RESET_DAY)
+                            _log(f"{tag} [airlabs-1] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
                         elif r.status_code in (401, 403):
                             _set_backoff("airlabs", secs=86400)
-                            _log(f"{tag} [airlabs] auth error {r.status_code}")
+                            _log(f"{tag} [airlabs-1] auth error {r.status_code}")
                         elif r.status_code == 200:
                             _al_count = _airlabs_increment()
                             _resp = r.json().get("response") or {}
@@ -2241,7 +2577,7 @@ def run_test_lookup(callsign, use_cache=True):
                             result["steps"]["airlabs"].update({
                                 "origin": _al_origin, "destination": _al_dest,
                             })
-                            _log(f"{tag} [airlabs] route: {_al_origin or '?'}->{_al_dest or '?'} [call #{_al_count}]")
+                            _log(f"{tag} [airlabs-1] route: {_al_origin or '?'}->{_al_dest or '?'} [call #{_al_count}]")
                             if _al_origin or _al_dest:
                                 _al_ok = _route_plausible(plane_lat, plane_lon,
                                                            _al_olat, _al_olon, _al_dlat, _al_dlon)
@@ -2256,12 +2592,12 @@ def run_test_lookup(callsign, use_cache=True):
                                     result["route_source"]      = "airlabs"
                                     _route_resolved             = True
                                 else:
-                                    _log(f"{tag} [airlabs] route implausible — rejected")
+                                    _log(f"{tag} [airlabs-1] route implausible — rejected")
                         else:
                             _al_count = _airlabs_increment()
-                            _log(f"{tag} [airlabs] unexpected status {r.status_code} [call #{_al_count}] — no data")
+                            _log(f"{tag} [airlabs-1] unexpected status {r.status_code} [call #{_al_count}] — no data")
                     except Exception as _e:
-                        _log(f"{tag} [airlabs] error: {_e}")
+                        _log(f"{tag} [airlabs-1] error: {_e}")
                         result["steps"]["airlabs"] = {"error": str(_e)}
 
             # ── 4. AeroAPI (fresh, counts spend, respects backoff + kill-switch) ─
@@ -2271,9 +2607,9 @@ def run_test_lookup(callsign, use_cache=True):
                 if _in_backoff("aeroapi"):
                     _log(f"{tag} [aeroapi] in backoff — skipping")
                     result["steps"]["aeroapi"] = {"skipped": "backoff"}
-                elif _apis_disabled:
-                    _log(f"{tag} [aeroapi] APIs disabled — skipping")
-                    result["steps"]["aeroapi"] = {"skipped": "apis_disabled"}
+                elif _apis_disabled or os.path.exists(AEROAPI_DISABLED_FLAG):
+                    _log(f"{tag} [aeroapi] disabled — skipping")
+                    result["steps"]["aeroapi"] = {"skipped": "disabled"}
                 else:
                     try:
                         r = requests.get(

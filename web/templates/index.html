@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FlightTracker</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path fill='%2338bdf8' d='M28 13.5c0-1.4-1.1-2.5-2.5-2.5H19L13 2H10l3 9H7L5 9H2l2 7-2 7h3l2-2h6l-3 9h3l6-9h6.5c1.4 0 2.5-1.1 2.5-2.5v-5z'/></svg>">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=swap">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -275,7 +277,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <button class="active" onclick="showTab('config',this)">⚙ Config</button>
     <button onclick="showTab('display',this)">📺 Display</button>
     <button onclick="showTab('map',this)">🗺 Zone Map</button>
-    <button onclick="showTab('apis',this)">📊 Dashboard</button>
+    <button onclick="showTab('apis',this)">📡 APIs</button>
     <button onclick="showTab('stats',this)">📈 Stats</button>
     <button onclick="showTab('rules',this)">✏️ Rules</button>
     <button onclick="showTab('log',this)">📋 Log</button>
@@ -306,7 +308,10 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
   <div class="config-scroll">
 
     <div class="section">
-      <div class="section-header">Zone Boundaries</div>
+      <div class="section-header">
+        Zone Boundaries
+        <button class="btn" onclick="goToTab('map')" style="font-size:11px;padding:3px 10px;margin-left:auto;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer">🗺 Edit on Map</button>
+      </div>
       <div class="field-grid">
         <div class="field"><label>Top-Left Latitude (N)</label><input type="number" step="0.000001" id="zone_tl_y"></div>
         <div class="field"><label>Top-Left Longitude (W)</label><input type="number" step="0.000001" id="zone_tl_x"></div>
@@ -333,7 +338,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           <label>Max Altitude</label>
           <div class="input-wrap"><input type="number" step="1" id="max_altitude"><span class="unit-label" id="alt-unit-label-2">ft</span></div>
         </div>
-        <div class="field"><label>Local Airport</label><input type="text" id="local_airport" maxlength="4"><div class="hint">Fallback origin/destination (e.g. LAS)</div></div>
+        <div class="field"><label>Local Airports</label><input type="text" id="local_airports" style="width:100%;max-width:280px"><div class="hint">Comma-separated local airports used as origin/destination fallback (e.g. LAS,VGT,HSH)</div></div>
       </div>
     </div>
 
@@ -371,6 +376,16 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
             <span style="font-size:12px;color:var(--muted)">Reduces flicker on some HATs</span>
           </div>
         </div>
+        <div class="field"><label>Loading LED Enabled</label>
+          <div class="toggle-wrap">
+            <label class="toggle"><input type="checkbox" id="loading_led_enabled"><span class="toggle-slider"></span></label>
+            <span style="font-size:12px;color:var(--muted)">Physical LED indicator while data loads</span>
+          </div>
+        </div>
+        <div class="field"><label>Loading LED GPIO Pin</label>
+          <input type="number" min="1" max="40" id="loading_led_gpio_pin">
+          <div class="hint">GPIO pin for loading LED (default 25)</div>
+        </div>
       </div>
     </div>
 
@@ -386,6 +401,12 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         </div>
         <div class="field"><label>OpenWeather API Key</label>
           <div class="input-wrap"><input type="password" id="ow_key"><button class="eye-btn" onclick="toggleEye('ow_key',this)">👁</button></div>
+        </div>
+        <div class="field"><label>Rainfall Enabled</label>
+          <div class="toggle-wrap">
+            <label class="toggle"><input type="checkbox" id="rainfall_enabled"><span class="toggle-slider"></span></label>
+            <span style="font-size:12px;color:var(--muted)">Show rainfall overlay on weather display</span>
+          </div>
         </div>
       </div>
     </div>
@@ -404,6 +425,10 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
           <div class="input-wrap"><input type="password" id="airlabs_key"><button class="eye-btn" onclick="toggleEye('airlabs_key',this)">👁</button></div>
           <div class="hint">Free — 1,000 calls/month · <a href="https://airlabs.co" target="_blank" style="color:var(--accent)">airlabs.co</a></div>
         </div>
+        <div class="field"><label>AirLabs API Key 2 <span style="font-size:10px;color:var(--muted)">(backup)</span></label>
+          <div class="input-wrap"><input type="password" id="airlabs_key2"><button class="eye-btn" onclick="toggleEye('airlabs_key2',this)">👁</button></div>
+          <div class="hint">Secondary key — used automatically when Key 1 hits its monthly limit</div>
+        </div>
         <div class="field"><label>FlightAware AeroAPI Key</label>
           <div class="input-wrap"><input type="password" id="fa_key"><button class="eye-btn" onclick="toggleEye('fa_key',this)">👁</button></div>
           <div class="hint">$0.005/call · feeder credit applies</div>
@@ -413,6 +438,66 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         </div>
         <div class="field"><label>OpenSky Client Secret</label>
           <div class="input-wrap"><input type="password" id="opensky_secret"><button class="eye-btn" onclick="toggleEye('opensky_secret',this)">👁</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">API Billing</div>
+      <div class="field-grid">
+        <div class="field"><label>FlightAware Feeder Credit ($)</label>
+          <input type="number" step="0.01" min="0" id="feeder_monthly_credit">
+          <div class="hint">Monthly credit from being a feeder (default $10.00)</div>
+        </div>
+        <div class="field"><label>AirLabs Monthly Call Limit</label>
+          <input type="number" min="1" id="airlabs_monthly_limit">
+          <div class="hint">Free tier: 1,000 calls/month</div>
+        </div>
+        <div class="field"><label>AirLabs Billing Reset Day</label>
+          <input type="number" min="1" max="28" id="airlabs_reset_day">
+          <div class="hint">Day of month your AirLabs period resets (1–28)</div>
+        </div>
+        <div class="field"><label>AirLabs 2 Monthly Call Limit</label>
+          <input type="number" min="1" id="airlabs2_monthly_limit">
+          <div class="hint">Free tier: 1,000 calls/month</div>
+        </div>
+        <div class="field"><label>AirLabs 2 Billing Reset Day</label>
+          <input type="number" min="1" max="28" id="airlabs2_reset_day">
+          <div class="hint">Day of month your AirLabs 2 period resets (1–28)</div>
+        </div>
+        <div class="field"><label>AeroAPI Billing Reset Day</label>
+          <input type="number" min="1" max="28" id="aeroapi_reset_day">
+          <div class="hint">Day of month your FlightAware period resets (1–28)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Cache TTLs <span style="font-weight:400;font-size:10px;color:var(--muted);margin-left:8px">takes effect after Save &amp; Restart</span></div>
+      <div class="field-grid">
+        <div class="field"><label>adsbdb Cache (seconds)</label>
+          <input type="number" min="60" id="adsbdb_cache_ttl">
+          <div class="hint">How long adsbdb route results are cached (default 3600 = 1 hr)</div>
+        </div>
+        <div class="field"><label>OpenSky Cache (seconds)</label>
+          <input type="number" min="60" id="opensky_cache_ttl">
+          <div class="hint">How long OpenSky results are cached (default 3600 = 1 hr)</div>
+        </div>
+        <div class="field"><label>Scheduled Route Cache (seconds)</label>
+          <input type="number" min="60" id="route_ttl_scheduled">
+          <div class="hint">How long resolved commercial airline routes are cached (default 604800 = 7 days)</div>
+        </div>
+        <div class="field"><label>GA / Default Route Cache (seconds)</label>
+          <input type="number" min="60" id="route_ttl_default">
+          <div class="hint">How long GA, charter, and unknown routes are cached (default 3600 = 1 hr)</div>
+        </div>
+        <div class="field"><label>Miss Cache / Retry (seconds)</label>
+          <input type="number" min="30" id="route_miss_ttl">
+          <div class="hint">How long to suppress re-queries after an API returns no data (default 300 = 5 min)</div>
+        </div>
+        <div class="field"><label>Paid API Miss Suppression (seconds)</label>
+          <input type="number" min="60" id="route_paid_miss_ttl">
+          <div class="hint">How long to suppress both AirLabs &amp; AeroAPI after both return empty (default 7200 = 2 hr)</div>
         </div>
       </div>
     </div>
@@ -440,6 +525,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
       <h3>Instructions</h3>
       <div style="color:var(--muted);line-height:1.7;font-size:12px">Drag corner handles<br>to resize the zone.<br><br>
         <button class="btn btn-primary" style="width:100%;font-size:12px" onclick="saveFromMap()">Save Zone</button>
+        <button class="btn" style="width:100%;font-size:12px;margin-top:6px" onclick="discardMapChanges()">Discard Changes</button>
       </div>
     </div>
   </div>
@@ -467,16 +553,50 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 
     <div class="usage-grid">
       <div class="usage-card" id="usage-airlabs">
-        <h3>AirLabs — Route Data</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin-bottom:0">AirLabs — Route Data</h3>
+          <button class="btn" onclick="toggleAdjust('airlabs')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
+        </div>
         <div class="usage-stat"><span class="label">Calls used</span><span class="value" id="al-calls">—</span></div>
         <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="al-remaining">—</span></div>
         <div class="usage-bar-wrap"><div class="usage-bar" id="al-bar" style="width:0%"></div></div>
         <div class="usage-pct" id="al-pct">—</div>
         <div class="usage-stat" style="margin-top:8px"><span class="label">Period limit</span><span class="value" id="al-limit">—</span></div>
         <div class="usage-stat"><span class="label">Period</span><span class="value" id="al-period" style="font-size:11px">—</span></div>
+        <div id="adjust-airlabs" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Correct call count for this billing period:</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="number" id="adjust-airlabs-val" min="0" step="1" placeholder="calls used" style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:12px">
+            <button class="btn btn-primary" onclick="saveAdjust('airlabs')" style="font-size:11px;padding:4px 10px">Save</button>
+            <button class="btn" onclick="toggleAdjust('airlabs')" style="font-size:11px;padding:4px 10px">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="usage-card" id="usage-airlabs2">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin-bottom:0">AirLabs 2 — Backup Key</h3>
+          <button class="btn" onclick="toggleAdjust('airlabs2')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
+        </div>
+        <div class="usage-stat"><span class="label">Calls used</span><span class="value" id="al2-calls">—</span></div>
+        <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="al2-remaining">—</span></div>
+        <div class="usage-bar-wrap"><div class="usage-bar" id="al2-bar" style="width:0%"></div></div>
+        <div class="usage-pct" id="al2-pct">—</div>
+        <div class="usage-stat" style="margin-top:8px"><span class="label">Period limit</span><span class="value" id="al2-limit">—</span></div>
+        <div class="usage-stat"><span class="label">Period</span><span class="value" id="al2-period" style="font-size:11px">—</span></div>
+        <div id="adjust-airlabs2" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Correct call count for this billing period:</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="number" id="adjust-airlabs2-val" min="0" step="1" placeholder="calls used" style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:12px">
+            <button class="btn btn-primary" onclick="saveAdjust('airlabs2')" style="font-size:11px;padding:4px 10px">Save</button>
+            <button class="btn" onclick="toggleAdjust('airlabs2')" style="font-size:11px;padding:4px 10px">Cancel</button>
+          </div>
+        </div>
       </div>
       <div class="usage-card" id="usage-flightaware">
-        <h3>FlightAware AeroAPI</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin-bottom:0">FlightAware AeroAPI</h3>
+          <button class="btn" onclick="toggleAdjust('flightaware')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
+        </div>
         <div class="usage-stat"><span class="label">Est. calls</span><span class="value" id="fa-calls">—</span></div>
         <div class="usage-stat"><span class="label">Est. spend</span><span class="value" id="fa-spend">—</span></div>
         <div class="usage-bar-wrap"><div class="usage-bar" id="fa-bar" style="width:0%"></div></div>
@@ -484,6 +604,14 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         <div class="usage-stat" style="margin-top:8px"><span class="label">Monthly credit</span><span class="value" id="fa-credit">—</span></div>
         <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="fa-remaining">—</span></div>
         <div class="usage-stat"><span class="label">Period</span><span class="value" id="fa-period" style="font-size:11px">—</span></div>
+        <div id="adjust-flightaware" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Correct spend ($) for this billing period:</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="number" id="adjust-flightaware-val" min="0" step="0.001" placeholder="e.g. 4.253" style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:12px">
+            <button class="btn btn-primary" onclick="saveAdjust('flightaware')" style="font-size:11px;padding:4px 10px">Save</button>
+            <button class="btn" onclick="toggleAdjust('flightaware')" style="font-size:11px;padding:4px 10px">Cancel</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -519,6 +647,12 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <div class="usage-card" style="margin-bottom:16px">
       <h3 style="margin-bottom:12px">Recent Flights</h3>
       <div id="recent-flights-list"></div>
+    </div>
+
+    <!-- ── Free API Accuracy card ───────────────────────────────────────── -->
+    <div class="usage-card" style="margin-bottom:16px" id="free-api-card">
+      <h3 style="margin-bottom:12px">Free API Accuracy <span style="font-weight:400;font-size:10px;color:var(--muted);margin-left:6px">adsbdb vs. paid APIs · commercial flights only</span></h3>
+      <div id="free-api-content"><span style="font-size:11px;color:var(--muted)">Loading…</span></div>
     </div>
 
     <!-- ── Period / date-range card ─────────────────────────────────────── -->
@@ -610,7 +744,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
       <div style="padding:14px 18px 12px">
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.7">
           Enter any callsign or tail number to run a full live lookup — same API pipeline as a real overhead flight.
-          LOCAL_AIRPORT heuristic skipped — results come from APIs only.
+          LOCAL_AIRPORTS heuristic skipped — results come from APIs only.
           Logs are prefixed <code style="color:#22d3ee">[TEST:]</code> and the flight shows on the matrix for 30 seconds.<br>
           <strong style="color:var(--text)">Use cached data</strong> checked: calls the real <code>get_route()</code> / <code>get_aircraft_type()</code> — exact same code path including cache reads. Unchecked: skips cache, hits every API fresh.
         </div>
@@ -744,6 +878,11 @@ function showTab(name, btn) {
   if (name === 'apis')    initAPIsTab(); else stopAPIsTab();
   if (name === 'stats')   loadStatsTab();
   if (name === 'rules')   initRulesTab();
+}
+
+function goToTab(name) {
+  const btn = [...document.querySelectorAll('nav button')].find(b => (b.getAttribute('onclick') || '').includes("'" + name + "'"));
+  if (btn) btn.click();
 }
 
 // Close hamburger menu when clicking outside of it
@@ -971,21 +1110,37 @@ async function loadConfig() {
   document.getElementById('timezone').value = config.TIMEZONE || 'America/Los_Angeles';
   document.getElementById('min_altitude').value = ftToUnit(config.MIN_ALTITUDE, altUnit);
   document.getElementById('max_altitude').value = ftToUnit(config.MAX_ALTITUDE, altUnit);
-  document.getElementById('local_airport').value = config.LOCAL_AIRPORT || '';
+  document.getElementById('local_airports').value = config.LOCAL_AIRPORTS || config.LOCAL_AIRPORT || '';
   document.getElementById('brightness').value = config.BRIGHTNESS;
   document.getElementById('night_brightness').value = config.NIGHT_BRIGHTNESS ?? 20;
   document.getElementById('gpio_slowdown').value = config.GPIO_SLOWDOWN;
   document.getElementById('journey_code').value = config.JOURNEY_CODE_SELECTED || '';
   document.getElementById('journey_blank').value = config.JOURNEY_BLANK_FILLER || '';
   document.getElementById('hat_pwm').checked = config.HAT_PWM_ENABLED;
+  document.getElementById('loading_led_enabled').checked = config.LOADING_LED_ENABLED || false;
+  document.getElementById('loading_led_gpio_pin').value = config.LOADING_LED_GPIO_PIN ?? 25;
   document.getElementById('weather_location').value = config.WEATHER_LOCATION || '';
   document.getElementById('temp_units').value = config.TEMPERATURE_UNITS || 'imperial';
   document.getElementById('ow_key').value = config.OPENWEATHER_API_KEY || '';
+  document.getElementById('rainfall_enabled').checked = config.RAINFALL_ENABLED || false;
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
-  document.getElementById('airlabs_key').value = config.AIRLABS_API_KEY || '';
+  document.getElementById('airlabs_key').value  = config.AIRLABS_API_KEY   || '';
+  document.getElementById('airlabs_key2').value = config.AIRLABS_API_KEY_2 || '';
   document.getElementById('fa_key').value = config.FLIGHTAWARE_API_KEY || '';
   document.getElementById('opensky_id').value = config.OPENSKY_CLIENT_ID || '';
   document.getElementById('opensky_secret').value = config.OPENSKY_CLIENT_SECRET || '';
+  document.getElementById('feeder_monthly_credit').value = config.FEEDER_MONTHLY_CREDIT ?? 10.00;
+  document.getElementById('airlabs_monthly_limit').value  = config.AIRLABS_MONTHLY_LIMIT  ?? 1000;
+  document.getElementById('airlabs_reset_day').value      = config.AIRLABS_RESET_DAY      ?? 9;
+  document.getElementById('airlabs2_monthly_limit').value = config.AIRLABS2_MONTHLY_LIMIT ?? 1000;
+  document.getElementById('airlabs2_reset_day').value     = config.AIRLABS2_RESET_DAY     ?? 9;
+  document.getElementById('aeroapi_reset_day').value = config.AEROAPI_RESET_DAY ?? 1;
+  document.getElementById('adsbdb_cache_ttl').value = config.ADSBDB_CACHE_TTL ?? 3600;
+  document.getElementById('opensky_cache_ttl').value = config.OPENSKY_CACHE_TTL ?? 3600;
+  document.getElementById('route_ttl_scheduled').value = config.ROUTE_TTL_SCHEDULED ?? 604800;
+  document.getElementById('route_ttl_default').value = config.ROUTE_TTL_DEFAULT ?? 3600;
+  document.getElementById('route_miss_ttl').value = config.ROUTE_MISS_TTL ?? 300;
+  document.getElementById('route_paid_miss_ttl').value = config.ROUTE_PAID_MISS_TTL ?? 7200;
 }
 
 function buildConfigPayload() {
@@ -1003,22 +1158,38 @@ function buildConfigPayload() {
     ],
     MIN_ALTITUDE: unitToFt(parseFloat(document.getElementById('min_altitude').value), altUnit),
     MAX_ALTITUDE: unitToFt(parseFloat(document.getElementById('max_altitude').value), altUnit),
-    LOCAL_AIRPORT: document.getElementById('local_airport').value.trim().toUpperCase(),
+    LOCAL_AIRPORTS: document.getElementById('local_airports').value.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean).join(','),
     BRIGHTNESS: parseInt(document.getElementById('brightness').value),
     NIGHT_BRIGHTNESS: parseInt(document.getElementById('night_brightness').value),
     GPIO_SLOWDOWN: parseInt(document.getElementById('gpio_slowdown').value),
     JOURNEY_CODE_SELECTED: document.getElementById('journey_code').value,
     JOURNEY_BLANK_FILLER: document.getElementById('journey_blank').value,
     HAT_PWM_ENABLED: document.getElementById('hat_pwm').checked,
+    LOADING_LED_ENABLED: document.getElementById('loading_led_enabled').checked,
+    LOADING_LED_GPIO_PIN: parseInt(document.getElementById('loading_led_gpio_pin').value) || 25,
     WEATHER_LOCATION: document.getElementById('weather_location').value,
     TEMPERATURE_UNITS: document.getElementById('temp_units').value,
     OPENWEATHER_API_KEY: document.getElementById('ow_key').value,
+    RAINFALL_ENABLED: document.getElementById('rainfall_enabled').checked,
     TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
-    AIRLABS_API_KEY: document.getElementById('airlabs_key').value,
+    AIRLABS_API_KEY:   document.getElementById('airlabs_key').value,
+    AIRLABS_API_KEY_2: document.getElementById('airlabs_key2').value,
     FLIGHTAWARE_API_KEY: document.getElementById('fa_key').value,
     OPENSKY_CLIENT_ID: document.getElementById('opensky_id').value,
     OPENSKY_CLIENT_SECRET: document.getElementById('opensky_secret').value,
+    FEEDER_MONTHLY_CREDIT: (v => isNaN(v) ? 10.00 : v)(parseFloat(document.getElementById('feeder_monthly_credit').value)),
+    AIRLABS_MONTHLY_LIMIT:  parseInt(document.getElementById('airlabs_monthly_limit').value)  || 1000,
+    AIRLABS_RESET_DAY:      parseInt(document.getElementById('airlabs_reset_day').value)      || 9,
+    AIRLABS2_MONTHLY_LIMIT: parseInt(document.getElementById('airlabs2_monthly_limit').value) || 1000,
+    AIRLABS2_RESET_DAY:     parseInt(document.getElementById('airlabs2_reset_day').value)     || 9,
+    AEROAPI_RESET_DAY: parseInt(document.getElementById('aeroapi_reset_day').value) || 1,
+    ADSBDB_CACHE_TTL:    (v=>isNaN(v)||v<60?3600:v)(parseInt(document.getElementById('adsbdb_cache_ttl').value)),
+    OPENSKY_CACHE_TTL:   (v=>isNaN(v)||v<60?3600:v)(parseInt(document.getElementById('opensky_cache_ttl').value)),
+    ROUTE_TTL_SCHEDULED: (v=>isNaN(v)||v<60?604800:v)(parseInt(document.getElementById('route_ttl_scheduled').value)),
+    ROUTE_TTL_DEFAULT:   (v=>isNaN(v)||v<60?3600:v)(parseInt(document.getElementById('route_ttl_default').value)),
+    ROUTE_MISS_TTL:      (v=>isNaN(v)||v<30?300:v)(parseInt(document.getElementById('route_miss_ttl').value)),
+    ROUTE_PAID_MISS_TTL: (v=>isNaN(v)||v<60?7200:v)(parseInt(document.getElementById('route_paid_miss_ttl').value)),
   };
 }
 
@@ -1149,6 +1320,16 @@ function saveFromMap() {
   saveConfig(false);
 }
 
+function discardMapChanges() {
+  if (!config.ZONE_HOME) { showToast('Config not loaded yet', 'err'); return; }
+  const z = config.ZONE_HOME;
+  zoneBounds = { n: z.tl_y, s: z.br_y, w: z.tl_x, e: z.br_x };
+  zoneRect.setBounds([[zoneBounds.n, zoneBounds.w], [zoneBounds.s, zoneBounds.e]]);
+  placeCornerMarkers();
+  updateMapCoordDisplay();
+  showToast('Zone changes discarded', 'ok');
+}
+
 // ── Log ────────────────────────────────────────────────────────
 function initLog() {
   if (evtSource) return;
@@ -1198,7 +1379,6 @@ function appendLog(line) {
 
 function classifyLine(line) {
   if (line.includes('[TEST:'))         return 'test';   // must be first — test lines contain other tokens
-  if (line.includes('[overhead]   ->')) return 'result';
   if (line.includes('in_zone=True'))   return 'inzone';
   if (line.includes("plane=''"))       return 'nodata';
   if (/error|exception/i.test(line))   return 'error';
@@ -1314,10 +1494,12 @@ function stopAPIsTab() {
 
 async function loadAPIsTab() {
   try {
-    const [usageRes, stackRes] = await Promise.all([
+    const [usageRes, stackRes, statsRes] = await Promise.all([
       fetch('/api/usage').then(r => r.json()),
       fetch('/api/apis').then(r => r.json()),
+      fetch('/api/cache/stats').then(r => r.json()),
     ]);
+    _cacheStats = statsRes;
     renderUsage(usageRes);
     renderStack(stackRes.stack || []);
   } catch(e) {
@@ -1338,16 +1520,23 @@ function _isoOffset(days) {
 }
 
 async function loadStatsTab() {
-  // Set date inputs to 90-day default
-  const today = _isoToday();
+  // Set date inputs to 90-day default (browser time until server responds)
   document.getElementById('period-from').value = _isoOffset(-89);
-  document.getElementById('period-to').value   = today;
+  document.getElementById('period-to').value   = _serverToday || _isoToday();
   document.getElementById('period-apply-btn').style.display = 'none';
   _statsPeriodDirty = false;
   try {
-    const d = await fetch('/api/stats?days=90').then(r => r.json());
+    const [d, acc] = await Promise.all([
+      fetch('/api/stats?days=90').then(r => r.json()),
+      fetch('/api/free-api-accuracy').then(r => r.json()).catch(() => null),
+    ]);
+    if (d.today) {
+      _serverToday = d.today;
+      document.getElementById('period-to').value = d.today;
+    }
     renderTodayStats(d);
     renderRecentFlights(d);
+    if (acc && !acc.error) renderFreeApiAccuracy(acc);
     renderPeriodStats(d);
   } catch(e) {
     document.getElementById('stats-total').textContent = '—';
@@ -1380,7 +1569,7 @@ async function applyStatsPeriod() {
 
 async function resetStatsPeriod() {
   document.getElementById('period-from').value = _isoOffset(-89);
-  document.getElementById('period-to').value   = _isoToday();
+  document.getElementById('period-to').value   = _serverToday || _isoToday();
   document.getElementById('period-apply-btn').style.display = 'none';
   _statsPeriodDirty = false;
   try {
@@ -1512,6 +1701,55 @@ function renderRecentFlights(d) {
   }
 
   render(INIT);
+}
+
+function renderFreeApiAccuracy(d) {
+  const el = document.getElementById('free-api-content');
+  if (!el) return;
+  const total30 = d.thirty_day?.total ?? 0;
+  if (!total30) {
+    el.innerHTML = '<span style="font-size:11px;color:var(--muted)">No cross-checks recorded yet — data accumulates as commercial flights are seen overhead.</span>';
+    return;
+  }
+  const pct30    = d.thirty_day.pct ?? 0;
+  const mm30     = d.thirty_day.mismatches ?? 0;
+  const todayN   = d.today?.total ?? 0;
+  const todayPct = d.today?.pct != null ? d.today.pct + '%' : '—';
+  const barColor = pct30 >= 90 ? 'var(--accent)' : pct30 >= 70 ? '#f59e0b' : '#ef4444';
+
+  let html = `
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px">
+      <span style="font-size:28px;font-weight:700;font-family:monospace;color:${barColor}">${pct30}%</span>
+      <span style="font-size:12px;color:var(--muted)">match rate · last 30 days · ${total30.toLocaleString()} check${total30 !== 1 ? 's' : ''} · ${mm30.toLocaleString()} override${mm30 !== 1 ? 's' : ''}</span>
+    </div>
+    <div style="background:var(--bg);border-radius:4px;height:6px;margin-bottom:10px;overflow:hidden">
+      <div style="height:100%;width:${Math.round(pct30)}%;background:${barColor};border-radius:4px;transition:width .4s"></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:14px">
+      Today: ${todayN} check${todayN !== 1 ? 's' : ''} · ${todayPct} match
+    </div>`;
+
+  const mm = d.last_mismatches || [];
+  if (mm.length) {
+    html += `<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Recent Overrides (adsbdb route → paid API correction)</div>`;
+    html += `<table style="width:100%;font-size:11px;border-collapse:collapse">
+      <thead><tr style="color:var(--muted)">
+        <th style="text-align:left;padding:3px 6px;font-weight:500">Time</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">Flight</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">adsbdb had</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">Paid corrected to</th>
+      </tr></thead><tbody>`;
+    mm.forEach(r => {
+      html += `<tr style="border-top:1px solid var(--border)">
+        <td style="padding:4px 6px;color:var(--muted);white-space:nowrap">${escHtml(r.seen_at.slice(5,16))}</td>
+        <td style="padding:4px 6px;font-family:monospace;font-weight:600">${escHtml(r.callsign)}</td>
+        <td style="padding:4px 6px;font-family:monospace;color:var(--muted)">${escHtml(r.free_route)}</td>
+        <td style="padding:4px 6px;font-family:monospace;color:var(--accent)">${escHtml(r.paid_route)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+  }
+  el.innerHTML = html;
 }
 
 function renderPeriodStats(d) {
@@ -1756,7 +1994,10 @@ function fmtPeriod(start, end) {
   return `${fmt(start)} – ${fmt(end)}`;
 }
 
+let _usageSnapshot = {};
+let _serverToday   = null;   // set on first stats load; timezone-correct alternative to _isoToday()
 function renderUsage(d) {
+  _usageSnapshot = d;
   document.getElementById('apis-month').textContent = '';
 
   const al = d.airlabs || {};
@@ -1770,6 +2011,17 @@ function renderUsage(d) {
   alBar.style.width = Math.min(100, alPct) + '%';
   alBar.className = 'usage-bar' + (alPct >= 90 ? ' danger' : alPct >= 70 ? ' warn' : '');
 
+  const al2 = d.airlabs2 || {};
+  document.getElementById('al2-calls').textContent     = al2.calls ?? '—';
+  document.getElementById('al2-remaining').textContent = al2.remaining ?? '—';
+  document.getElementById('al2-limit').textContent     = al2.limit ?? '—';
+  document.getElementById('al2-period').textContent    = fmtPeriod(al2.period_start, al2.period_end);
+  const al2Pct = al2.pct_used ?? 0;
+  document.getElementById('al2-pct').textContent = `${al2Pct}% used`;
+  const al2Bar = document.getElementById('al2-bar');
+  al2Bar.style.width = Math.min(100, al2Pct) + '%';
+  al2Bar.className = 'usage-bar' + (al2Pct >= 90 ? ' danger' : al2Pct >= 70 ? ' warn' : '');
+
   const fa = d.flightaware || {};
   document.getElementById('fa-calls').textContent     = fa.calls ?? '—';
   document.getElementById('fa-spend').textContent     = fa.est_spend != null ? `$${fa.est_spend.toFixed(3)}` : '—';
@@ -1781,6 +2033,90 @@ function renderUsage(d) {
   const faBar = document.getElementById('fa-bar');
   faBar.style.width = Math.min(100, faPct) + '%';
   faBar.className = 'usage-bar' + (faPct >= 90 ? ' danger' : faPct >= 70 ? ' warn' : '');
+}
+
+function toggleAdjust(api) {
+  const row = document.getElementById('adjust-' + api);
+  if (!row) return;
+  const showing = row.style.display !== 'none';
+  row.style.display = showing ? 'none' : 'block';
+  if (!showing) {
+    const inp = document.getElementById('adjust-' + api + '-val');
+    if (api === 'airlabs') {
+      inp.value = _usageSnapshot?.airlabs?.calls ?? 0;
+    } else if (api === 'airlabs2') {
+      inp.value = _usageSnapshot?.airlabs2?.calls ?? 0;
+    } else {
+      inp.value = _usageSnapshot?.flightaware?.est_spend ?? 0;
+    }
+    inp.focus();
+    inp.select();
+  }
+}
+
+async function saveAdjust(api) {
+  const inp = document.getElementById('adjust-' + api + '-val');
+  const value = parseFloat(inp.value);
+  if (isNaN(value) || value < 0) { showToast('Enter a valid number', 'err'); return; }
+  try {
+    const r = await fetch('/api/usage/adjust', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ api, value })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Request failed');
+    document.getElementById('adjust-' + api).style.display = 'none';
+    const usageRes = await fetch('/api/usage').then(r => r.json());
+    renderUsage(usageRes);
+    showToast('Usage corrected', 'ok');
+  } catch(e) {
+    showToast('Error: ' + e.message, 'err');
+  }
+}
+
+let _cacheStats = {};
+
+async function toggleApi(apiKey) {
+  try {
+    const r = await fetch('/api/apis/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ api: apiKey })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    const [stackRes, statsRes] = await Promise.all([
+      fetch('/api/apis').then(r => r.json()),
+      fetch('/api/cache/stats').then(r => r.json()),
+    ]);
+    _cacheStats = statsRes;
+    renderStack(stackRes.stack || []);
+    showToast(j.enabled ? `${apiKey} enabled` : `${apiKey} disabled`, 'ok');
+  } catch(e) {
+    showToast('Error: ' + e.message, 'err');
+  }
+}
+
+async function clearApiCache(apiKey) {
+  try {
+    const r = await fetch('/api/cache/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ api: apiKey })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Failed');
+    const [stackRes, statsRes] = await Promise.all([
+      fetch('/api/apis').then(r => r.json()),
+      fetch('/api/cache/stats').then(r => r.json()),
+    ]);
+    _cacheStats = statsRes;
+    renderStack(stackRes.stack || []);
+    showToast(`Cache cleared — ${j.deleted} entries removed`, 'ok');
+  } catch(e) {
+    showToast('Error: ' + e.message, 'err');
+  }
 }
 
 function renderStack(stack) {
@@ -1803,8 +2139,36 @@ function renderStack(stack) {
     const urlLink = api.url
       ? `<a href="${api.url}" target="_blank" style="color:var(--accent);font-size:11px;text-decoration:none">${api.url.replace('https://','')}</a>`
       : '';
+
+    // Enable/disable toggle — only for APIs that have a flag (api_key !== null)
+    const canToggle = api.api_key && api.priority > 0 && api.priority < 6;
+    const toggleHtml = canToggle ? (() => {
+      const enabled = !api.disabled;
+      const col  = enabled ? 'var(--accent)' : 'var(--muted)';
+      const lbl  = enabled ? 'Enabled' : 'Disabled';
+      return `<button onclick="toggleApi('${api.api_key}')"
+        title="${enabled ? 'Click to disable' : 'Click to enable'}"
+        style="display:inline-flex;align-items:center;gap:5px;background:none;border:1px solid ${col};
+               color:${col};border-radius:12px;padding:2px 10px;font-size:10px;cursor:pointer;margin-right:6px">
+        <span style="width:8px;height:8px;border-radius:50%;background:${col};display:inline-block"></span>
+        ${lbl}
+      </button>`;
+    })() : '';
+
+    // Cache clear button — for apis with a cache_key
+    const cacheCount = api.api_key ? (_cacheStats[api.api_key] ?? '?') : null;
+    const cacheHtml = (canToggle && cacheCount !== null) ? `<button onclick="clearApiCache('${api.api_key}')"
+      title="Delete cached entries — forces a live API call next time"
+      style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:12px;
+             padding:2px 10px;font-size:10px;cursor:pointer">
+      🗑 Clear cache (${cacheCount})
+    </button>` : '';
+
+    const controlsHtml = (toggleHtml || cacheHtml)
+      ? `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px">${toggleHtml}${cacheHtml}</div>` : '';
+
     return `
-      <div class="stack-row">
+      <div class="stack-row" style="${api.disabled ? 'opacity:.55' : ''}">
         <div class="${prioClass}">${prioLabel}</div>
         <div>
           <div class="stack-name">${escHtml(api.name)}</div>
@@ -1812,6 +2176,7 @@ function renderStack(stack) {
           ${urlLink ? `<div style="margin-bottom:4px">${urlLink}</div>` : ''}
           <div class="stack-cost">${escHtml(api.cost)}</div>
           <div class="stack-notes">${escHtml(api.notes)}</div>
+          ${controlsHtml}
         </div>
         <div class="stack-badge">${keyBadge}</div>
       </div>`;
