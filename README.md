@@ -17,7 +17,9 @@ This version takes the original display concept and builds a full flight intelli
 
 ### My specific use case
 
-I live in Las Vegas directly under a departure corridor from LAS (Harry Reid International). Roughly **90% of the traffic I see is a commercial departure out of LAS** — scheduled airline flights with filed flight plans. The routing logic reflects this: free historical databases are trusted conservatively (they can't know today's specific flight assignment), while real-time paid APIs are used as the authoritative source for commercial routes. If your local traffic skews toward GA aircraft or you're not near a major hub, you may find the free-API trust rules are more permissive than you need — or less. The `LOCAL_AIRPORTS` config and the override rules table give you the main levers to tune this.
+I live in Las Vegas directly under a departure corridor from LAS (Harry Reid International). Overhead flights are pulled from **my own ADS-B receiver** — an RTL-SDR dongle running `dump1090` — which picks up aircraft transponder signals directly. No third-party feed subscription required; you just need the hardware in range. The receiver host is configurable, so you can also point it at a network-accessible `dump1090` instance, `fr24feed`, or any compatible JSON source on another machine.
+
+Roughly **90% of the traffic I see is a commercial departure out of LAS** — scheduled airline flights with filed flight plans. The routing logic reflects this: free historical databases are trusted conservatively (they can't know today's specific flight assignment), while real-time paid APIs are used as the authoritative source for commercial routes. If your local traffic skews toward GA aircraft or you're not near a major hub, you may find the free-API trust rules are more permissive than you need — or less. The `LOCAL_AIRPORTS` config and the override rules table give you the main levers to tune this.
 
 ---
 
