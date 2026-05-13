@@ -1567,7 +1567,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         if _resolved and _resolved[0] and _resolved[1]:
             _rsrc = _resolved[6].removesuffix(":cached")  # strip any trailing :cached so it isn't doubled
             _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
-            return _resolved[0], _resolved[1], _resolved_label, "", ""  # 4th: override plane  5th: override display
+            return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
 
     # ── 1. adsbdb (static historical DB) ──────────────────────────────────────
     adsbdb_origin = adsbdb_dest = ""
@@ -1633,7 +1633,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                              adsbdb_dlat, adsbdb_dlon)
     )
     if adsbdb_ok:
-        origin, destination, source = adsbdb_origin, adsbdb_dest, _adsbdb_src
+        # Fill blanks only — preserve any endpoint already set by a partial override.
+        if not origin:
+            origin = adsbdb_origin
+        if not destination:
+            destination = adsbdb_dest
+        source = source or _adsbdb_src
         if _adsbdb_src != "adsbdb:cached":
             _log(f"[adsbdb] {_airline_display(callsign)}: {_route_display(adsbdb_origin, adsbdb_dest)} accepted")
     elif adsbdb_origin or adsbdb_dest:
