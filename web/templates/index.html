@@ -1952,6 +1952,58 @@ function renderStats(d) {
   renderPeriodStats(d);
 }
 
+// ── Search pagination state ────────────────────────────────────────────────
+let _searchQ        = '';
+let _searchOffset   = 0;
+let _searchTotal    = 0;
+let _searchLastDate = null;
+
+function _buildSearchRow(s, QU) {
+  const hlCs  = QU.length >= 2 && s.callsign.includes(QU);
+  const hlReg = QU.length >= 2 && s.registration && s.registration.includes(QU);
+  const hlRt  = QU.length >= 2 && ((s.origin || '').includes(QU) || (s.destination || '').includes(QU));
+  const csHtml  = `<span style="font-family:monospace;font-weight:${hlCs?'700':'400'};color:${hlCs?'var(--text)':'var(--muted)'}">${escHtml(s.callsign)}</span>`
+                + (s.airline && !hlCs ? ` <span style="font-size:10px;color:var(--muted)">(${escHtml(s.airline)})</span>` : '');
+  const regHtml = s.registration
+    ? `<span style="font-family:monospace;font-weight:${hlReg?'700':'400'};color:${hlReg?'var(--text)':'var(--muted)'}">${escHtml(s.registration)}</span>`
+    : `<span style="color:var(--border)">—</span>`;
+  const rtHtml = `<span style="font-family:monospace;color:${hlRt?'var(--text)':'var(--muted)'}">${escHtml(s.origin||'?')}→${escHtml(s.destination||'?')}</span>`;
+  const acHtml = s.aircraft ? `<span style="color:var(--muted);font-size:10px">${escHtml(s.aircraft)}</span>` : '';
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(s.time)}</td>
+    <td style="padding:4px 6px">${csHtml}</td>
+    <td style="padding:4px 6px">${regHtml}</td>
+    <td style="padding:4px 6px">${rtHtml}</td>
+    <td style="padding:4px 0">${acHtml}</td>`;
+  return tr;
+}
+
+function _appendSearchRows(items, tbody, QU) {
+  items.forEach(s => {
+    if (s.date !== _searchLastDate) {
+      _searchLastDate = s.date;
+      const sep = document.createElement('tr');
+      sep.innerHTML = `<td colspan="5" style="padding:8px 0 3px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;border-top:1px solid var(--border)">${fmtDate(s.date, {weekday:'short',month:'short',day:'numeric'})}</td>`;
+      tbody.appendChild(sep);
+    }
+    tbody.appendChild(_buildSearchRow(s, QU));
+  });
+}
+
+function _updateSeeMoreBtn(resEl) {
+  const existing = document.getElementById('search-more-btn');
+  if (existing) existing.remove();
+  if (_searchOffset >= _searchTotal) return;
+  const remaining = (_searchTotal - _searchOffset).toLocaleString();
+  const btn = document.createElement('button');
+  btn.id = 'search-more-btn';
+  btn.style.cssText = 'margin-top:10px;background:none;border:1px solid var(--border);border-radius:6px;padding:6px 14px;font-size:12px;color:var(--muted);cursor:pointer;width:100%';
+  btn.textContent = `See ${remaining} more`;
+  btn.onclick = loadMoreSearchResults;
+  resEl.appendChild(btn);
+}
+
 async function doStatsSearch() {
   const input = document.getElementById('stats-search-input');
   const resEl = document.getElementById('stats-search-results');
@@ -1960,30 +2012,25 @@ async function doStatsSearch() {
     resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">Enter at least 2 characters.</span>';
     return;
   }
-  resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">Searching…</span>';
+  _searchQ = q; _searchOffset = 0; _searchTotal = 0; _searchLastDate = null;
+  resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">Searching...</span>';
   try {
-    const r = await fetch(`/api/stats/search?q=${encodeURIComponent(q)}`);
+    const r = await fetch(`/api/stats/search?q=${encodeURIComponent(q)}&limit=100&offset=0`);
     const d = await r.json();
     if (d.error) { resEl.innerHTML = `<span style="font-size:11px;color:var(--red)">${d.error}</span>`; return; }
     const items = d.sightings || [];
-    if (!items.length) {
-      resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">No matches found.</span>';
-      return;
-    }
+    if (!items.length) { resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">No matches found.</span>'; return; }
 
-    const QU = q.toUpperCase();
+    _searchTotal  = d.count;
+    _searchOffset = items.length;
 
-    // Build header
     const header = document.createElement('div');
     header.style.cssText = 'font-size:10px;color:var(--muted);margin-bottom:8px';
-    header.innerHTML = `${d.count} sighting${d.count !== 1 ? 's' : ''} for "<strong style="color:var(--text)">${escHtml(q)}</strong>"${d.count > (d.returned ?? d.count) ? ` — showing newest ${d.returned ?? 200}` : ''}`;
-    resEl.innerHTML = '';
-    resEl.appendChild(header);
+    header.textContent = `${d.count.toLocaleString()} sighting${d.count !== 1 ? 's' : ''} for "${q}"`;
 
     const tbl = document.createElement('table');
+    tbl.id = 'search-table';
     tbl.style.cssText = 'width:100%;font-size:11px;border-collapse:collapse';
-
-    // Column headers
     tbl.innerHTML = `<thead><tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
       <th style="padding:4px 6px 4px 0;font-weight:500;white-space:nowrap">Date / Time</th>
       <th style="padding:4px 6px;font-weight:500">Flight #</th>
@@ -1991,50 +2038,30 @@ async function doStatsSearch() {
       <th style="padding:4px 6px;font-weight:500">Route</th>
       <th style="padding:4px 0;font-weight:500;color:var(--muted)">Aircraft</th>
     </tr></thead><tbody></tbody>`;
-    const tbody = tbl.querySelector('tbody');
 
-    // Group by date for visual separation
-    let lastDate = null;
-    items.forEach(s => {
-      // Date separator row
-      if (s.date !== lastDate) {
-        lastDate = s.date;
-        const sep = document.createElement('tr');
-        sep.innerHTML = `<td colspan="5" style="padding:8px 0 3px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;border-top:1px solid var(--border)">${fmtDate(s.date, {weekday:'short',month:'short',day:'numeric'})}</td>`;
-        tbody.appendChild(sep);
-      }
-
-      const tr = document.createElement('tr');
-
-      // Highlight the matched field
-      const hlCs  = QU.length >= 2 && s.callsign.includes(QU);
-      const hlReg = QU.length >= 2 && s.registration && s.registration.includes(QU);
-      const hlRt  = QU.length >= 2 && ((s.origin || '').includes(QU) || (s.destination || '').includes(QU));
-
-      const csHtml  = `<span style="font-family:monospace;font-weight:${hlCs?'700':'400'};color:${hlCs?'var(--text)':'var(--muted)'}">${escHtml(s.callsign)}</span>`
-                    + (s.airline && !hlCs ? ` <span style="font-size:10px;color:var(--muted)">(${escHtml(s.airline)})</span>` : '');
-      const regHtml = s.registration
-        ? `<span style="font-family:monospace;font-weight:${hlReg?'700':'400'};color:${hlReg?'var(--text)':'var(--muted)'}">${escHtml(s.registration)}</span>`
-        : `<span style="color:var(--border)">—</span>`;
-      const orig = s.origin      || '?';
-      const dest = s.destination || '?';
-      const rtHtml = `<span style="font-family:monospace;color:${hlRt?'var(--text)':'var(--muted)'}">${escHtml(orig)}→${escHtml(dest)}</span>`;
-      const acHtml = s.aircraft
-        ? `<span style="color:var(--muted);font-size:10px">${escHtml(s.aircraft)}</span>`
-        : '';
-
-      tr.innerHTML = `
-        <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(s.time)}</td>
-        <td style="padding:4px 6px">${csHtml}</td>
-        <td style="padding:4px 6px">${regHtml}</td>
-        <td style="padding:4px 6px">${rtHtml}</td>
-        <td style="padding:4px 0">${acHtml}</td>`;
-      tbody.appendChild(tr);
-    });
-
+    resEl.innerHTML = '';
+    resEl.appendChild(header);
     resEl.appendChild(tbl);
+    _appendSearchRows(items, tbl.querySelector('tbody'), q.toUpperCase());
+    _updateSeeMoreBtn(resEl);
   } catch(e) {
     resEl.innerHTML = '<span style="font-size:11px;color:var(--red)">Search failed.</span>';
+  }
+}
+
+async function loadMoreSearchResults() {
+  const btn = document.getElementById('search-more-btn');
+  if (btn) { btn.textContent = 'Loading...'; btn.disabled = true; }
+  try {
+    const r = await fetch(`/api/stats/search?q=${encodeURIComponent(_searchQ)}&limit=100&offset=${_searchOffset}`);
+    const d = await r.json();
+    if (d.error || !d.sightings?.length) { if (btn) btn.remove(); return; }
+    _searchOffset += d.sightings.length;
+    const tbody = document.querySelector('#search-table tbody');
+    if (tbody) _appendSearchRows(d.sightings, tbody, _searchQ.toUpperCase());
+    _updateSeeMoreBtn(document.getElementById('stats-search-results'));
+  } catch(e) {
+    if (btn) { btn.textContent = 'Load failed — tap to retry'; btn.disabled = false; }
   }
 }
 

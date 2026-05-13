@@ -700,17 +700,20 @@ def _db_recent(date_from: str, date_to: str, limit: int = 50) -> list:
             conn.close()
 
 
-def _db_search(q: str) -> tuple[list, int] | None:
+def _db_search(q: str, limit: int = 100, offset: int = 0) -> tuple[list, int] | None:
     """
     Search sightings in ft_flights.db (case-insensitive substring match on
     callsign, registration, origin, or destination).
     Returns (rows_newest_first, total_match_count) or None if the DB is unavailable.
-    Rows are capped at 200; total_match_count reflects the real number of matches
-    so the UI can show "showing newest 200 of 450" accurately.
+    Supports pagination via limit/offset; limit is capped at 200 per page.
+    total_match_count reflects the real number of matches so the UI can show
+    "showing 100 of 1,450" accurately.
     """
     if not DB_FILE.exists():
         return None
     conn = None
+    limit  = min(max(int(limit), 1), 200)
+    offset = max(int(offset), 0)
     try:
         conn = sqlite3.connect(str(DB_FILE))
         conn.row_factory = sqlite3.Row
@@ -730,7 +733,7 @@ def _db_search(q: str) -> tuple[list, int] | None:
             FROM sightings
             WHERE {where}
             ORDER BY seen_at DESC
-            LIMIT 200
+            LIMIT {limit} OFFSET {offset}
             """,
             params,
         ).fetchall()
@@ -868,11 +871,17 @@ def stats_search():
     if len(q) < 2:
         return jsonify({"error": "Query must be at least 2 characters"}), 400
 
-    db_result = _db_search(q)
+    try:
+        limit  = min(int(request.args.get("limit",  100)), 200)
+        offset = max(int(request.args.get("offset",   0)),   0)
+    except (ValueError, TypeError):
+        limit, offset = 100, 0
+
+    db_result = _db_search(q, limit=limit, offset=offset)
     source    = "db"
 
     if db_result is None:
-        # DB unavailable — fall back to log parsing
+        # DB unavailable — fall back to log parsing (no pagination support)
         all_sightings = _parse_log_sightings(LOG_PATH)
         sightings = [
             s for s in all_sightings
@@ -882,7 +891,7 @@ def stats_search():
             or q in s["destination"]
         ]
         total_count = len(sightings)
-        sightings = sightings[:200]
+        sightings = sightings[:limit]
         source = "log"
     else:
         sightings, total_count = db_result
@@ -890,6 +899,7 @@ def stats_search():
     return jsonify({
         "query":     q,
         "count":     total_count,
+        "offset":    offset,
         "returned":  len(sightings),
         "source":    source,
         "sightings": sightings,
