@@ -26,66 +26,66 @@ from threading import Thread, Lock
 
 try:
     from config import MIN_ALTITUDE
-except (ImportError, NameError):
+except Exception:
     MIN_ALTITUDE = 0  # feet
 
 try:
     from config import MAX_ALTITUDE
-except (ImportError, NameError):
+except Exception:
     MAX_ALTITUDE = 10000  # feet
 
 try:
     from config import ZONE_HOME, LOCATION_HOME
     ZONE_DEFAULT = ZONE_HOME
     LOCATION_DEFAULT = LOCATION_HOME
-except (ImportError, NameError):
+except Exception:
     ZONE_DEFAULT = {"tl_y": 62.61, "tl_x": -13.07, "br_y": 49.71, "br_x": 3.46}
     LOCATION_DEFAULT = [51.509865, -0.118092, 6371]
 
 try:
     from config import RECEIVER_HOST
-except (ImportError, NameError):
+except Exception:
     try:
         from config import DUMP1090_HOST as RECEIVER_HOST
-    except (ImportError, NameError):
+    except Exception:
         RECEIVER_HOST = "localhost"
 
 try:
     from config import LOCAL_AIRPORTS
-except (ImportError, NameError):
+except Exception:
     LOCAL_AIRPORTS = ""
 
 # Backward-compat: if only the old single-value key exists, use it as a seed.
 try:
     from config import LOCAL_AIRPORT as _LOCAL_AIRPORT_LEGACY
-except (ImportError, NameError):
+except Exception:
     _LOCAL_AIRPORT_LEGACY = ""
 
 try:
     from config import OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET
-except (ImportError, NameError):
+except Exception:
     OPENSKY_CLIENT_ID = None
     OPENSKY_CLIENT_SECRET = None
 
 try:
     from config import FLIGHTAWARE_API_KEY
-except (ImportError, NameError):
+except Exception:
     FLIGHTAWARE_API_KEY = None
 
 try:
     from config import AIRLABS_API_KEY
-except (ImportError, NameError):
+except Exception:
     AIRLABS_API_KEY = None
 
 try:
     from config import AIRLABS_API_KEY_2
-except (ImportError, NameError):
+except Exception:
     AIRLABS_API_KEY_2 = None
 
 
 try:
     from config import TIMEZONE
-except (ImportError, NameError):
+except Exception:
     TIMEZONE = "America/Los_Angeles"
 
 # Update the module-level timezone used by _log() — _log() looks up _PACIFIC
@@ -164,27 +164,27 @@ AEROAPI_COST_PER_CALL  = 0.005       # $0.005 per AeroAPI call (platform rate �
 # Billing tracking constants — can be overridden in config.py (managed via web config page)
 try:
     from config import AIRLABS_MONTHLY_LIMIT
-except (ImportError, NameError):
+except Exception:
     AIRLABS_MONTHLY_LIMIT = 1000     # free tier: 1,000 calls/month
 
 try:
     from config import AIRLABS_RESET_DAY
-except (ImportError, NameError):
+except Exception:
     AIRLABS_RESET_DAY = 9            # AirLabs billing period resets on the 9th
 
 try:
     from config import AIRLABS2_MONTHLY_LIMIT
-except (ImportError, NameError):
+except Exception:
     AIRLABS2_MONTHLY_LIMIT = 1000    # free tier: 1,000 calls/month
 
 try:
     from config import AIRLABS2_RESET_DAY
-except (ImportError, NameError):
+except Exception:
     AIRLABS2_RESET_DAY = 9           # AirLabs 2 billing period resets on the 9th
 
 try:
     from config import AEROAPI_RESET_DAY
-except (ImportError, NameError):
+except Exception:
     AEROAPI_RESET_DAY = 1            # FlightAware credit resets on the 1st
 
 # Local airports — used for journey/zone display features.
@@ -1030,32 +1030,32 @@ _SCHEDULED_PREFIXES = frozenset([
 # Cache TTLs — all overridable via config.py; defaults below.
 try:
     from config import ADSBDB_CACHE_TTL
-except (ImportError, NameError):
+except Exception:
     ADSBDB_CACHE_TTL = 3600         # free/unlimited — keep short; fresh data costs nothing
 
 try:
     from config import OPENSKY_CACHE_TTL
-except (ImportError, NameError):
+except Exception:
     OPENSKY_CACHE_TTL = 3600        # free/unlimited, hex-keyed — keep short
 
 try:
     from config import ROUTE_TTL_SCHEDULED
-except (ImportError, NameError):
+except Exception:
     ROUTE_TTL_SCHEDULED = 604800    # 7 days — commercial + regional airlines (stable schedules)
 
 try:
     from config import ROUTE_TTL_DEFAULT
-except (ImportError, NameError):
+except Exception:
     ROUTE_TTL_DEFAULT = 3600        # 1 hour — GA, helicopters, charters, unknown (can re-depart)
 
 try:
     from config import ROUTE_MISS_TTL
-except (ImportError, NameError):
+except Exception:
     ROUTE_MISS_TTL = 300            # negative cache: retry after 5 min when an API has no data
 
 try:
     from config import ROUTE_PAID_MISS_TTL
-except (ImportError, NameError):
+except Exception:
     ROUTE_PAID_MISS_TTL = 7200      # both paid APIs confirmed empty — suppress for 2 h
 
 AIRCRAFT_CACHE_TTL = 86400  # aircraft type is static; 24 hr TTL
@@ -1593,8 +1593,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                         int(time.time()) + ADSBDB_CACHE_TTL,
                                         source="adsbdb")
                 # 5xx / unexpected: don't cache — transient error, retry next poll
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"[adsbdb] {callsign}: request error — {e}")
 
     # Trust adsbdb only for GA / non-commercial flights.
     # Scheduled airlines (callsign prefix in _SCHEDULED_PREFIXES) are NOT trusted from
@@ -1673,8 +1673,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                             None, None, None, None,
                                             int(time.time()) + _sky_ttl,
                                             source="opensky")
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log(f"[opensky] {callsign}: request error — {e}")
 
         if _sky_origin or _sky_dest:
             # Only trust when the origin is a local airport (departing local).
@@ -1790,8 +1790,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                         "", "", None, None, None, None,
                                         int(time.time()) + ROUTE_MISS_TTL,
                                         source="airlabs")
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"[airlabs-1] {callsign}: request error — {e}")
         else:
             _log(f"[airlabs-1] {callsign}: in backoff — skipping")
 
@@ -1895,8 +1895,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                         "", "", None, None, None, None,
                                         int(time.time()) + ROUTE_MISS_TTL,
                                         source="airlabs2")
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"[airlabs-2] {callsign}: request error — {e}")
         else:
             _log(f"[airlabs-2] {callsign}: in backoff — skipping")
 
@@ -2025,8 +2025,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                         "", "", None, None, None, None,
                                         int(time.time()) + ROUTE_MISS_TTL,
                                         source="aeroapi")
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"[aeroapi] {callsign}: request error — {e}")
         # else: in backoff — already logged when backoff was set
 
     origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
@@ -2600,6 +2600,66 @@ def run_test_lookup(callsign, use_cache=True):
                         _log(f"{tag} [airlabs-1] error: {_e}")
                         result["steps"]["airlabs"] = {"error": str(_e)}
 
+            # ── 3b. AirLabs 2 (secondary key — same logic as production path) ─
+            # Only tried when AirLabs 1 didn't make a live call (_al_count == 0).
+            _al2_count = 0
+            if (not (result["final_origin"] and result["final_destination"])
+                    and _al_count == 0
+                    and AIRLABS_API_KEY_2 and cs and not _test_skip_paid):
+                if _in_backoff("airlabs2"):
+                    _log(f"{tag} [airlabs-2] in backoff — skipping")
+                    result["steps"]["airlabs2"] = {"skipped": "backoff"}
+                elif _apis_disabled or os.path.exists(AIRLABS2_DISABLED_FLAG):
+                    _log(f"{tag} [airlabs-2] disabled — skipping")
+                    result["steps"]["airlabs2"] = {"skipped": "disabled"}
+                else:
+                    try:
+                        r = requests.get(
+                            AIRLABS_URL,
+                            params={"flight_icao": cs, "api_key": AIRLABS_API_KEY_2},
+                            timeout=5,
+                        )
+                        result["steps"]["airlabs2"] = {"status": r.status_code}
+                        if r.status_code == 429:
+                            _set_backoff("airlabs2", secs=3600)
+                            _log(f"{tag} [airlabs-2] 429 — rate limited")
+                        elif r.status_code == 402:
+                            _set_backoff("airlabs2", secs=86400)
+                            _api_credit_exhausted["airlabs2"] = _billing_period_start(AIRLABS2_RESET_DAY)
+                            _log(f"{tag} [airlabs-2] ⚠ 402 — monthly call limit exceeded; disabling for 24 h")
+                        elif r.status_code in (401, 403):
+                            _set_backoff("airlabs2", secs=86400)
+                            _log(f"{tag} [airlabs-2] auth error {r.status_code}")
+                        elif r.status_code == 200:
+                            _al2_count = _airlabs2_increment()
+                            _resp2 = r.json().get("response") or {}
+                            _al2_origin = _resp2.get("dep_iata", "") or ""
+                            _al2_dest   = _resp2.get("arr_iata", "") or ""
+                            _al2_olat   = _resp2.get("dep_lat")
+                            _al2_olon   = _resp2.get("dep_lng")
+                            _al2_dlat   = _resp2.get("arr_lat")
+                            _al2_dlon   = _resp2.get("arr_lng")
+                            result["steps"]["airlabs2"].update({
+                                "origin": _al2_origin, "destination": _al2_dest,
+                            })
+                            _log(f"{tag} [airlabs-2] route: {_al2_origin or '?'}->{_al2_dest or '?'} [call #{_al2_count}]")
+                            if _al2_origin or _al2_dest:
+                                _al2_ok = _route_plausible(plane_lat, plane_lon,
+                                                            _al2_olat, _al2_olon, _al2_dlat, _al2_dlon)
+                                result["steps"]["airlabs2"]["plausible"] = _al2_ok
+                                if _al2_ok:
+                                    result["final_origin"]      = result["final_origin"] or _al2_origin
+                                    result["final_destination"] = result["final_destination"] or _al2_dest
+                                    result["route_source"]      = "airlabs2"
+                                else:
+                                    _log(f"{tag} [airlabs-2] route implausible — rejected")
+                        else:
+                            _al2_count = _airlabs2_increment()
+                            _log(f"{tag} [airlabs-2] unexpected status {r.status_code} [call #{_al2_count}] — no data")
+                    except Exception as _e:
+                        _log(f"{tag} [airlabs-2] error: {_e}")
+                        result["steps"]["airlabs2"] = {"error": str(_e)}
+
             # ── 4. AeroAPI (fresh, counts spend, respects backoff + kill-switch) ─
             if _test_skip_paid:
                 result["steps"]["aeroapi"] = {"skipped": "n_number_or_military"}
@@ -2790,7 +2850,7 @@ class Overhead:
             all_flights = fetch_flights()
             in_zone_flights = [
                 f for f in all_flights
-                if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE and in_zone(f)
+                if MIN_ALTITUDE < f.altitude <= MAX_ALTITUDE and in_zone(f)
             ]
             out_count = len(all_flights) - len(in_zone_flights)
             _log(

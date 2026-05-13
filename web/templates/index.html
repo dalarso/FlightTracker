@@ -1236,6 +1236,10 @@ let zoneBounds = {};
 
 function initMap() {
   if (map) { setTimeout(() => map.invalidateSize(), 100); return; }
+  if (!config.LOCATION_HOME || !Array.isArray(config.LOCATION_HOME) || !config.ZONE_HOME) {
+    showToast('Config not loaded — save your settings on the Config tab first', 'err');
+    return;
+  }
   map = L.map('map').setView([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], 13);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap', maxZoom: 18

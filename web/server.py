@@ -165,11 +165,17 @@ def write_config(data):
     Write config.py. Preserves any keys not managed by the web UI
     by reading the current config first and overlaying the new values.
     """
-    # Load existing config so unknown keys aren't lost
+    # Load existing config so unknown keys aren't lost.
+    # If the file doesn't exist (fresh install) start from defaults.
+    # If the file EXISTS but can't be parsed, abort rather than overwriting
+    # good config values with empty/default ones — e.g. a transient I/O error
+    # or syntax error should not silently blank all API keys.
     try:
         existing = read_config()
-    except Exception:
+    except FileNotFoundError:
         existing = {}
+    except Exception as e:
+        raise ValueError(f"config.py could not be read: {e} — save aborted to prevent data loss")
 
     # Overlay only the known managed keys from the POST body.
     # For sensitive keys, skip an empty value so the client can't accidentally
@@ -365,17 +371,20 @@ def cache_clear():
     if api not in _source_map:
         return jsonify({"error": f"Unknown api '{api}'. Valid: {', '.join(_source_map)}"}), 400
 
+    conn = None
     try:
         conn = sqlite3.connect(str(DB_FILE))
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         deleted = conn.execute(_source_map[api]).rowcount
         conn.commit()
-        conn.close()
         _log(f"[web] cache cleared for '{api}': {deleted} entries removed")
         return jsonify({"ok": True, "deleted": deleted})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/api/cache/stats", methods=["GET"])
@@ -897,6 +906,8 @@ def free_api_accuracy():
         today      = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
         thirty_ago = (datetime.now(_PACIFIC) - timedelta(days=29)).strftime("%Y-%m-%d")
         conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
 
         def _row_stats(row):
