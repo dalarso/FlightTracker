@@ -51,6 +51,11 @@ except Exception:
         RECEIVER_HOST = "localhost"
 
 try:
+    from config import RECEIVER_TYPE
+except Exception:
+    RECEIVER_TYPE = "dump1090"  # "dump1090" | "vrs"
+
+try:
     from config import LOCAL_AIRPORTS
 except Exception:
     LOCAL_AIRPORTS = ""
@@ -100,6 +105,9 @@ OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-networ
 # Data source URLs
 FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
 DUMP1090_URL = f"http://{RECEIVER_HOST}:8080/data/aircraft.json"
+# Virtual Radar Server — default HTTP port is 8080; override RECEIVER_HOST to include
+# a non-standard port, e.g. RECEIVER_HOST = "192.168.1.50:8090"
+VRS_URL      = f"http://{RECEIVER_HOST}:8080/VirtualRadar/AircraftList.json"
 AIRPLANESLIVE_URL = "https://api.airplanes.live/v2/hex/{}"
 AEROAPI_URL = "https://aeroapi.flightaware.com/aeroapi/flights/{}"
 AIRLABS_URL = "https://airlabs.co/api/v9/flight"
@@ -488,6 +496,26 @@ def _translate_type(type_str: str) -> str:
     if not type_str:
         return type_str
     return _AIRCRAFT_TYPE_MAP.get(type_str.strip().upper(), type_str)
+
+
+def _vrs_airport_to_iata(vrs_str: str) -> str:
+    """Extract an IATA code from a VRS airport string.
+
+    VRS encodes airports as "{code} {full name}", e.g.:
+      "KLAS Las Vegas Harry Reid Intl"
+      "KLAX Los Angeles Intl"
+      "EGLL London Heathrow"
+    For US (K...) and Canadian (C...) ICAO codes, drop the leading letter to
+    get the 3-letter IATA code.  Everything else is used as-is (already IATA
+    or an ICAO code the display layer can show verbatim).
+    Returns "" when the input is empty or unparseable.
+    """
+    if not vrs_str:
+        return ""
+    code = vrs_str.split()[0].strip().upper()
+    if len(code) == 4 and code[0] in ("K", "C") and code[1:].isalpha():
+        return code[1:]   # KLAS → LAS, CYVR → YVR
+    return code[:3] if len(code) >= 3 else code
 
 # ── Paid-API skip rules — GA registrations and known non-commercial prefixes ──
 # N-numbers (US civil registrations) never have filed routes in paid APIs.
@@ -1307,6 +1335,10 @@ class Flight:
         self.callsign = callsign
         self.hex_code = hex_code
         self.registration = registration.strip().upper() if registration else ""
+        # VRS-only fields — populated by from_vrs(); empty strings for all other sources.
+        self.vrs_origin = ""
+        self.vrs_dest   = ""
+        self.vrs_type   = ""
 
     @classmethod
     def from_fr24(cls, hex_code, entry):
@@ -1346,11 +1378,69 @@ class Flight:
             registration=ac.get("registration", "") or "",
         )
 
+    @classmethod
+    def from_vrs(cls, ac):
+        """Build a Flight from a Virtual Radar Server AircraftList entry.
+
+        VRS AircraftList.json field reference:
+          Icao  — ICAO24 hex code
+          Call  — callsign
+          Alt   — barometric altitude (feet)
+          Lat / Long — position
+          Vsi   — vertical speed (feet/min)
+          Reg   — registration / tail number
+          From  — origin airport string, e.g. "KLAS Las Vegas Harry Reid Intl"
+          To    — destination airport string
+          Mdl   — aircraft model description (e.g. "Boeing 737-800")
+          Type  — ICAO type code (e.g. "B738")
+        """
+        lat = ac.get("Lat")
+        lon = ac.get("Long")
+        if lat is None or lon is None:
+            return None
+        alt = ac.get("Alt", 0)
+        obj = cls(
+            lat=float(lat),
+            lon=float(lon),
+            altitude=alt if isinstance(alt, (int, float)) else 0,
+            vertical_speed=ac.get("Vsi", 0) or 0,
+            callsign=(ac.get("Call") or "").strip(),
+            hex_code=(ac.get("Icao") or "").strip().lower(),
+            registration=(ac.get("Reg") or "").strip().upper(),
+        )
+        # VRS-specific route and type hints — used in get_route() when available.
+        obj.vrs_origin = _vrs_airport_to_iata(ac.get("From") or "")
+        obj.vrs_dest   = _vrs_airport_to_iata(ac.get("To")   or "")
+        # Prefer the human-readable model description; fall back to ICAO type code.
+        obj.vrs_type   = (ac.get("Mdl") or ac.get("Type") or "").strip()
+        return obj
+
 
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
 def fetch_flights():
-    """Return Flight objects from fr24feed (preferred) or dump1090 (fallback)."""
+    """Return Flight objects from the configured ADS-B receiver source.
+
+    RECEIVER_TYPE = "dump1090" (default): tries fr24feed first, then dump1090.
+    RECEIVER_TYPE = "vrs": polls Virtual Radar Server's AircraftList JSON API.
+    """
+    # ── Virtual Radar Server mode ──────────────────────────────────────────────
+    if RECEIVER_TYPE == "vrs":
+        try:
+            r = requests.get(VRS_URL, timeout=3)
+            if r.status_code == 200:
+                flights = []
+                for ac in r.json().get("acList", []):
+                    f = Flight.from_vrs(ac)
+                    if f:
+                        flights.append(f)
+                return flights
+        except Exception:
+            pass
+        _log(f"[overhead] VRS receiver unreachable — no data from {RECEIVER_HOST}")
+        return []
+
+    # ── dump1090 / fr24feed mode (default) ────────────────────────────────────
     try:
         r = requests.get(FR24FEED_URL, timeout=3)   # local LAN — 3 s is plenty
         if r.status_code == 200:
@@ -1477,7 +1567,8 @@ def _aeroapi_increment():
     _record_api_stat("aeroapi")
 
 
-def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None):
+def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
+              vrs_origin="", vrs_dest=""):
     """
     Route lookup priority:
       0.  Override rules — ft_overrides.json; pattern-matched against callsign.
@@ -1568,6 +1659,25 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _rsrc = _resolved[6].removesuffix(":cached")  # strip any trailing :cached so it isn't doubled
             _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
             return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
+
+    # ── 0.75 VRS live route hint ───────────────────────────────────────────────
+    # When the receiver is Virtual Radar Server, it may supply From/To airport
+    # codes directly in the AircraftList feed.  Trust the hint if at least one
+    # endpoint is a configured local airport — same rule as OpenSky free API.
+    # Treated as a short-lived (1 hr) route cache entry so it doesn't interfere
+    # with the 7-day resolved cache used for scheduled airlines.
+    if vrs_origin and vrs_dest and not _override_partial:
+        _local_set = {a.strip().upper() for a in LOCAL_AIRPORTS.split(",") if a.strip()}
+        if vrs_origin in _local_set or vrs_dest in _local_set:
+            _log(f"[vrs] {callsign}: {vrs_origin}->{vrs_dest} (local endpoint — accepted)")
+            _cache_db_set_route(
+                callsign, 'route',
+                vrs_origin, vrs_dest,
+                None, None, None, None,
+                int(time.time()) + GA_ROUTE_TTL,  # 1-hr TTL — live but not authoritative
+                "vrs",
+            )
+            return vrs_origin, vrs_dest, "vrs", _ov_plane, _ov_display
 
     # ── 1. adsbdb (static historical DB) ──────────────────────────────────────
     adsbdb_origin = adsbdb_dest = ""
@@ -2913,6 +3023,7 @@ class Overhead:
                     get_route,
                     flight.hex_code, flight.callsign, flight.vertical_speed,
                     flight.latitude, flight.longitude,
+                    flight.vrs_origin, flight.vrs_dest,
                 )
                 _type_fut = _lookup_executor.submit(get_aircraft_type, flight.hex_code)
                 origin, destination, route_src, override_plane, override_display = _route_fut.result()

@@ -37,9 +37,17 @@ JOURNEY_CODE_SELECTED = "XXX"  # 3-letter IATA code of your nearest airport
 JOURNEY_BLANK_FILLER  = " ? "  # Shown when origin/destination is unknown
 
 # ── ADS-B Receiver ────────────────────────────────────────────────────────────
-# IP address of the machine running dump1090 or fr24feed.
-# Use "localhost" if it's on the same Pi.
+# IP address of the machine running your ADS-B receiver software.
+# Use "localhost" if it's on the same Pi, or an IP for a remote machine.
+# For VRS on a non-standard port, include it here: "192.168.1.50:8090"
 RECEIVER_HOST = "localhost"
+
+# Receiver software type.
+#   "dump1090" (default) — polls fr24feed (:8754) first, dump1090 (:8080) as fallback.
+#   "vrs"                — polls Virtual Radar Server AircraftList.json API (:8080).
+#                          VRS can ingest from dump1090, fr24feed, ADSB.im, and more.
+#                          See: https://www.virtualradarserver.co.uk
+RECEIVER_TYPE = "dump1090"
 
 # ── Local airports ────────────────────────────────────────────────────────────
 # Comma-separated IATA codes of airports in your area.
