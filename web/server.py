@@ -128,6 +128,7 @@ _KNOWN_KEYS = {
     # Billing tracking
     "FEEDER_MONTHLY_CREDIT",
     "RECEIVER_TYPE",
+    "TIME_FORMAT", "DATE_FORMAT",
     "AIRLABS_MONTHLY_LIMIT", "AIRLABS_RESET_DAY",
     "AIRLABS2_MONTHLY_LIMIT", "AIRLABS2_RESET_DAY",
     "AEROAPI_RESET_DAY",
@@ -220,6 +221,8 @@ GPIO_SLOWDOWN = {int(existing.get("GPIO_SLOWDOWN", 2))}
 NIGHT_BRIGHTNESS = {int(existing.get("NIGHT_BRIGHTNESS", 20))}
 JOURNEY_CODE_SELECTED = {repr(str(existing.get("JOURNEY_CODE_SELECTED", "")))}
 JOURNEY_BLANK_FILLER = {repr(str(existing.get("JOURNEY_BLANK_FILLER", " ? ")))}
+TIME_FORMAT = {repr(str(existing.get("TIME_FORMAT", "24h")))}
+DATE_FORMAT = {repr(str(existing.get("DATE_FORMAT", "MDY")))}
 HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
 
 RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST", "localhost")))}

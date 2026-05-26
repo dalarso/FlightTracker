@@ -42,6 +42,11 @@ HAT_PWM_ENABLED = True  # True if you've added the solder bridge to your HAT
 JOURNEY_CODE_SELECTED = "XXX"  # 3-letter IATA code of your nearest airport
 JOURNEY_BLANK_FILLER  = " ? "  # Shown when origin/destination is unknown
 
+# "24h" for 24-hour clock (default), "12h" for 12-hour AM/PM
+TIME_FORMAT = "24h"
+# Date display order: "MDY" = 5/14/2026 (US), "DMY" = 14/5/2026 (UK/EU), "YMD" = 2026-05-14 (ISO)
+DATE_FORMAT = "MDY"
+
 # ── ADS-B Receiver ────────────────────────────────────────────────────────────
 # IP address of the machine running your ADS-B receiver software.
 # Use "localhost" if it's on the same Pi, or an IP for a remote machine.

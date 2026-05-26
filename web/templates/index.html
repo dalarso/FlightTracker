@@ -370,6 +370,19 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         <div class="field"><label>GPIO Slowdown</label><input type="number" min="1" max="4" id="gpio_slowdown"><div class="hint">Increase if display flickers</div></div>
         <div class="field"><label>Journey Code</label><input type="text" id="journey_code"></div>
         <div class="field"><label>Journey Blank Filler</label><input type="text" id="journey_blank"></div>
+        <div class="field"><label>Time Format</label>
+          <select id="time_format" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
+            <option value="24h">24-hour (14:30)</option>
+            <option value="12h">12-hour AM/PM (2:30 PM)</option>
+          </select>
+        </div>
+        <div class="field"><label>Date Format</label>
+          <select id="date_format" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
+            <option value="MDY">M/D/YYYY — 5/14/2026 (US)</option>
+            <option value="DMY">D/M/YYYY — 14/5/2026 (UK/EU)</option>
+            <option value="YMD">YYYY-MM-DD — 2026-05-14 (ISO)</option>
+          </select>
+        </div>
         <div class="field"><label>HAT PWM Enabled</label>
           <div class="toggle-wrap">
             <label class="toggle"><input type="checkbox" id="hat_pwm"><span class="toggle-slider"></span></label>
@@ -1160,6 +1173,8 @@ async function loadConfig() {
   document.getElementById('rainfall_enabled').checked = config.RAINFALL_ENABLED || false;
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
   document.getElementById('receiver_type').value = config.RECEIVER_TYPE || 'dump1090';
+  document.getElementById('time_format').value = config.TIME_FORMAT || '24h';
+  document.getElementById('date_format').value = config.DATE_FORMAT || 'MDY';
   document.getElementById('airlabs_key').value  = config.AIRLABS_API_KEY   || '';
   document.getElementById('airlabs_key2').value = config.AIRLABS_API_KEY_2 || '';
   document.getElementById('fa_key').value = config.FLIGHTAWARE_API_KEY || '';
@@ -1210,6 +1225,8 @@ function buildConfigPayload() {
     TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
     RECEIVER_TYPE: document.getElementById('receiver_type').value,
+    TIME_FORMAT: document.getElementById('time_format').value,
+    DATE_FORMAT: document.getElementById('date_format').value,
     AIRLABS_API_KEY:   document.getElementById('airlabs_key').value,
     AIRLABS_API_KEY_2: document.getElementById('airlabs_key2').value,
     FLIGHTAWARE_API_KEY: document.getElementById('fa_key').value,
@@ -1460,7 +1477,7 @@ async function updateMatrixPreview() {
     ]);
     renderMatrix(status, flightData);
     const ts = flightData.ts
-      ? new Date(flightData.ts * 1000).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit', timeZone: config.TIMEZONE || 'America/Los_Angeles'})
+      ? new Date(flightData.ts * 1000).toLocaleTimeString((config.TIME_FORMAT||'24h')==='12h'?'en-US':'en-GB', {hour:(config.TIME_FORMAT||'24h')==='12h'?'numeric':'2-digit',minute:'2-digit',second:'2-digit',hour12:(config.TIME_FORMAT||'24h')==='12h', timeZone: config.TIMEZONE || 'America/Los_Angeles'})
       : '—';
     document.getElementById('matrix-meta').textContent = `Last poll: ${ts}${flightData.stale ? ' (stale)' : ''}`;
   } catch(e) {
@@ -1485,14 +1502,20 @@ function renderMatrix(status, flightData) {
   if (flights.length === 0) {
     const now = new Date();
     const tz = config.TIMEZONE || 'America/Los_Angeles';
-    const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: tz });
-    const weekday = now.toLocaleDateString('en-US', { weekday: 'short', timeZone: tz });
-    const day     = now.toLocaleDateString('en-US', { day: '2-digit',   timeZone: tz });
-    const month   = now.toLocaleDateString('en-US', { month: 'short',   timeZone: tz });
+    const _use12h  = (config.TIME_FORMAT || '24h') === '12h';
+    const _dateFmt = config.DATE_FORMAT || 'MDY';
+    const timeStr  = now.toLocaleTimeString(_use12h ? 'en-US' : 'en-GB', { hour: _use12h ? 'numeric' : '2-digit', minute: '2-digit', hour12: _use12h, timeZone: tz });
+    const weekday  = now.toLocaleDateString('en-US', { weekday: 'short', timeZone: tz });
+    const _dd      = now.toLocaleDateString('en-US', { day: 'numeric',   timeZone: tz });
+    const _mm      = now.toLocaleDateString('en-US', { month: 'short',   timeZone: tz });
+    const _yyyy    = now.toLocaleDateString('en-US', { year: 'numeric',  timeZone: tz });
+    const dateStr  = _dateFmt === 'DMY' ? `${weekday} ${_dd} ${_mm}` :
+                     _dateFmt === 'YMD' ? `${weekday} ${_yyyy}-${now.toLocaleDateString('en-US',{month:'2-digit',timeZone:tz})}-${now.toLocaleDateString('en-US',{day:'2-digit',timeZone:tz})}` :
+                     `${weekday} ${_mm} ${_dd}`;
     screen.innerHTML = `
       <div class="m-idle">
         <div class="m-clock">${timeStr}</div>
-        <div class="m-day">${weekday} ${day} ${month}</div>
+        <div class="m-day">${dateStr}</div>
       </div>`;
     return;
   }
@@ -1749,7 +1772,7 @@ function renderRecentFlights(d) {
       const dest = s.destination || '?';
       const rtHtml = `<span style="font-family:monospace;color:var(--muted)">${escHtml(orig)}→${escHtml(dest)}</span>`;
       tr.innerHTML = `
-        <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(s.time)}</td>
+        <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(_formatTime(s.time))}</td>
         <td style="padding:4px 6px">${csHtml}</td>
         <td style="padding:4px 6px">${regHtml}</td>
         <td style="padding:4px 0">${rtHtml}</td>`;
@@ -1821,7 +1844,7 @@ function renderFreeApiAccuracy(d) {
       </tr></thead><tbody>`;
     mm.forEach(r => {
       html += `<tr style="border-top:1px solid var(--border)">
-        <td style="padding:4px 6px;color:var(--muted);white-space:nowrap">${escHtml(r.seen_at.slice(5,16))}</td>
+        <td style="padding:4px 6px;color:var(--muted);white-space:nowrap">${escHtml(_formatDate(r.seen_at.slice(0,10)) + ' ' + _formatTime(r.seen_at.slice(11,16)))}</td>
         <td style="padding:4px 6px;font-family:monospace;font-weight:600">${escHtml(r.callsign)}</td>
         <td style="padding:4px 6px;font-family:monospace;color:var(--muted)">${escHtml(r.free_route)}</td>
         <td style="padding:4px 6px;font-family:monospace;color:var(--accent)">${escHtml(r.paid_route)}</td>
@@ -1995,7 +2018,7 @@ function _buildSearchRow(s, QU) {
   const acHtml = s.aircraft ? `<span style="color:var(--muted);font-size:10px">${escHtml(s.aircraft)}</span>` : '';
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(s.time)}</td>
+    <td style="padding:4px 6px 4px 0;font-family:monospace;white-space:nowrap;color:var(--muted)">${escHtml(_formatTime(s.time))}</td>
     <td style="padding:4px 6px">${csHtml}</td>
     <td style="padding:4px 6px">${regHtml}</td>
     <td style="padding:4px 6px">${rtHtml}</td>
@@ -2288,6 +2311,29 @@ function renderStack(stack) {
         <div class="stack-badge">${keyBadge}</div>
       </div>`;
   }).join('');
+}
+
+function _formatTime(hhmm) {
+  // hhmm is "HH:MM" in 24-hour format (from server/SQLite)
+  if (!hhmm || hhmm.length < 5) return hhmm;
+  if ((config.TIME_FORMAT || '24h') === '12h') {
+    const [hStr, mStr] = hhmm.split(':');
+    let h = parseInt(hStr, 10);
+    const suffix = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${h}:${mStr} ${suffix}`;
+  }
+  return hhmm;
+}
+
+function _formatDate(isoDate) {
+  // isoDate is "YYYY-MM-DD"
+  if (!isoDate || isoDate.length < 10) return isoDate;
+  const [y, m, d] = isoDate.slice(0, 10).split('-');
+  const fmt = config.DATE_FORMAT || 'MDY';
+  if (fmt === 'DMY') return `${parseInt(d)}/${parseInt(m)}/${y}`;
+  if (fmt === 'YMD') return `${y}-${m}-${d}`;
+  return `${parseInt(m)}/${parseInt(d)}/${y}`;  // MDY default
 }
 
 async function clearCacheEntry() {

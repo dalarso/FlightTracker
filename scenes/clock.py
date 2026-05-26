@@ -12,6 +12,11 @@ except (ImportError, NameError):
     TIMEZONE = "America/Los_Angeles"
 
 try:
+    from config import TIME_FORMAT
+except (ImportError, NameError):
+    TIME_FORMAT = "24h"
+
+try:
     _TZ = ZoneInfo(TIMEZONE)
 except Exception:
     _TZ = ZoneInfo("America/Los_Angeles")
@@ -37,7 +42,10 @@ class ClockScene(object):
             # If there's no data to display
             # then draw a clock
             now = datetime.now(_TZ)
-            current_time = now.strftime("%H:%M")
+            if TIME_FORMAT == "12h":
+                current_time = now.strftime("%-I:%M%p")
+            else:
+                current_time = now.strftime("%H:%M")
 
             # Only draw if time needs updated
             if self._last_time != current_time:
