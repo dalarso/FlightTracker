@@ -414,7 +414,14 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <div class="section">
       <div class="section-header">Receiver</div>
       <div class="field-grid">
-        <div class="field"><label>Receiver Host</label><input type="text" id="receiver_host"><div class="hint">IP of fr24feed/dump1090 Pi</div></div>
+        <div class="field"><label>Receiver Host</label><input type="text" id="receiver_host"><div class="hint">IP of fr24feed / dump1090 / VRS host. Include port if non-standard, e.g. 192.168.1.50:8090</div></div>
+        <div class="field"><label>Receiver Type</label>
+          <select id="receiver_type" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
+            <option value="dump1090">dump1090 / fr24feed (default)</option>
+            <option value="vrs">Virtual Radar Server (VRS)</option>
+          </select>
+          <div class="hint">Switch to VRS if you run Virtual Radar Server as your ADS-B source</div>
+        </div>
       </div>
     </div>
 
@@ -1152,6 +1159,7 @@ async function loadConfig() {
   document.getElementById('ow_key').value = config.OPENWEATHER_API_KEY || '';
   document.getElementById('rainfall_enabled').checked = config.RAINFALL_ENABLED || false;
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
+  document.getElementById('receiver_type').value = config.RECEIVER_TYPE || 'dump1090';
   document.getElementById('airlabs_key').value  = config.AIRLABS_API_KEY   || '';
   document.getElementById('airlabs_key2').value = config.AIRLABS_API_KEY_2 || '';
   document.getElementById('fa_key').value = config.FLIGHTAWARE_API_KEY || '';
@@ -1201,6 +1209,7 @@ function buildConfigPayload() {
     RAINFALL_ENABLED: document.getElementById('rainfall_enabled').checked,
     TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
+    RECEIVER_TYPE: document.getElementById('receiver_type').value,
     AIRLABS_API_KEY:   document.getElementById('airlabs_key').value,
     AIRLABS_API_KEY_2: document.getElementById('airlabs_key2').value,
     FLIGHTAWARE_API_KEY: document.getElementById('fa_key').value,

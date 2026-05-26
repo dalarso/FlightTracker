@@ -127,6 +127,7 @@ _KNOWN_KEYS = {
     "LOADING_LED_ENABLED", "LOADING_LED_GPIO_PIN", "RAINFALL_ENABLED",
     # Billing tracking
     "FEEDER_MONTHLY_CREDIT",
+    "RECEIVER_TYPE",
     "AIRLABS_MONTHLY_LIMIT", "AIRLABS_RESET_DAY",
     "AIRLABS2_MONTHLY_LIMIT", "AIRLABS2_RESET_DAY",
     "AEROAPI_RESET_DAY",
@@ -222,6 +223,7 @@ JOURNEY_BLANK_FILLER = {repr(str(existing.get("JOURNEY_BLANK_FILLER", " ? ")))}
 HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
 
 RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST", "localhost")))}
+RECEIVER_TYPE = {repr(str(existing.get("RECEIVER_TYPE", "dump1090")))}
 
 LOCAL_AIRPORTS = {repr(str(existing.get("LOCAL_AIRPORTS", existing.get("LOCAL_AIRPORT", ""))))}
 OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID", "")))}
