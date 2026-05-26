@@ -43,7 +43,7 @@ class ClockScene(object):
             # then draw a clock
             now = datetime.now(_TZ)
             if TIME_FORMAT == "12h":
-                current_time = now.strftime("%-I:%M%p")
+                current_time = now.strftime("%-I:%M %p")
             else:
                 current_time = now.strftime("%H:%M")
 

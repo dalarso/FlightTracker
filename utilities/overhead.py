@@ -515,7 +515,7 @@ def _vrs_airport_to_iata(vrs_str: str) -> str:
     code = vrs_str.split()[0].strip().upper()
     if len(code) == 4 and code[0] in ("K", "C") and code[1:].isalpha():
         return code[1:]   # KLAS → LAS, CYVR → YVR
-    return code[:3] if len(code) >= 3 else code
+    return code           # return full code — EGLL, LFPG, etc. stay intact
 
 # ── Paid-API skip rules — GA registrations and known non-commercial prefixes ──
 # N-numbers (US civil registrations) never have filed routes in paid APIs.
@@ -1674,7 +1674,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 callsign, 'route',
                 vrs_origin, vrs_dest,
                 None, None, None, None,
-                int(time.time()) + GA_ROUTE_TTL,  # 1-hr TTL — live but not authoritative
+                int(time.time()) + ROUTE_TTL_DEFAULT,  # 1-hr TTL — live but not authoritative
                 "vrs",
             )
             return vrs_origin, vrs_dest, "vrs", _ov_plane, _ov_display
@@ -2672,6 +2672,7 @@ def run_test_lookup(callsign, use_cache=True):
 
             # ── 3. AirLabs (fresh, counts quota, respects backoff + kill-switch) ─
             _test_skip_paid = _skip_paid_apis(cs)
+            _al_count = 0   # initialise here — referenced by AirLabs-2 guard below
             if _test_skip_paid:
                 _log(f"{tag} [airlabs-1] skipping — N-number or military callsign")
             if not (result["final_origin"] and result["final_destination"]) and AIRLABS_API_KEY and cs and not _test_skip_paid:

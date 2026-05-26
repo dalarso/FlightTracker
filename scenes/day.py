@@ -1,9 +1,20 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from utilities.animator import Animator
 from setup import colours, fonts, frames
 
 from rgbmatrix import graphics
+
+try:
+    from config import TIMEZONE
+except (ImportError, NameError):
+    TIMEZONE = "America/Los_Angeles"
+
+try:
+    _TZ = ZoneInfo(TIMEZONE)
+except Exception:
+    _TZ = ZoneInfo("America/Los_Angeles")
 
 # Setup
 DAY_COLOUR = colours.PINK_DARK
@@ -25,7 +36,7 @@ class DayScene(object):
         else:
             # If there's no data to display
             # then draw the day
-            now = datetime.now()
+            now = datetime.now(_TZ)
             current_day = now.strftime("%A")
 
             # Only draw if time needs updated

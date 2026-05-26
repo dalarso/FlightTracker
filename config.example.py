@@ -3,7 +3,7 @@
 # config.py is in .gitignore and will never be committed.
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
-# IANA timezone name used for log timestamps and the web UI.
+# IANA timezone name used for log timestamps, the web UI, and the LED display.
 # Examples: "America/Los_Angeles", "America/New_York", "Europe/London", "Europe/Berlin"
 # Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 TIMEZONE = "America/Los_Angeles"
@@ -32,20 +32,31 @@ OPENWEATHER_API_KEY = ""  # Free tier at https://openweathermap.org/price
 TEMPERATURE_UNITS   = "imperial"  # "imperial" (°F) or "metric" (°C)
 
 # ── Display ───────────────────────────────────────────────────────────────────
-MIN_ALTITUDE = 100    # feet — filters out aircraft on the ground
-MAX_ALTITUDE = 15000  # feet — set lower to filter out high-altitude overflights
-BRIGHTNESS   = 80     # 0–100
-GPIO_SLOWDOWN = 2     # 0–4 — increase if the display flickers (try 2 for Pi Zero)
-HAT_PWM_ENABLED = True  # True if you've added the solder bridge to your HAT
+MIN_ALTITUDE  = 100    # feet — filters out aircraft on the ground
+MAX_ALTITUDE  = 15000  # feet — set lower to filter out high-altitude overflights
+BRIGHTNESS    = 80     # 0–100, normal operating brightness
+NIGHT_BRIGHTNESS = 20  # 0–100, applied when night mode is active (toggled in web UI)
+GPIO_SLOWDOWN = 2      # 0–4 — increase if the display flickers (try 2 for Pi Zero)
+HAT_PWM_ENABLED = True # True if you've added the solder bridge to your HAT
 
 # Highlight your nearest airport in bold on the display
 JOURNEY_CODE_SELECTED = "XXX"  # 3-letter IATA code of your nearest airport
 JOURNEY_BLANK_FILLER  = " ? "  # Shown when origin/destination is unknown
 
-# "24h" for 24-hour clock (default), "12h" for 12-hour AM/PM
-TIME_FORMAT = "24h"
-# Date display order: "MDY" = 5/14/2026 (US), "DMY" = 14/5/2026 (UK/EU), "YMD" = 2026-05-14 (ISO)
-DATE_FORMAT = "MDY"
+# Time and date format — applies to the LED display and the web UI
+TIME_FORMAT = "24h"   # "24h" = 14:30  |  "12h" = 2:30 PM
+DATE_FORMAT = "MDY"   # "MDY" = 5/14/2026 (US)  |  "DMY" = 14/5/2026 (UK/EU)  |  "YMD" = 2026-05-14 (ISO)
+
+# ── Optional loading LED ──────────────────────────────────────────────────────
+# An external LED on a GPIO pin that pulses while the display is loading.
+# Leave LOADING_LED_ENABLED = False if you haven't wired one up.
+LOADING_LED_ENABLED  = False
+LOADING_LED_GPIO_PIN = 25   # BCM pin number
+
+# ── Rainfall display (experimental) ──────────────────────────────────────────
+# Shows a rainfall graph on the display. Requires a local taps-aff weather
+# service — not the OpenWeather API. Leave False unless you've set that up.
+RAINFALL_ENABLED = False
 
 # ── ADS-B Receiver ────────────────────────────────────────────────────────────
 # IP address of the machine running your ADS-B receiver software.
@@ -90,10 +101,21 @@ AIRLABS2_RESET_DAY     = 1     # Day of month your billing period resets (1–28
 FLIGHTAWARE_API_KEY = ""
 
 # Monthly credit from FlightAware:
-#   $5.00 — standard free tier
+#   $5.00  — standard free tier
 #   $10.00 — if you run a FlightAware ADS-B feeder (fr24feed users often qualify)
 #   Check your account at https://aeroapi.flightaware.com
 FEEDER_MONTHLY_CREDIT = 5.00
 
 # Day of month your AeroAPI billing period resets (1–28)
 AEROAPI_RESET_DAY = 1
+
+# ── Advanced: cache TTL overrides ────────────────────────────────────────────
+# These have sensible defaults — only set them if you want to tune caching
+# behaviour. Values are in seconds.
+#
+# ADSBDB_CACHE_TTL     = 3600    # adsbdb route result cache (default 1 hour)
+# OPENSKY_CACHE_TTL    = 3600    # OpenSky route result cache (default 1 hour)
+# ROUTE_TTL_SCHEDULED  = 604800  # Resolved commercial route cache (default 7 days)
+# ROUTE_TTL_DEFAULT    = 3600    # Resolved GA/other route cache (default 1 hour)
+# ROUTE_MISS_TTL       = 3600    # No-route-found suppression (default 1 hour)
+# ROUTE_PAID_MISS_TTL  = 7200    # Paid API miss suppression (default 2 hours)

@@ -195,6 +195,14 @@ def write_config(data):
     except Exception:
         existing["TIMEZONE"] = "America/Los_Angeles"
 
+    # Clamp TIME_FORMAT and DATE_FORMAT to known-good values
+    if existing.get("TIME_FORMAT") not in ("24h", "12h"):
+        existing["TIME_FORMAT"] = "24h"
+    if existing.get("DATE_FORMAT") not in ("MDY", "DMY", "YMD"):
+        existing["DATE_FORMAT"] = "MDY"
+    if existing.get("RECEIVER_TYPE") not in ("dump1090", "vrs"):
+        existing["RECEIVER_TYPE"] = "dump1090"
+
     zone = existing.get("ZONE_HOME") or data.get("ZONE_HOME")
     loc  = existing.get("LOCATION_HOME") or data.get("LOCATION_HOME")
     if not zone or not loc:
