@@ -76,7 +76,11 @@ OPENSKY_CLIENT_SECRET = ""
 AIRLABS_API_KEY   = ""  # Primary key
 AIRLABS_API_KEY_2 = ""  # Optional secondary key — doubles your free monthly quota
 
-# Billing period settings for the secondary key (primary uses the same reset day)
+# Billing period for primary key
+AIRLABS_MONTHLY_LIMIT = 1000  # Calls per month on key 1
+AIRLABS_RESET_DAY     = 1     # Day of month your billing period resets (1–28)
+
+# Billing period for secondary key
 AIRLABS2_MONTHLY_LIMIT = 1000  # Calls per month on key 2
 AIRLABS2_RESET_DAY     = 1     # Day of month your billing period resets (1–28)
 
