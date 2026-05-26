@@ -621,6 +621,21 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         <div class="stack-row"><div class="stack-priority">—</div><div style="color:var(--muted);font-size:12px">Loading…</div><div></div></div>
       </div>
     </div>
+
+    <div class="usage-card" style="margin-top:16px">
+      <h3 style="margin-bottom:6px">Clear Specific Cache Entry</h3>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
+        Clear a single aircraft type (by tail #) or route (by callsign) without wiping the full cache.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="cache-entry-input" placeholder="e.g. N9003B or SWA1230"
+               style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:4px;
+                      background:var(--bg);color:inherit;font-size:13px;text-transform:uppercase"
+               onkeydown="if(event.key==='Enter') clearCacheEntry()">
+        <button class="btn btn-primary" onclick="clearCacheEntry()" style="white-space:nowrap">Clear Entry</button>
+      </div>
+      <div id="cache-entry-result" style="font-size:11px;margin-top:8px;min-height:16px"></div>
+    </div>
   </div>
 </div>
 
@@ -2264,6 +2279,47 @@ function renderStack(stack) {
         <div class="stack-badge">${keyBadge}</div>
       </div>`;
   }).join('');
+}
+
+async function clearCacheEntry() {
+  const input  = document.getElementById('cache-entry-input');
+  const result = document.getElementById('cache-entry-result');
+  const val    = (input.value || '').trim().toUpperCase();
+  if (!val) {
+    result.style.color = 'var(--muted)';
+    result.textContent = 'Enter a tail number or callsign first.';
+    return;
+  }
+  result.style.color = 'var(--muted)';
+  result.textContent = 'Clearing…';
+  try {
+    const r = await fetch('/api/cache/clear/entry', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: val})
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      result.style.color = 'var(--red)';
+      result.textContent = j.error || 'Error clearing entry.';
+      return;
+    }
+    result.style.color = j.deleted > 0 ? 'var(--green)' : 'var(--muted)';
+    result.textContent = j.deleted > 0
+      ? `Cleared ${j.deleted} entr${j.deleted === 1 ? 'y' : 'ies'} for ${val} (${j.found_as}).`
+      : `No cache entries found for ${val}.`;
+    input.value = '';
+    // Refresh cache counts on each stack row
+    const [stackRes, statsRes] = await Promise.all([
+      fetch('/api/usage').then(r => r.json()),
+      fetch('/api/cache/stats').then(r => r.json()),
+    ]);
+    _cacheStats = statsRes;
+    renderStack(stackRes.stack || []);
+  } catch(e) {
+    result.style.color = 'var(--red)';
+    result.textContent = 'Request failed: ' + e.message;
+  }
 }
 
 // ── Override Rules ─────────────────────────────────────────────

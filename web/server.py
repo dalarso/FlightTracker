@@ -387,6 +387,69 @@ def cache_clear():
             conn.close()
 
 
+@app.route("/api/cache/clear/entry", methods=["POST"])
+def cache_clear_entry():
+    """Clear cached data for a specific tail number (registration) or callsign.
+
+    Tail number  → deletes aircraft-type and reg entries for that hex code.
+    Callsign     → deletes route, aeroapi, resolved, and paid_miss entries.
+    Both are attempted so a single call handles ambiguous inputs.
+
+    Body:    { "value": "N9003B" }  or  { "value": "SWA1230" }
+    Returns: { "ok": true, "deleted": N, "found_as": "aircraft type|route|..." }
+    """
+    data  = request.json or {}
+    value = (data.get("value") or "").strip().upper()
+    if not value:
+        return jsonify({"error": "value required"}), 400
+
+    conn = None
+    deleted  = 0
+    found_as = []
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+
+        # 1. Treat as registration — find hex code(s) via the reg cache, then
+        #    purge both the aircraft-type entry and the reg mapping itself.
+        hex_rows = conn.execute(
+            "SELECT key FROM cache WHERE cache_type='reg' AND UPPER(value)=?", (value,)
+        ).fetchall()
+        for (hex_code,) in hex_rows:
+            n = conn.execute(
+                "DELETE FROM cache WHERE cache_type IN ('aircraft','reg') AND key=?",
+                (hex_code,)
+            ).rowcount
+            deleted += n
+            if n:
+                found_as.append("aircraft type")
+
+        # 2. Treat as callsign — purge route, aeroapi, resolved, paid_miss.
+        #    Keys may be bare (SWA1230), airlabs-prefixed (airlabs:SWA1230),
+        #    or airlabs2-prefixed (airlabs2:SWA1230).
+        route_deleted = 0
+        for key in [value, f"airlabs:{value}", f"airlabs2:{value}"]:
+            route_deleted += conn.execute(
+                "DELETE FROM cache WHERE UPPER(key)=? "
+                "AND cache_type IN ('route','aeroapi','resolved','paid_miss')",
+                (key.upper(),)
+            ).rowcount
+        deleted += route_deleted
+        if route_deleted:
+            found_as.append("route")
+
+        conn.commit()
+        what = " + ".join(found_as) if found_as else "nothing matched"
+        _log(f"[web] cache entry cleared for '{value}': {deleted} entries removed ({what})")
+        return jsonify({"ok": True, "deleted": deleted, "found_as": what})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.route("/api/cache/stats", methods=["GET"])
 def cache_stats():
     """Return the count of live (non-expired) cache entries per API.
