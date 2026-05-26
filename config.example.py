@@ -2,6 +2,12 @@
 # Copy this file to config.py and fill in your values.
 # config.py is in .gitignore and will never be committed.
 
+# ── Timezone ──────────────────────────────────────────────────────────────────
+# IANA timezone name used for log timestamps and the web UI.
+# Examples: "America/Los_Angeles", "America/New_York", "Europe/London", "Europe/Berlin"
+# Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+TIMEZONE = "America/Los_Angeles"
+
 # ── Zone — the bounding box of sky you want to monitor ────────────────────────
 # Use a tool like https://boundingbox.klokantech.com to find your coordinates.
 ZONE_HOME = {

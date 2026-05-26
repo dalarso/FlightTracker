@@ -332,8 +332,10 @@ Set your `ZONE_HOME` bounding box, `LOCATION_HOME`, `LOCAL_AIRPORTS`, `RECEIVER_
 ### Grant real-time scheduling permission
 
 ```bash
-sudo setcap 'cap_sys_nice=eip' $(which python3)
+sudo setcap 'cap_sys_nice=eip' $(readlink -f $(which python3))
 ```
+
+> **Note:** `$(which python3)` can fail inside a virtualenv because it resolves to a symlink. `readlink -f` follows the symlink to the real binary, which is what `setcap` requires.
 
 ### Set up systemd services
 
