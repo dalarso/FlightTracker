@@ -88,3 +88,12 @@ AIRLABS2_RESET_DAY     = 1     # Day of month your billing period resets (1–28
 # Register at https://aeroapi.flightaware.com
 # Only called when all free/freemium APIs return no route.
 FLIGHTAWARE_API_KEY = ""
+
+# Monthly credit from FlightAware:
+#   $5.00 — standard free tier
+#   $10.00 — if you run a FlightAware ADS-B feeder (fr24feed users often qualify)
+#   Check your account at https://aeroapi.flightaware.com
+FEEDER_MONTHLY_CREDIT = 5.00
+
+# Day of month your AeroAPI billing period resets (1–28)
+AEROAPI_RESET_DAY = 1
