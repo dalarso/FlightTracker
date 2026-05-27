@@ -71,6 +71,18 @@ RECEIVER_HOST = "localhost"
 #                          See: https://www.virtualradarserver.co.uk
 RECEIVER_TYPE = "dump1090"
 
+# How often (in seconds) to poll the ADS-B receiver for new flights.
+# Lower = faster to detect new aircraft entering your zone.
+# 15 s is a good balance; go as low as 5 s if you want near-instant detection.
+# Takes effect after Save & Restart.
+POLL_INTERVAL = 15
+
+# How often (in seconds) the display loop checks whether a background API
+# lookup has finished and new flight data is ready to show.
+# 2 s is fine for most setups; 1 s gives slightly faster transitions.
+# Takes effect after Save & Restart.
+DATA_CHECK_INTERVAL = 2
+
 # ── Local airports ────────────────────────────────────────────────────────────
 # Comma-separated IATA codes of airports in your area.
 # Routes are only trusted from free APIs (adsbdb, OpenSky) when the flight

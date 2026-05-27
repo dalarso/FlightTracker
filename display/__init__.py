@@ -47,6 +47,20 @@ except (ImportError, NameError):
     # If there's no experimental config data
     LOADING_LED_ENABLED = False
 
+try:
+    from config import POLL_INTERVAL
+except (ImportError, NameError):
+    POLL_INTERVAL = 15  # seconds between ADS-B receiver polls
+
+try:
+    from config import DATA_CHECK_INTERVAL
+except (ImportError, NameError):
+    DATA_CHECK_INTERVAL = 2  # seconds between processed-data pickup checks
+
+# Clamp to safe minimums so KeyFrame.add(0) one-shot traps can't happen
+POLL_INTERVAL       = max(5, int(POLL_INTERVAL))
+DATA_CHECK_INTERVAL = max(1, int(DATA_CHECK_INTERVAL))
+
 PAUSE_FLAG  = "/tmp/ft_paused"
 NIGHT_FLAG  = "/tmp/ft_night"
 
@@ -116,7 +130,7 @@ class Display(
         # a screen reset
         self.canvas.Clear()
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 5)
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * DATA_CHECK_INTERVAL))
     def check_for_loaded_data(self, count):
         if self.overhead.new_data:
             # Check if there's data
@@ -145,10 +159,13 @@ class Display(
                 self.reset_scene()
 
     def _reset_idle_scenes(self):
-        """Force clock/date/day to redraw on their next tick."""
+        """Force clock/date/day/weather to redraw on their next tick."""
         self._last_time = None
         self._last_date = None
         self._last_day = None
+        # WeatherScene tracking — forces temperature and rainfall to erase+redraw
+        self._last_temperature_str = None
+        self._last_upcoming_rain_and_temp = None
 
     @Animator.KeyFrame.add(1)
     def sync(self, count):
@@ -175,7 +192,7 @@ class Display(
         self._was_night  = night
         _ = self.matrix.SwapOnVSync(self.canvas)
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 30)
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * POLL_INTERVAL))
     def grab_new_data(self, count):
         # Only grab data if we're not already searching
         # for planes, or if there's new data available

@@ -52,7 +52,7 @@ class DateScene(object):
             # Only draw if date needs updated
             if self._last_date != current_date:
                 # Undraw last date if different from current
-                if not self._last_date is None:
+                if self._last_date is not None:
                     _ = graphics.DrawText(
                         self.canvas,
                         DATE_FONT,

@@ -42,7 +42,7 @@ class DayScene(object):
             # Only draw if time needs updated
             if self._last_day != current_day:
                 # Undraw last day if different from current
-                if not self._last_day is None:
+                if self._last_day is not None:
                     _ = graphics.DrawText(
                         self.canvas,
                         DAY_FONT,

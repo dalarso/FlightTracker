@@ -248,18 +248,21 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
   box-shadow: inset 0 0 60px rgba(0,0,0,.6);
 }
 .matrix-screen.night { filter: brightness(0.25); }
-.m-journey { flex: 0 0 40%; display: flex; align-items: center; justify-content: space-between; padding: 0 5%; }
-.m-code { font-size: 9cqi; font-weight: bold; color: #ffff00; text-shadow: 0 0 8px rgba(255,255,0,.55), 0 0 20px rgba(255,255,0,.2); letter-spacing: .05em; }
-.m-arrow { font-size: 7cqi; color: #e36e00; text-shadow: 0 0 8px rgba(227,110,0,.55); }
-.m-bar { flex: 0 0 18%; display: flex; align-items: center; justify-content: space-between; padding: 0 3%; border-top: 1px solid #00c800; box-shadow: 0 -1px 6px rgba(0,200,0,.3); }
-.m-callsign { font-size: 5.5cqi; font-weight: bold; color: #6eb6ff; text-shadow: 0 0 6px rgba(110,182,255,.45); }
-.m-flight-index { font-size: 4cqi; color: #606060; }
+.m-journey { flex: 0 0 38%; display: flex; align-items: center; justify-content: space-between; padding: 0 1%; }
+.m-code { font-size: 18cqi; font-weight: bold; color: #ffff00; text-shadow: 0 0 8px rgba(255,255,0,.55), 0 0 20px rgba(255,255,0,.2); letter-spacing: .01em; }
+.m-arrow { font-size: 10cqi; color: #e36e00; text-shadow: 0 0 8px rgba(227,110,0,.55); line-height: 1; }
+.m-bar { flex: 0 0 25%; display: flex; align-items: center; justify-content: space-between; padding: 0 2%; border-top: 1px solid #00c800; box-shadow: 0 -2px 8px rgba(0,200,0,.4); }
+.m-callsign { font-size: 9.5cqi; font-weight: bold; line-height: 1; }
+.m-flight-index { font-size: 6cqi; color: #c0c0c0; }
 .m-plane { flex: 1; display: flex; align-items: center; overflow: hidden; }
-.m-plane-text { font-size: 5.5cqi; color: #c800c8; text-shadow: 0 0 8px rgba(200,0,200,.5); white-space: nowrap; display: inline-block; animation: matrix-scroll 10s linear infinite; font-weight: bold; padding-left: 100%; }
+.m-plane-text { font-size: 15cqi; color: #c800c8; text-shadow: 0 0 8px rgba(200,0,200,.5); white-space: nowrap; display: inline-block; animation: matrix-scroll 10s linear infinite; font-weight: bold; padding-left: 100%; }
 @keyframes matrix-scroll { from { transform: translateX(0); } to { transform: translateX(-200%); } }
-.m-idle { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 4% 6%; gap: 2%; }
-.m-clock { font-size: 14cqi; color: #1d009c; text-shadow: 0 0 10px rgba(29,0,156,.6), 0 0 24px rgba(29,0,156,.3); line-height: 1; }
-.m-day { font-size: 5.5cqi; color: #555; line-height: 1.2; }
+.m-idle { flex: 1; display: flex; flex-direction: column; justify-content: space-between; padding: 3% 1% 2%; }
+.m-top-row { display: flex; align-items: flex-start; justify-content: space-between; }
+.m-clock { font-size: 18cqi; color: #1d009c; text-shadow: 0 0 10px rgba(29,0,156,.7), 0 0 24px rgba(29,0,156,.4); line-height: 1; }
+.m-temp { font-size: 9.5cqi; line-height: 1; text-align: right; }
+.m-day { font-size: 9.5cqi; color: #700091; text-shadow: 0 0 8px rgba(112,0,145,.55); line-height: 1; }
+.m-date { font-size: 9cqi; color: #60017d; text-shadow: 0 0 8px rgba(96,1,125,.5); line-height: 1; }
 .m-off { flex: 1; display: flex; align-items: center; justify-content: center; }
 .m-off-text { font-size: 4cqi; color: #1e1e1e; letter-spacing: .25em; }
 .m-service-off { color: #2a2a2a; }
@@ -434,6 +437,14 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
             <option value="vrs">Virtual Radar Server (VRS)</option>
           </select>
           <div class="hint">Switch to VRS if you run Virtual Radar Server as your ADS-B source</div>
+        </div>
+        <div class="field"><label>Poll Interval <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
+          <input type="number" min="5" max="120" id="poll_interval">
+          <div class="hint">How often to check the receiver for new flights. Default 15 s — lower means faster detection, higher saves CPU. Takes effect after Save &amp; Restart.</div>
+        </div>
+        <div class="field"><label>Data Check Interval <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
+          <input type="number" min="1" max="10" id="data_check_interval">
+          <div class="hint">How quickly the display picks up results once a lookup finishes. Default 2 s. Takes effect after Save &amp; Restart.</div>
         </div>
       </div>
     </div>
@@ -899,9 +910,22 @@ let config = {};
 let altUnit = 'ft';
 let displayOn = true;
 let map, zoneRect, homeMarker, cornerMarkers = [];
+let _weatherData = null;
+let _weatherFetchedAt = 0;
 let evtSource = null;
 
 // ── Tabs ───────────────────────────────────────────────────────
+// Group all N-number registrations (private/GA) into one combined row
+function _groupNReg(items) {
+  const nItems = (items || []).filter(i => /^N\d/.test(i.prefix));
+  const rest   = (items || []).filter(i => !/^N\d/.test(i.prefix));
+  if (!nItems.length) return rest;
+  const nTotal = nItems.reduce((sum, i) => sum + i.count, 0);
+  const nEntry = { prefix: 'N-reg', name: 'Private / GA', count: nTotal };
+  const idx    = rest.findIndex(i => i.count < nTotal);
+  return idx === -1 ? [...rest, nEntry] : [...rest.slice(0, idx), nEntry, ...rest.slice(idx)];
+}
+
 function toggleHamburger() {
   const nav = document.querySelector('nav');
   const btn = document.getElementById('hamburger');
@@ -1173,6 +1197,8 @@ async function loadConfig() {
   document.getElementById('rainfall_enabled').checked = config.RAINFALL_ENABLED || false;
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
   document.getElementById('receiver_type').value = config.RECEIVER_TYPE || 'dump1090';
+  document.getElementById('poll_interval').value = config.POLL_INTERVAL ?? 15;
+  document.getElementById('data_check_interval').value = config.DATA_CHECK_INTERVAL ?? 2;
   document.getElementById('time_format').value = config.TIME_FORMAT || '24h';
   document.getElementById('date_format').value = config.DATE_FORMAT || 'MDY';
   document.getElementById('airlabs_key').value  = config.AIRLABS_API_KEY   || '';
@@ -1225,6 +1251,8 @@ function buildConfigPayload() {
     TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
     RECEIVER_TYPE: document.getElementById('receiver_type').value,
+    POLL_INTERVAL: parseInt(document.getElementById('poll_interval').value) || 15,
+    DATA_CHECK_INTERVAL: parseInt(document.getElementById('data_check_interval').value) || 2,
     TIME_FORMAT: document.getElementById('time_format').value,
     DATE_FORMAT: document.getElementById('date_format').value,
     AIRLABS_API_KEY:   document.getElementById('airlabs_key').value,
@@ -1269,6 +1297,8 @@ async function saveConfig(restart) {
     if (data.ok) {
       const { restart: _, ...savedConfig } = payload;
       config = savedConfig;
+      // Immediately re-render the matrix preview so format changes (time/date) are visible at once
+      updateMatrixPreview();
       const msg = restart ? '✓ Saved — restarting display…' : '✓ Saved';
       status.textContent = msg; status.className = 'save-status ok';
       showToast(msg, 'ok');
@@ -1474,6 +1504,7 @@ async function updateMatrixPreview() {
     const [status, flightData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/flights').then(r => r.json()),
+      fetchWeather(),
     ]);
     renderMatrix(status, flightData);
     const ts = flightData.ts
@@ -1500,38 +1531,52 @@ function renderMatrix(status, flightData) {
     return;
   }
   if (flights.length === 0) {
-    const now = new Date();
-    const tz = config.TIMEZONE || 'America/Los_Angeles';
+    const now      = new Date();
+    const tz       = config.TIMEZONE || 'America/Los_Angeles';
     const _use12h  = (config.TIME_FORMAT || '24h') === '12h';
     const _dateFmt = config.DATE_FORMAT || 'MDY';
     const timeStr  = now.toLocaleTimeString(_use12h ? 'en-US' : 'en-GB', { hour: _use12h ? 'numeric' : '2-digit', minute: '2-digit', hour12: _use12h, timeZone: tz });
-    const weekday  = now.toLocaleDateString('en-US', { weekday: 'short', timeZone: tz });
-    const _dd      = now.toLocaleDateString('en-US', { day: 'numeric',   timeZone: tz });
-    const _mm      = now.toLocaleDateString('en-US', { month: 'short',   timeZone: tz });
-    const _yyyy    = now.toLocaleDateString('en-US', { year: 'numeric',  timeZone: tz });
-    const dateStr  = _dateFmt === 'DMY' ? `${weekday} ${_dd} ${_mm}` :
-                     _dateFmt === 'YMD' ? `${weekday} ${_yyyy}-${now.toLocaleDateString('en-US',{month:'2-digit',timeZone:tz})}-${now.toLocaleDateString('en-US',{day:'2-digit',timeZone:tz})}` :
-                     `${weekday} ${_mm} ${_dd}`;
+    const dayName  = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: tz });
+    const _d       = now.toLocaleDateString('en-US', { day: 'numeric',  timeZone: tz });
+    const _m       = now.toLocaleDateString('en-US', { month: 'numeric', timeZone: tz });
+    const _y       = now.toLocaleDateString('en-US', { year: 'numeric', timeZone: tz });
+    const _m2      = now.toLocaleDateString('en-US', { month: '2-digit', timeZone: tz });
+    const _d2      = now.toLocaleDateString('en-US', { day: '2-digit',  timeZone: tz });
+    const dateStr  = _dateFmt === 'DMY' ? `${_d}/${_m}/${_y}` :
+                     _dateFmt === 'YMD' ? `${_y}-${_m2}-${_d2}` :
+                     `${_m}/${_d}/${_y}`;
+    const wData    = _weatherData;
+    const tempHtml = (wData && wData.temp != null)
+      ? `<div class="m-temp" style="color:${_tempColor(wData.temp)};text-shadow:0 0 8px ${_tempColor(wData.temp)}88">${wData.temp}${escHtml(wData.unit)}</div>`
+      : '';
     screen.innerHTML = `
       <div class="m-idle">
-        <div class="m-clock">${timeStr}</div>
-        <div class="m-day">${dateStr}</div>
+        <div class="m-top-row">
+          <div class="m-clock">${timeStr}</div>
+          ${tempHtml}
+        </div>
+        <div class="m-day">${escHtml(dayName)}</div>
+        <div class="m-date">${escHtml(dateStr)}</div>
       </div>`;
     return;
   }
   const f = flights[0];
   const total = flights.length;
   const displayLabel = f.display_name || f.plane || '';
-  const dur = Math.max(6, Math.ceil((displayLabel.length) * 0.4));
+  const dur = Math.max(8, Math.ceil(displayLabel.length * 0.7));
+  const _sel = (config.JOURNEY_CODE_SELECTED || '').toUpperCase();
+  const _codeStyle = (code) => _sel && code && code.toUpperCase() === _sel
+    ? 'font-weight:900;letter-spacing:.04em'
+    : '';
   if (f.test) screen.classList.add('test-mode');
   screen.innerHTML = `
     <div class="m-journey">
-      <span class="m-code">${escHtml(f.origin) || '&nbsp;?&nbsp;'}</span>
-      <span class="m-arrow">&#8594;</span>
-      <span class="m-code">${escHtml(f.destination) || '&nbsp;?&nbsp;'}</span>
+      <span class="m-code" style="${_codeStyle(f.origin)}">${escHtml(f.origin) || '&nbsp;?&nbsp;'}</span>
+      <span class="m-arrow">&#9654;</span>
+      <span class="m-code" style="${_codeStyle(f.destination)}">${escHtml(f.destination) || '&nbsp;?&nbsp;'}</span>
     </div>
     <div class="m-bar">
-      <span class="m-callsign">${escHtml(f.callsign || '')}</span>
+      <span class="m-callsign">${_callsignHtml(f.callsign)}</span>
       <span class="m-flight-index">${total > 1 ? '1/' + total : ''}</span>
     </div>
     <div class="m-plane">
@@ -1702,7 +1747,7 @@ function renderTodayStats(d) {
 
   const topEl = document.getElementById('stats-top');
   topEl.innerHTML = '';
-  (d.top_today || []).forEach(item => {
+  _groupNReg(d.top_today).forEach(item => {
     const row = document.createElement('div');
     row.className = 'usage-stat';
     const label = item.name
@@ -1928,8 +1973,8 @@ function renderPeriodStats(d) {
 
     render(step);
   }
-  fillList('rollup-airlines', ru.airlines, 'prefix', 'name', 5);
-  fillList('rollup-tails',    ru.tails,    'reg',    null,   5);
+  fillList('rollup-airlines', _groupNReg(ru.airlines), 'prefix', 'name', 5);
+  fillList('rollup-tails',    ru.tails,    'reg',    'name', 5);
   fillList('rollup-routes',   ru.routes,   'route',  null,   5);
   fillList('rollup-types',    ru.types,    'type',   null,   5);
 
@@ -2313,6 +2358,64 @@ function renderStack(stack) {
   }).join('');
 }
 
+// ── Callsign two-tone helper ───────────────────────────────────
+// Mirrors FlightDetailsScene: alpha chars → BLUE (#370eed), numeric → BLUE_LIGHT (#6eb6ff)
+function _callsignHtml(cs) {
+  if (!cs) return '';
+  return [...cs].map(ch => {
+    if (/[0-9]/.test(ch)) {
+      return `<span style="color:#6eb6ff;text-shadow:0 0 5px rgba(110,182,255,.5)">${escHtml(ch)}</span>`;
+    }
+    return `<span style="color:#370eed;text-shadow:0 0 5px rgba(55,14,237,.55)">${escHtml(ch)}</span>`;
+  }).join('');
+}
+
+// ── Weather helpers ────────────────────────────────────────────
+async function fetchWeather() {
+  // Refresh no more often than the server-side cache TTL (60 s)
+  if (Date.now() - _weatherFetchedAt < 55000) return;
+  try {
+    const r = await fetch('/api/weather');
+    if (r.ok) {
+      _weatherData = await r.json();
+      _weatherFetchedAt = Date.now();
+    }
+  } catch (_) {}
+}
+
+function _tempColor(temp) {
+  // Mirrors TEMPERATURE_COLOURS / TEMPERATURE_COLOURS_METRIC in scenes/weather.py
+  const stopsF = [  // °F thresholds (imperial)
+    [0,   [255, 255, 255]],  // WHITE
+    [40,  [110, 182, 255]],  // BLUE_LIGHT
+    [60,  [112,   0, 145]],  // PINK_DARK
+    [80,  [255, 255,   0]],  // YELLOW
+    [100, [227, 110,   0]],  // ORANGE
+  ];
+  const stopsC = [  // °C thresholds (metric)
+    [-18, [255, 255, 255]],  // WHITE
+    [  4, [110, 182, 255]],  // BLUE_LIGHT
+    [ 16, [112,   0, 145]],  // PINK_DARK
+    [ 27, [255, 255,   0]],  // YELLOW
+    [ 38, [227, 110,   0]],  // ORANGE
+  ];
+  const stops = (config.TEMPERATURE_UNITS || 'imperial') === 'metric' ? stopsC : stopsF;
+  if (temp == null) return '#ffffff';
+  let loT = stops[0][0], hiT = stops[1][0];
+  let loC = stops[0][1], hiC = stops[1][1];
+  for (let i = 1; i < stops.length - 1; i++) {
+    if (temp > stops[i][0]) { loT = stops[i][0]; hiT = stops[i+1][0]; loC = stops[i][1]; hiC = stops[i+1][1]; }
+  }
+  let ratio;
+  if (temp >= hiT) ratio = 1;
+  else if (temp > loT) ratio = (temp - loT) / (hiT - loT);
+  else ratio = 0;
+  const r = Math.round(loC[0] + (hiC[0] - loC[0]) * ratio);
+  const g = Math.round(loC[1] + (hiC[1] - loC[1]) * ratio);
+  const b = Math.round(loC[2] + (hiC[2] - loC[2]) * ratio);
+  return `rgb(${r},${g},${b})`;
+}
+
 function _formatTime(hhmm) {
   // hhmm is "HH:MM" in 24-hour format (from server/SQLite)
   if (!hhmm || hhmm.length < 5) return hhmm;
@@ -2366,7 +2469,7 @@ async function clearCacheEntry() {
     input.value = '';
     // Refresh cache counts on each stack row
     const [stackRes, statsRes] = await Promise.all([
-      fetch('/api/usage').then(r => r.json()),
+      fetch('/api/apis').then(r => r.json()),
       fetch('/api/cache/stats').then(r => r.json()),
     ]);
     _cacheStats = statsRes;
@@ -3017,7 +3120,7 @@ async function resetTestFlight() {
 }
 
 function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 // ── Init ───────────────────────────────────────────────────────

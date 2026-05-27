@@ -27,7 +27,7 @@ class LoadingLEDScene(object):
             GPIO.setup(LOADING_LED_GPIO_PIN, GPIO.OUT)
             GPIO.output(LOADING_LED_GPIO_PIN, GPIO.HIGH)
             self.gpio_setup_complete = True
-        except:
+        except Exception:
             print("Error initializing GPIO", file=sys.stderr)
             self.gpio_setup_complete = False
 
@@ -49,3 +49,5 @@ class LoadingLEDScene(object):
             # Not processing, leave LED on
             if self.gpio_setup_complete:
                 GPIO.output(LOADING_LED_GPIO_PIN, GPIO.HIGH)
+
+        return reset_count

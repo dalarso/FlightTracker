@@ -5,7 +5,9 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -69,7 +71,8 @@ AIRLINE_NAMES: dict[str, str] = {
     "HAL": "Hawaiian Airlines",   "VRD": "Virgin America",
     "MXY": "Breeze Airways",      "VXP": "Avelo Airlines",
     "ROU": "Air Canada Rouge",
-    "LXJ": "Flexjet",             "JRE": "flyExclusive",
+    "EJA": "NetJets",              "LXJ": "Flexjet",             "JRE": "flyExclusive",
+    "TIV": "Thrive Aviation",      "CXK": "ATP Flight School",
     "JSX": "JSX",                 "TWY": "Solarius Aviation",
     "JAN": "Janet Airlines",
     "FDX": "FedEx Express",       "UPS": "UPS Airlines",
@@ -127,7 +130,7 @@ _KNOWN_KEYS = {
     "LOADING_LED_ENABLED", "LOADING_LED_GPIO_PIN", "RAINFALL_ENABLED",
     # Billing tracking
     "FEEDER_MONTHLY_CREDIT",
-    "RECEIVER_TYPE",
+    "RECEIVER_TYPE", "POLL_INTERVAL", "DATA_CHECK_INTERVAL",
     "TIME_FORMAT", "DATE_FORMAT",
     "AIRLABS_MONTHLY_LIMIT", "AIRLABS_RESET_DAY",
     "AIRLABS2_MONTHLY_LIMIT", "AIRLABS2_RESET_DAY",
@@ -235,6 +238,8 @@ HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
 
 RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST", "localhost")))}
 RECEIVER_TYPE = {repr(str(existing.get("RECEIVER_TYPE", "dump1090")))}
+POLL_INTERVAL = {int(existing.get("POLL_INTERVAL", 15))}
+DATA_CHECK_INTERVAL = {int(existing.get("DATA_CHECK_INTERVAL", 2))}
 
 LOCAL_AIRPORTS = {repr(str(existing.get("LOCAL_AIRPORTS", existing.get("LOCAL_AIRPORT", ""))))}
 OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID", "")))}
@@ -552,7 +557,9 @@ def _db_stats(date_from: str, date_to: str, today: str | None = None) -> dict | 
         ).fetchall()
 
         tail_rows = conn.execute(
-            "SELECT registration, COUNT(*) cnt FROM sightings "
+            "SELECT registration, COUNT(*) cnt, "
+            "MAX(airline) as airline, MAX(aircraft) as aircraft "
+            "FROM sightings "
             "WHERE date >= ? AND date <= ? AND registration != '' "
             "GROUP BY registration ORDER BY cnt DESC LIMIT 25",
             (date_from, date_to),
@@ -672,7 +679,17 @@ def _db_stats(date_from: str, date_to: str, today: str | None = None) -> dict | 
                 {"prefix": r["airline"], "count": r["cnt"], "name": AIRLINE_NAMES.get(r["airline"], "")}
                 for r in top_rows
             ],
-            "tails":      [{"reg": r["registration"], "count": r["cnt"]} for r in tail_rows],
+            "tails":      [
+                {
+                    "reg":   r["registration"],
+                    "count": r["cnt"],
+                    "name":  ", ".join(filter(None, [
+                        AIRLINE_NAMES.get(r["airline"] or "", ""),
+                        r["aircraft"] or "",
+                    ])),
+                }
+                for r in tail_rows
+            ],
             "routes":     [{"route": r["route"],       "count": r["cnt"]} for r in route_rows],
             "types":      [{"type": r["aircraft"],     "count": r["cnt"]} for r in type_rows],
             "source_pct": source_pct,
@@ -1071,6 +1088,62 @@ def display_on():
     PAUSE_FLAG.unlink(missing_ok=True)
     _log("[web] display on")
     return jsonify({"ok": True})
+
+
+# ── Weather endpoint ──────────────────────────────────────────────────────────
+_weather_cache: dict = {"temp": None, "unit": "°F", "ts": 0.0}
+_weather_cache_lock  = threading.Lock()
+_WEATHER_CACHE_TTL   = 60  # seconds
+
+
+@app.route("/api/weather", methods=["GET"])
+def api_weather():
+    """Return current temperature, cached for 60 s. Uses OpenWeather if a key
+    is configured, otherwise falls back to taps-aff (metric only)."""
+    now = time.time()
+    with _weather_cache_lock:
+        cached = _weather_cache.copy()
+    if now - cached["ts"] < _WEATHER_CACHE_TTL and cached["temp"] is not None:
+        return jsonify({"temp": cached["temp"], "unit": cached["unit"]})
+
+    try:
+        cfg = read_config()
+    except Exception:
+        cfg = {}
+
+    location = cfg.get("WEATHER_LOCATION", "").strip()
+    api_key  = cfg.get("OPENWEATHER_API_KEY", "").strip()
+    units    = cfg.get("TEMPERATURE_UNITS", "imperial")
+    unit_sym = "°F" if units == "imperial" else "°C"
+
+    temp = None
+    if location:
+        if api_key:
+            try:
+                # location is stored pre-encoded in config (e.g. "las%20vegas,nv,us")
+                url = (
+                    "https://api.openweathermap.org/data/2.5/weather"
+                    f"?q={location}&appid={api_key}&units={units}"
+                )
+                raw  = urllib.request.urlopen(urllib.request.Request(url), timeout=5).read()
+                data = json.loads(raw)
+                temp = round(data["main"]["temp"])
+            except Exception:
+                pass
+        if temp is None:
+            # Fallback: taps-aff (returns °C; we convert if needed)
+            try:
+                url = f"https://taps-aff.co.uk/api/{location}"
+                raw  = urllib.request.urlopen(urllib.request.Request(url), timeout=5).read()
+                data = json.loads(raw)
+                c    = float(data["temp_c"])
+                temp = round(c * 9 / 5 + 32 if units == "imperial" else c)
+            except Exception:
+                pass
+
+    with _weather_cache_lock:
+        _weather_cache.update({"temp": temp, "unit": unit_sym, "ts": now})
+    return jsonify({"temp": temp, "unit": unit_sym})
 
 
 @app.route("/api/service", methods=["GET"])

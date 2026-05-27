@@ -338,7 +338,8 @@ _AIRLINE_NAMES: dict[str, str] = {
     # Canadian regional / leisure
     "ROU": "Air Canada Rouge",
     # Charter / private aviation
-    "LXJ": "Flexjet",             "JRE": "flyExclusive",
+    "EJA": "NetJets",              "LXJ": "Flexjet",             "JRE": "flyExclusive",
+    "TIV": "Thrive Aviation",      "CXK": "ATP Flight School",
     "TWY": "Solarius Aviation",
     # Las Vegas special (government contractor — Groom Lake / Area 51 shuttle)
     "JAN": "Janet Airlines",
@@ -739,6 +740,21 @@ def _cache_db_set_route(key: str, cache_type: str,
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (key, cache_type, origin or '', dest or '',
                  olat, olon, dlat, dlon, expires_at, source or ''),
+            )
+            _cache_conn.commit()
+    except Exception:
+        pass
+
+
+def _cache_db_delete_route(key: str, cache_type: str) -> None:
+    """Delete a single route cache entry by key and type."""
+    if _cache_conn is None:
+        return
+    try:
+        with _cache_lock:
+            _cache_conn.execute(
+                "DELETE FROM cache WHERE key=? AND cache_type=?",
+                (key, cache_type),
             )
             _cache_conn.commit()
     except Exception:
@@ -1345,7 +1361,7 @@ class Flight:
         try:
             lat = entry[FR24_LAT]
             lon = entry[FR24_LON]
-            if not lat or not lon:
+            if lat is None or lon is None:
                 return None
             alt = entry[FR24_ALT]
             reg = entry[FR24_REG] if len(entry) > FR24_REG else ""
@@ -1365,7 +1381,7 @@ class Flight:
     def from_dump1090(cls, ac):
         lat = ac.get("lat")
         lon = ac.get("lon")
-        if not lat or not lon:
+        if lat is None or lon is None:
             return None
         alt = ac.get("alt_baro", 0)
         return cls(
@@ -1603,6 +1619,9 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     origin, destination, source = "", "", ""
     now = int(time.time())
     _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)  # evaluate once — two callers below
+    # Best origin/dest coords seen during this lookup — stored in the resolved cache
+    # so future hits can run a geometry plausibility check even without a live API call.
+    _coord_olat = _coord_olon = _coord_dlat = _coord_dlon = None
 
     # Override display/type fields — populated if any override rule matches;
     # returned at the end so partial overrides (missing endpoints) still carry
@@ -1646,19 +1665,42 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # ── 0.5. Resolved-route cache (scheduled airlines only) ───────────────────
     # When we successfully resolve both endpoints for a scheduled airline
     # callsign (from any combination of sources), the final result is cached
-    # here at the scheduled-airline TTL (7 days).  A hit here skips the entire
-    # API chain — no adsbdb, OpenSky, AirLabs, or AeroAPI calls are made.
+    # here at the scheduled-airline TTL (7 days).  A hit normally skips the
+    # entire API chain.
     #
-    # This prevents AirLabs call burns on repeat sightings of daily flights
-    # where OpenSky sometimes returns a full route (so AirLabs is never called
-    # and its 7-day cache is never written) and sometimes returns only partial
-    # data (triggering a live AirLabs call to fill the missing endpoint).
+    # Geometry guard: airline flight numbers are reused across different
+    # city-pairs on different days (e.g. AAL2038 = SNA→ORD one day,
+    # LAS→CLT the next).  To catch a stale cached route:
+    #   • Local-origin departures are trusted unconditionally — we know our
+    #     own airport's schedule.
+    #   • Non-local origins with stored coordinates are validated with the
+    #     same detour-ratio check used by AirLabs/AeroAPI.  A failing check
+    #     busts the entry and falls through to a fresh lookup.
+    #   • Non-local entries without coordinates (written before this fix) are
+    #     also busted so they get re-resolved and stored with coordinates.
     if callsign and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED:
         _resolved = _cache_db_get_route(callsign, 'resolved')
         if _resolved and _resolved[0] and _resolved[1]:
-            _rsrc = _resolved[6].removesuffix(":cached")  # strip any trailing :cached so it isn't doubled
+            _rsrc           = _resolved[6].removesuffix(":cached")
             _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
-            return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
+            _res_origin     = _resolved[0].upper()
+            # Local departures: trust immediately — no geometry needed.
+            if _res_origin in _LOCAL_AIRPORTS:
+                return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
+            # Non-local: validate with stored coordinates, or bust if none.
+            if _resolved[2] is not None:
+                if _route_plausible(plane_lat, plane_lon,
+                                    _resolved[2], _resolved[3],
+                                    _resolved[4], _resolved[5]):
+                    return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
+                _cache_db_delete_route(callsign, 'resolved')
+                _log(f"[resolved] {callsign}: cached {_resolved[0]}->{_resolved[1]} fails "
+                     f"geometry check — busting stale entry, re-resolving")
+            else:
+                # No coordinates stored — bust so the fresh lookup stores them.
+                _cache_db_delete_route(callsign, 'resolved')
+                _log(f"[resolved] {callsign}: cached {_resolved[0]}->{_resolved[1]} has no "
+                     f"coordinates — busting to re-resolve with plausibility data")
 
     # ── 0.75 VRS live route hint ───────────────────────────────────────────────
     # When the receiver is Virtual Radar Server, it may supply From/To airport
@@ -1667,8 +1709,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # Treated as a short-lived (1 hr) route cache entry so it doesn't interfere
     # with the 7-day resolved cache used for scheduled airlines.
     if vrs_origin and vrs_dest and not _override_partial:
-        _local_set = {a.strip().upper() for a in LOCAL_AIRPORTS.split(",") if a.strip()}
-        if vrs_origin in _local_set or vrs_dest in _local_set:
+        if vrs_origin in _LOCAL_AIRPORTS or vrs_dest in _LOCAL_AIRPORTS:
             _log(f"[vrs] {callsign}: {vrs_origin}->{vrs_dest} (local endpoint — accepted)")
             _cache_db_set_route(
                 callsign, 'route',
@@ -1817,7 +1858,10 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
             if _sky_origin_local:
                 if _sky_src != "opensky:cached":
-                    _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
+                    if _adsbdb_commercial:
+                        _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} found (commercial — deferring to AirLabs/AeroAPI)")
+                    else:
+                        _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
                 if not _adsbdb_commercial:
                     # GA / non-scheduled: commit origin and destination
                     if not origin:
@@ -1964,6 +2008,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             if _al_src != "airlabs:cached":
                 _count_suffix = f" [call #{_al_count}]" if _al_count else ""
                 _log(f"[airlabs-1] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
+            # Capture coords for the resolved-cache plausibility check.
+            # Always overwrite — if a later API overrides origin/dest it should
+            # also win on coords, so we don't guard with "is None".
+            if al_olat is not None:
+                _coord_olat, _coord_olon = al_olat, al_olon
+                _coord_dlat, _coord_dlon = al_dlat, al_dlon
         else:
             if _al_src != "airlabs:cached":
                 _log(f"[airlabs-1] implausible route {al_origin}->{al_dest} rejected for {callsign}")
@@ -2059,6 +2109,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             if _al2_src != "airlabs2:cached":
                 _count_suffix = f" [call #{_al2_count}]" if _al2_count else ""
                 _log(f"[airlabs-2] {_airline_display(callsign)}: {_route_display(al2_origin, al2_dest)} accepted{_count_suffix}")
+            # Capture coords for the resolved-cache plausibility check.
+            # Always overwrite — if AirLabs-2 overrides the route it wins on coords too.
+            if al2_olat is not None:
+                _coord_olat, _coord_olon = al2_olat, al2_olon
+                _coord_dlat, _coord_dlon = al2_dlat, al2_dlon
         else:
             if _al2_src != "airlabs2:cached":
                 _log(f"[airlabs-2] implausible route {al2_origin}->{al2_dest} rejected for {callsign}")
@@ -2079,6 +2134,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 if not destination:
                     destination = _cached_fa[1]
                 source = source or "aeroapi:cached"
+                # Capture coords for the resolved-cache plausibility check.
+                # Always overwrite — AeroAPI is the authoritative source and
+                # should win over coords captured from earlier in the chain.
+                if _cached_fa[2] is not None:
+                    _coord_olat, _coord_olon = _cached_fa[2], _cached_fa[3]
+                    _coord_dlat, _coord_dlon = _cached_fa[4], _cached_fa[5]
             # No log — suppress cached-hit spam; live fetches produce a log below
         elif not _in_backoff("aeroapi"):
             try:
@@ -2149,6 +2210,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                                     destination = fa_dest
                                 source = source or "aeroapi"
                             _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
+                            # Capture coords for the resolved-cache plausibility check.
+                            # Always overwrite — live AeroAPI is the most authoritative source.
+                            if fa_olat is not None:
+                                _coord_olat, _coord_olon = fa_olat, fa_olon
+                                _coord_dlat, _coord_dlon = fa_dlat, fa_dlon
                         else:
                             _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
                 else:
@@ -2213,7 +2279,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED):
         _cache_db_set_route(callsign, 'resolved',
                             origin, destination,
-                            None, None, None, None,
+                            _coord_olat, _coord_olon, _coord_dlat, _coord_dlon,
                             int(time.time()) + ROUTE_TTL_SCHEDULED,
                             source=source.removesuffix(":cached"))
 

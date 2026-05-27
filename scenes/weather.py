@@ -4,13 +4,28 @@ import time
 import json
 from math import ceil
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 from rgbmatrix import graphics
 from utilities.animator import Animator
 from setup import colours, fonts, frames
-from config import WEATHER_LOCATION
 import sys
 
 # Attempt to load config data
+try:
+    from config import WEATHER_LOCATION
+except (ImportError, NameError):
+    WEATHER_LOCATION = ""
+
+try:
+    from config import TIMEZONE
+except (ImportError, NameError):
+    TIMEZONE = "America/Los_Angeles"
+
+try:
+    _TZ = ZoneInfo(TIMEZONE)
+except Exception:
+    _TZ = ZoneInfo("America/Los_Angeles")
+
 try:
     from config import OPENWEATHER_API_KEY
 
@@ -48,7 +63,7 @@ WEATHER_RETRIES = 3
 # Scene Setup
 RAINFALL_REFRESH_SECONDS = 300
 RAINFALL_HOURS = 24
-RAINFAILL_12HR_MARKERS = True
+RAINFALL_12HR_MARKERS = True
 RAINFALL_GRAPH_ORIGIN = (39, 15)
 RAINFALL_COLUMN_WIDTH = 1
 RAINFALL_GRAPH_HEIGHT = 8
@@ -61,11 +76,20 @@ TEMPERATURE_FONT_HEIGHT = 5
 TEMPERATURE_POSITION = (43, TEMPERATURE_FONT_HEIGHT + 2)
 
 TEMPERATURE_COLOURS = (
-    (0, colours.WHITE),
-    (40, colours.BLUE_LIGHT),
-    (60, colours.PINK_DARK),
-    (80, colours.YELLOW),
+    (0,   colours.WHITE),       # °F
+    (40,  colours.BLUE_LIGHT),
+    (60,  colours.PINK_DARK),
+    (80,  colours.YELLOW),
     (100, colours.ORANGE),
+)
+
+# Equivalent thresholds in °C — selected automatically when TEMPERATURE_UNITS == "metric"
+TEMPERATURE_COLOURS_METRIC = (
+    (-18, colours.WHITE),       # ≈ 0°F  — freezing
+    (  4, colours.BLUE_LIGHT),  # ≈ 40°F — cool
+    ( 16, colours.PINK_DARK),   # ≈ 60°F — mild
+    ( 27, colours.YELLOW),      # ≈ 80°F — warm
+    ( 38, colours.ORANGE),      # ≈ 100°F — hot
 )
 
 # Cache grabbing weather data
@@ -113,7 +137,7 @@ def grab_current_temperature(location, units="metric"):
     except WeatherError:
         grab_weather.cache_clear()
 
-    if units == "imperial":
+    if units == "imperial" and current_temp is not None:
         current_temp = (current_temp * (9.0 / 5.0)) + 32
 
     return current_temp
@@ -140,7 +164,7 @@ def grab_upcoming_rainfall_and_temperature(location, hours):
             for hour in hourly_forecast
         ]
 
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(_TZ)
         current_hour = now.hour
         up_coming_rainfall_and_temperature = hourly_data[
             current_hour : current_hour + hours
@@ -188,6 +212,8 @@ class WeatherScene(object):
         self._last_upcoming_rain_and_temp = None
         self._last_temperature = None
         self._last_temperature_str = None
+        self.upcoming_rain_and_temp = None   # guard against read before first RAINFALL_REFRESH tick
+        self.current_temperature = None      # guard against read before first TEMPERATURE_REFRESH tick
 
         # Attempt to grab the current temperature using OPENWEATHER if a key
         # is provided otherwise fallback on the taps-aff service
@@ -206,32 +232,32 @@ class WeatherScene(object):
         )
 
     def temperature_to_colour(self, current_temperature):
-        # Set some defaults
-        min_temp = TEMPERATURE_COLOURS[0][0]
-        max_temp = TEMPERATURE_COLOURS[1][0]
-        min_temp_colour = TEMPERATURE_COLOURS[0][1]
-        max_temp_colour = TEMPERATURE_COLOURS[1][1]
+        colours_table = (
+            TEMPERATURE_COLOURS_METRIC if TEMPERATURE_UNITS == "metric"
+            else TEMPERATURE_COLOURS
+        )
+        # Default to the first colour band
+        min_temp = colours_table[0][0]
+        max_temp = colours_table[1][0]
+        min_temp_colour = colours_table[0][1]
+        max_temp_colour = colours_table[1][1]
 
-        # Search to find where in the current
-        # temperature lies within the
-        # defined colours
-        for i in range(1, len(TEMPERATURE_COLOURS) - 1):
-            if current_temperature > TEMPERATURE_COLOURS[i][0]:
-                min_temp = TEMPERATURE_COLOURS[i][0]
-                max_temp = TEMPERATURE_COLOURS[i + 1][0]
-                min_temp_colour = TEMPERATURE_COLOURS[i][1]
-                max_temp_colour = TEMPERATURE_COLOURS[i + 1][1]
+        # Walk the stops to find which band the temperature falls in
+        for i in range(1, len(colours_table) - 1):
+            if current_temperature > colours_table[i][0]:
+                min_temp = colours_table[i][0]
+                max_temp = colours_table[i + 1][0]
+                min_temp_colour = colours_table[i][1]
+                max_temp_colour = colours_table[i + 1][1]
 
         if current_temperature > max_temp:
             ratio = 1
         elif current_temperature > min_temp:
-            ratio = (current_temperature - min_temp) / max_temp
+            ratio = (current_temperature - min_temp) / (max_temp - min_temp)
         else:
             ratio = 0
 
-        temp_colour = self.colour_gradient(min_temp_colour, max_temp_colour, ratio)
-
-        return temp_colour
+        return self.colour_gradient(min_temp_colour, max_temp_colour, ratio)
 
     def draw_rainfall_and_temperature(
         self, rainfall_and_temperature, graph_colour=None, flash_enabled=False
@@ -262,7 +288,7 @@ class WeatherScene(object):
             else:
                 flash_height = 0
 
-            if RAINFAILL_12HR_MARKERS:
+            if RAINFALL_12HR_MARKERS:
                 hourly_marker = data["hour"] in (0, 12)
             else:
                 hourly_marker = False
@@ -289,7 +315,7 @@ class WeatherScene(object):
 
                 self.draw_square(x1, y1, x2, y2, colours.BLACK)
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 1)
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * 1))
     def rainfall(self, count):
 
         if not RAINFALL_ENABLED:
@@ -311,7 +337,7 @@ class WeatherScene(object):
             )
 
         # Test for drawing rainfall if data is available
-        if not self._last_upcoming_rain_and_temp == self.upcoming_rain_and_temp:
+        if self._last_upcoming_rain_and_temp != self.upcoming_rain_and_temp:
             if self._last_upcoming_rain_and_temp is not None:
                 # Undraw previous graph
                 self.draw_rainfall_and_temperature(
@@ -329,7 +355,7 @@ class WeatherScene(object):
             )
             self._last_upcoming_rain_and_temp = self.upcoming_rain_and_temp.copy()
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 1)
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * 1))
     def temperature(self, count):
 
         if len(self._data):
@@ -345,31 +371,37 @@ class WeatherScene(object):
                 except WeatherError:
                     continue
 
-        if self._last_temperature_str is not None:
-            # Undraw old temperature
-            _ = graphics.DrawText(
-                self.canvas,
-                TEMPERATURE_FONT,
-                TEMPERATURE_POSITION[0],
-                TEMPERATURE_POSITION[1],
-                colours.BLACK,
-                self._last_temperature_str,
-            )
-
-        if self.current_temperature:
+        # Compute the string we *want* to show (None if no data)
+        if self.current_temperature is not None:
             temp_str = f"{round(self.current_temperature)}°".rjust(4, " ")
+        else:
+            temp_str = None
 
-            temp_colour = self.temperature_to_colour(self.current_temperature)
+        # Only erase / redraw when the display value has actually changed
+        if temp_str != self._last_temperature_str:
+            if self._last_temperature_str is not None:
+                # Undraw old temperature
+                _ = graphics.DrawText(
+                    self.canvas,
+                    TEMPERATURE_FONT,
+                    TEMPERATURE_POSITION[0],
+                    TEMPERATURE_POSITION[1],
+                    colours.BLACK,
+                    self._last_temperature_str,
+                )
 
-            # Draw temperature
-            _ = graphics.DrawText(
-                self.canvas,
-                TEMPERATURE_FONT,
-                TEMPERATURE_POSITION[0],
-                TEMPERATURE_POSITION[1],
-                temp_colour,
-                temp_str,
-            )
+            if temp_str is not None:
+                temp_colour = self.temperature_to_colour(self.current_temperature)
+
+                # Draw temperature
+                _ = graphics.DrawText(
+                    self.canvas,
+                    TEMPERATURE_FONT,
+                    TEMPERATURE_POSITION[0],
+                    TEMPERATURE_POSITION[1],
+                    temp_colour,
+                    temp_str,
+                )
 
             self._last_temperature = self.current_temperature
             self._last_temperature_str = temp_str

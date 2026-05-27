@@ -48,7 +48,7 @@ class FlightDetailsScene(object):
             self._data[self._data_index]["callsign"]
             and self._data[self._data_index]["callsign"] != "N/A"
         ):
-            flight_no = f'{self._data[self._data_index]["callsign"]}'
+            flight_no = self._data[self._data_index]["callsign"]
 
             for ch in flight_no:
                 ch_length = graphics.DrawText(
