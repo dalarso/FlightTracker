@@ -17,7 +17,7 @@ This version takes the original display concept and builds a full flight intelli
 
 ### My specific use case
 
-I live in Las Vegas directly under a departure corridor from LAS (Harry Reid International). Overhead flights are pulled from **my own ADS-B receiver** — an RTL-SDR dongle running `dump1090` — which picks up aircraft transponder signals directly. No third-party feed subscription required; you just need the hardware in range. The receiver host is configurable, so you can also point it at a network-accessible `dump1090` instance, `fr24feed`, or any compatible JSON source on another machine.
+I live in Las Vegas directly under a departure corridor from LAS (Harry Reid International). Overhead flights are pulled from **my own ADS-B receiver** — an RTL-SDR dongle running `dump1090` — which picks up aircraft transponder signals directly. No third-party feed subscription required; you just need the hardware in range. The receiver host is configurable, so you can also point it at a network-accessible `dump1090` instance, `fr24feed`, Virtual Radar Server, or any compatible JSON source on another machine.
 
 Roughly **90% of the traffic I see is a commercial departure out of LAS** — scheduled airline flights with filed flight plans. The routing logic reflects this: free historical databases are trusted conservatively (they can't know today's specific flight assignment), while real-time paid APIs are used as the authoritative source for commercial routes. If your local traffic skews toward GA aircraft or you're not near a major hub, you may find the free-API trust rules are more permissive than you need — or less. The `LOCAL_AIRPORTS` config and the override rules table give you the main levers to tune this.
 
@@ -28,14 +28,14 @@ Roughly **90% of the traffic I see is a commercial departure out of LAS** — sc
 - Raspberry Pi (any model with GPIO)
 - 64×32 RGB LED Matrix panel
 - Adafruit RGB Matrix Bonnet
-- ADS-B receiver (RTL-SDR dongle + antenna) running `dump1090` or `fr24feed`
+- ADS-B receiver (RTL-SDR dongle + antenna) running `dump1090`, `fr24feed`, or Virtual Radar Server
 
 ---
 
 ## Architecture Overview
 
 ```
-ADS-B Receiver (dump1090 / fr24feed)
+ADS-B Receiver (dump1090 / fr24feed / VRS)
         │
         ▼
   Zone + Altitude Filter
@@ -71,7 +71,10 @@ For each overhead flight, the route engine works through a prioritized stack, st
 User-defined rules stored in SQLite. Pattern-match by callsign (wildcards supported). Overrides return immediately — no API calls are made. Example: `JANET*` → always display "Janet Airlines" departing LAS.
 
 ### Step 0.5 — Resolved-Route Cache *(scheduled airlines only)*
-For commercial flights (recognized by ICAO 3-letter prefix), once both endpoints are known from any source, the full route is cached for 7 days. Repeat sightings of the same daily flight skip the entire API chain.
+For commercial flights (recognized by ICAO 3-letter prefix), once both endpoints are known from any source, the full route is cached for 7 days — along with the airport coordinates. On subsequent sightings, the cached route is validated with a **geometry plausibility check** before being returned. If the aircraft's current position is inconsistent with the stored route (e.g. the same flight number is being reused for a different city-pair on a different day), the stale cache entry is busted and a fresh lookup runs. This prevents wrong routes from sticking for the full 7-day TTL when an airline reuses a flight number on a different routing.
+
+### Step 0.75 — VRS Live Route Hint *(Virtual Radar Server only)*
+When the receiver is Virtual Radar Server, it may supply departure and arrival airport codes directly in the feed. Trusted immediately if at least one endpoint is a configured local airport. Stored with a 1-hour TTL so it doesn't interfere with the 7-day resolved cache.
 
 ### Step 1 — adsbdb *(free, unlimited)*
 Static historical database queried by callsign. Reliable for GA flights — a callsign like `N12345` consistently maps to the same aircraft. For commercial airlines, the result is cached and logged but **not committed** — the historical DB can't know today's specific routing. Cached for 1 hour.
@@ -98,7 +101,7 @@ When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppr
 
 | Cache type | TTL | Notes |
 |---|---|---|
-| Resolved commercial route | 7 days | Set by `RESOLVED_ROUTE_TTL` — once origin+destination confirmed by any trusted source |
+| Resolved commercial route | 7 days | Set by `ROUTE_TTL_SCHEDULED` — once origin+destination confirmed by any trusted source; geometry-validated on read |
 | AirLabs / AeroAPI result | 7 days (commercial) / 1 hour (GA) | Same TTL as resolved route when committed |
 | adsbdb result | 1 hour | Cached but not committed for commercial flights |
 | OpenSky result | 1 hour | Cached but not committed for commercial flights |
@@ -106,7 +109,7 @@ When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppr
 | Aircraft type / registration | Indefinite | Hardware doesn't change — permanent mapping |
 | AirLabs 402 backoff | Until billing period resets | Clears automatically on reset day; no restart needed |
 
-TTLs can be overridden in `config.py` — see `RESOLVED_ROUTE_TTL` and `GA_ROUTE_TTL`.
+TTLs can be overridden in `config.py` — see `ROUTE_TTL_SCHEDULED`, `ROUTE_TTL_DEFAULT`, and the other cache TTL constants.
 
 ### Cross-Check & Accuracy Tracking
 For commercial flights where adsbdb had a route, the result is compared against what the paid APIs returned and stored in the `free_api_checks` table. The web UI shows a running match-rate percentage — useful for understanding how reliable the free historical DB is for your local traffic.
@@ -139,7 +142,7 @@ SQLite with WAL mode and NORMAL sync (SD-card friendly). Two persistent connecti
 
 **`sightings`** — every unique flight seen overhead (deduped per callsign per day). Stores callsign, registration, origin, destination, aircraft type, route source, and timestamp.
 
-**`cache`** — unified route and type cache. Supports multiple `cache_type` values (`route`, `aeroapi`, `resolved`, `paid_miss`, `aircraft`, `reg`) with per-entry TTL expiry.
+**`cache`** — unified route and type cache. Supports multiple `cache_type` values (`route`, `aeroapi`, `resolved`, `paid_miss`, `aircraft`, `reg`) with per-entry TTL expiry. Resolved-route entries also store origin and destination airport coordinates for geometry plausibility checks on cache reads.
 
 **`overrides`** — user-defined routing rules. Managed via the web UI, version-counter invalidated so edits take effect on the next poll without a restart.
 
@@ -154,12 +157,14 @@ SQLite with WAL mode and NORMAL sync (SD-card friendly). Two persistent connecti
 A Flask application running as a separate systemd service (`FlightTrackerWeb.service`). Provides:
 
 ### Live Display Tab
-- Current overhead flights with route and aircraft type
+- Current overhead flights with route, aircraft type, and registration
 - Leaflet map showing the configured zone
 - Manual route test: enter any callsign to run the full resolution stack and see exactly which APIs returned what
 
 ### Stats Tab
 - **Today**: flights seen, unique airlines, API calls used
+- **Top Airlines**: sorted by sighting count, with N-number registrations (private / GA) grouped into a single "N-reg" row
+- **Top Tail #s**: 25 most-seen registrations, each annotated with airline name and aircraft type where known
 - **Recent Flights**: last 20 sightings with origin → destination and aircraft type
 - **Free API Accuracy**: 30-day adsbdb vs. paid API match rate with mismatch history
 - **90-Day Period**: rolling totals with per-day sparklines, filterable by custom date range
@@ -174,10 +179,13 @@ Stack of all configured APIs showing:
 ### Config Tab
 Live editing of `config.py` without SSH:
 - Location and zone settings
+- Timezone (IANA name)
 - API keys (masked by default)
 - Billing limits and reset days for AirLabs and AeroAPI
 - Cache TTL overrides
+- Display options: brightness, night brightness, poll intervals, time/date format
 - Save & Restart button
+- Footer links to this repo and Colin Waddell's original project
 
 ### Overrides Tab
 Full CRUD for the override rule table:
@@ -192,10 +200,28 @@ Full CRUD for the override rule table:
 
 ---
 
+## Pause & Night Mode
+
+Two flag-file controls let you manage the display without restarting the service:
+
+| Flag file | Effect |
+|---|---|
+| `/tmp/ft_paused` | Blanks the matrix (brightness → 0) while the file exists |
+| `/tmp/ft_night` | Drops brightness to `NIGHT_BRIGHTNESS` while the file exists |
+
+The web UI's Display tab has toggle buttons for both. Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
+
+---
+
 ## Configuration — `config.py`
 
+Copy `config.example.py` to `config.py` and fill in your values. `config.py` is gitignored and never committed.
+
 ```python
-# ── Location ────────────────────────────────────────────────────────────────
+# ── Timezone ──────────────────────────────────────────────────────────────────
+TIMEZONE = "America/Los_Angeles"   # IANA name — https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+
+# ── Zone — bounding box of sky to monitor ─────────────────────────────────────
 ZONE_HOME = {
     "tl_y": 0.000000,   # Top-Left Latitude
     "tl_x": 0.000000,   # Top-Left Longitude
@@ -203,35 +229,62 @@ ZONE_HOME = {
     "br_x": 0.000000,   # Bottom-Right Longitude
 }
 LOCATION_HOME = [0.000000, 0.000000, 0.000]  # lat, lon, alt (km)
-RECEIVER_HOST = "localhost"  # IP of your dump1090 / fr24feed host
 
-# ── Display ──────────────────────────────────────────────────────────────────
-MIN_ALTITUDE    = 100    # feet — filters out ground traffic
-MAX_ALTITUDE    = 15000  # feet — filters out high-altitude overflights
-BRIGHTNESS      = 80     # 0–100
-GPIO_SLOWDOWN   = 2      # 0–4, increase if flickering
-HAT_PWM_ENABLED = True   # requires solder bridge on HAT
-JOURNEY_CODE_SELECTED = "XXX"   # your nearest airport IATA code
-JOURNEY_BLANK_FILLER  = " ? "   # placeholder for unknown airports
+# ── ADS-B Receiver ────────────────────────────────────────────────────────────
+RECEIVER_HOST = "localhost"       # IP of your dump1090 / fr24feed / VRS host
+RECEIVER_TYPE = "dump1090"        # "dump1090" or "vrs" (Virtual Radar Server)
+POLL_INTERVAL       = 15          # seconds between receiver polls (min 5)
+DATA_CHECK_INTERVAL = 2           # seconds between display data-pickup checks (min 1)
 
-# ── Weather ──────────────────────────────────────────────────────────────────
-WEATHER_LOCATION    = "your%20city,state,us"
-OPENWEATHER_API_KEY = ""        # optional — free tier at openweathermap.org
-TEMPERATURE_UNITS   = "imperial"
+# ── Local airports ────────────────────────────────────────────────────────────
+LOCAL_AIRPORTS = "XXX,YYY"        # comma-separated IATA codes — controls route trust
 
-# ── Free APIs ────────────────────────────────────────────────────────────────
-OPENSKY_CLIENT_ID     = ""  # opensky-network.org
+# ── Display ───────────────────────────────────────────────────────────────────
+MIN_ALTITUDE     = 100            # feet — filters out ground traffic
+MAX_ALTITUDE     = 15000          # feet — filters out high-altitude overflights
+BRIGHTNESS       = 80             # 0–100, normal operating brightness
+NIGHT_BRIGHTNESS = 20             # 0–100, applied when /tmp/ft_night flag exists
+GPIO_SLOWDOWN    = 2              # 0–4, increase if flickering
+HAT_PWM_ENABLED  = True           # requires solder bridge on HAT
+JOURNEY_CODE_SELECTED = "XXX"     # IATA code of your nearest airport
+JOURNEY_BLANK_FILLER  = " ? "     # placeholder for unknown airports
+TIME_FORMAT = "24h"               # "24h" (14:30) or "12h" (2:30 PM)
+DATE_FORMAT = "MDY"               # "MDY", "DMY", or "YMD"
+
+# ── Optional loading LED ──────────────────────────────────────────────────────
+LOADING_LED_ENABLED  = False      # external LED that pulses while loading
+LOADING_LED_GPIO_PIN = 25         # BCM pin number
+
+# ── Weather ───────────────────────────────────────────────────────────────────
+WEATHER_LOCATION    = "your%20city,state,us"  # spaces as %20
+OPENWEATHER_API_KEY = ""          # free tier at openweathermap.org (optional)
+TEMPERATURE_UNITS   = "imperial"  # "imperial" (°F) or "metric" (°C)
+RAINFALL_ENABLED    = False       # experimental — requires local taps-aff service
+
+# ── OpenSky Network — free route history and aircraft registration ─────────────
+OPENSKY_CLIENT_ID     = ""        # opensky-network.org
 OPENSKY_CLIENT_SECRET = ""
-LOCAL_AIRPORTS        = "XXX,YYY"  # comma-separated IATA codes — controls route trust
 
-# ── AirLabs (freemium — 1,000 calls/month per key) ──────────────────────────
-AIRLABS_API_KEY        = ""   # primary key — airlabs.co
-AIRLABS_API_KEY_2      = ""   # secondary key (optional) — same service, separate quota
+# ── AirLabs — freemium route data, 1,000 calls/month per key ──────────────────
+AIRLABS_API_KEY        = ""       # primary key — airlabs.co
+AIRLABS_API_KEY_2      = ""       # optional secondary key (separate quota)
+AIRLABS_MONTHLY_LIMIT  = 1000
+AIRLABS_RESET_DAY      = 1        # day of month billing resets (1–28)
 AIRLABS2_MONTHLY_LIMIT = 1000
-AIRLABS2_RESET_DAY     = 1    # day of month your billing period resets
+AIRLABS2_RESET_DAY     = 1
 
-# ── FlightAware AeroAPI (paid last resort) ───────────────────────────────────
-FLIGHTAWARE_API_KEY = ""   # aeroapi.flightaware.com
+# ── FlightAware AeroAPI — paid last resort ────────────────────────────────────
+FLIGHTAWARE_API_KEY    = ""       # aeroapi.flightaware.com
+FEEDER_MONTHLY_CREDIT  = 5.00     # $10 if you run a FlightAware ADS-B feeder
+AEROAPI_RESET_DAY      = 1
+
+# ── Advanced: cache TTL overrides (seconds) ───────────────────────────────────
+# ADSBDB_CACHE_TTL     = 3600     # adsbdb result cache (default 1 hour)
+# OPENSKY_CACHE_TTL    = 3600     # OpenSky result cache (default 1 hour)
+# ROUTE_TTL_SCHEDULED  = 604800   # Resolved commercial route (default 7 days)
+# ROUTE_TTL_DEFAULT    = 3600     # Resolved GA/other route (default 1 hour)
+# ROUTE_MISS_TTL       = 3600     # No-route suppression (default 1 hour)
+# ROUTE_PAID_MISS_TTL  = 7200     # Paid API miss suppression (default 2 hours)
 ```
 
 ---
@@ -241,7 +294,7 @@ FLIGHTAWARE_API_KEY = ""   # aeroapi.flightaware.com
 Two independent services — restart them separately when deploying changes:
 
 ```bash
-# After changing overhead.py or flight-tracker.py:
+# After changing overhead.py, flight-tracker.py, or display/__init__.py:
 sudo systemctl restart FlightTracker.service
 
 # After changing server.py:
@@ -290,8 +343,8 @@ GA and military callsigns skip paid APIs because N-numbers don't file instrument
 
 ### Prerequisites
 
-- Raspberry Pi with Raspbian (Debian Bookworm)
-- ADS-B receiver running dump1090 or fr24feed
+- Raspberry Pi with Raspbian (Debian Bookworm or Trixie)
+- ADS-B receiver running dump1090, fr24feed, or Virtual Radar Server
 - RGB LED Matrix + Adafruit Bonnet (see [Adafruit's guide](https://learn.adafruit.com/adafruit-rgb-matrix-bonnet-for-raspberry-pi/overview))
 
 ### Install the RGB Matrix driver
@@ -324,6 +377,7 @@ pip install .
 
 ```bash
 cd /home/pi/FlightTracker
+cp config.example.py config.py
 nano config.py
 ```
 
