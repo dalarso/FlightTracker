@@ -104,6 +104,9 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .toggle-slider:before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
 .toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
 .config-footer { padding: 14px 20px; border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.footer-credit { margin-left: auto; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.footer-credit a { color: var(--text-muted); text-decoration: none; }
+.footer-credit a:hover { color: var(--accent); text-decoration: underline; }
 .btn { padding: 7px 18px; border-radius: 6px; border: none; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
 .btn-primary { background: var(--accent); color: #000; }
 .btn-primary:hover { filter: brightness(1.1); }
@@ -538,6 +541,11 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <button class="btn btn-primary" onclick="saveConfig(false)">Save</button>
     <button class="btn btn-danger" onclick="saveConfig(true)">Save &amp; Restart Display</button>
     <span class="save-status" id="save-status"></span>
+    <span class="footer-credit">
+      <a href="https://github.com/dalarso/FlightTracker" target="_blank" rel="noopener">github.com/dalarso/FlightTracker</a>
+      &nbsp;·&nbsp; based on
+      <a href="https://github.com/ColinWaddell/FlightTracker" target="_blank" rel="noopener">Colin Waddell's FlightTracker</a>
+    </span>
   </div>
 </div>
 
