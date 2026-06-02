@@ -725,6 +725,16 @@ SCENARIOS = [
         "airlabs1": {"origin": "", "dest": "JFK"},
         "expect": ("LAS", "JFK", "opensky+airlabs"),
     },
+    {
+        # A scheduled LOCAL-origin route from a COORDLESS source (AirLabs returned no
+        # lat/lng) must still get a 7-day resolved-cache entry, so future polls short-
+        # circuit instead of re-walking adsbdb -> OpenSky -> AirLabs every time (the
+        # JBU1756 LAS->EWR case).  The resolved READ trusts a local origin without coords.
+        "name": "resolved-cache: coordless LOCAL scheduled route still caches (no chain re-walk)",
+        "callsign": "AAL1756", "airlabs1": {"origin": "LAS", "dest": "EWR"},  # no coords
+        "expect": ("LAS", "EWR", "airlabs"),
+        "expect_cache_types": ["resolved"],
+    },
 ]
 
 
@@ -763,6 +773,10 @@ def _mk(scn):
         for ctype in scn.get("expect_no_cache_types", []):
             hits = [w for w in sx["cache_writes"] if w["type"] == ctype]
             self.assertFalse(hits, f"\n{scn['name']}: unexpected '{ctype}' cache write: {hits}")
+        # cache-type-present: these cache_types MUST be written
+        for ctype in scn.get("expect_cache_types", []):
+            hits = [w for w in sx["cache_writes"] if w["type"] == ctype]
+            self.assertTrue(hits, f"\n{scn['name']}: expected a '{ctype}' cache write, got none")
         # paid-miss recorded? (True/False)
         if "expect_paid_miss" in scn:
             self.assertEqual(sx["paid_miss_set"], scn["expect_paid_miss"],

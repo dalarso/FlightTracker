@@ -3209,16 +3209,18 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # result so future sightings of the same daily flight skip the full API
     # chain — even when individual upstream caches (e.g. OpenSky's 1-hour TTL)
     # have expired or only have partial data.
-    # Only write when airport coordinates are available — a null-coord entry for
-    # a non-local origin would be busted on every subsequent poll (the plausibility
-    # check requires coords for non-local routes), creating a perpetual bust cycle.
-    # FR24 and some AeroAPI responses return no coordinates; their per-API cache
-    # entries serve as the fallback instead.
+    # Coords requirement is conditional on locality.  The READ trusts a LOCAL-origin entry
+    # unconditionally (no geometry), so a local-origin route needs no coords — even a
+    # coordless source (AirLabs without lat/lng, FR24) gets a 7-day entry that short-circuits
+    # the whole chain on future sightings instead of re-walking adsbdb -> OpenSky -> AirLabs
+    # every poll.  A NON-local origin's read DOES geometry-check, so a coordless non-local
+    # entry would bust every poll (perpetual bust cycle) — those still require coords and
+    # otherwise fall back to the per-API caches.
     if (origin and destination and callsign
             and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
             and _LOCAL_AIRPORTS                       # GLOBAL mode (no home) skips the 7-day cache
             and _has_local_endpoint(origin, destination)
-            and _coord_olat is not None
+            and (origin.upper() in _LOCAL_AIRPORTS or _coord_olat is not None)
             and (not _coord_origin_iata or _coord_origin_iata == origin)):  # guard mismatch
         _cache_db_set_route(callsign, 'resolved',
                             origin, destination,
