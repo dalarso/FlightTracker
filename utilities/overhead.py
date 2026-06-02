@@ -1515,7 +1515,23 @@ def _select(cands, plane_lat, plane_lon):
         return None
     usable.sort(key=lambda c: (_route_tier(c.origin, c.dest),
                                SOURCE_PRIORITY.get(c.source, 99)))
-    return usable[0]
+    best = usable[0]
+    # Cross-source combine: when the winner is a LOCAL route still missing one endpoint,
+    # fill that endpoint from the next-best source that supplies it AND is not a deferred
+    # non-local-complete route — mirroring the live "trusted local origin + a destination
+    # from another source" merge (e.g. OpenSky LAS->? + AirLabs ?->JFK = LAS->JFK), while
+    # NOT grafting a stale non-local leg's endpoint onto it (e.g. a deferred SYR->CHS).
+    if _has_local_endpoint(best.origin, best.dest) and not (best.origin and best.dest):
+        for c in usable[1:]:
+            if _is_nonlocal(c.origin, c.dest):
+                continue  # a non-local-complete route is deferred — it never fills a blank
+            if not best.dest and c.dest:
+                best = best._replace(dest=c.dest, source=f"{best.source}+{c.source}")
+                break
+            if not best.origin and c.origin:
+                best = best._replace(origin=c.origin, source=f"{c.source}+{best.source}")
+                break
+    return best
 
 
 # ── Locks and in-memory session state ─────────────────────────────────────────

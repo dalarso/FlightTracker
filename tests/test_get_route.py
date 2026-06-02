@@ -714,6 +714,17 @@ SCENARIOS = [
         "fr24": [{"origin": "POC", "dest": ""}],           # partial, non-local origin
         "expect": ("POC", "", "fr24"),
     },
+    {
+        # CROSS-SOURCE COMBINE: OpenSky supplies a trusted LOCAL origin (LAS->?) and
+        # AirLabs supplies only the destination (?->JFK).  The live code merges them into
+        # LAS->JFK ("opensky+airlabs").  This probes whether _select() (which picks ONE
+        # candidate) preserves that merge.
+        "name": "combine-check: local-origin (opensky) + dest-only (airlabs) -> LAS->JFK",
+        "callsign": "XYZ123",
+        "opensky": {"origin": "LAS", "dest": ""},
+        "airlabs1": {"origin": "", "dest": "JFK"},
+        "expect": ("LAS", "JFK", "opensky+airlabs"),
+    },
 ]
 
 
