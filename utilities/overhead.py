@@ -352,6 +352,15 @@ _AIRPORT_CITIES: dict[str, str] = {
     "ASU": "Asunción",        "VVI": "Santa Cruz",
 }
 
+def _clean_iata(code):
+    """Return a real 3-letter IATA airport code, else '' (rendered as '?').
+    OpenSky and other feeds sometimes report FAA local identifiers ('NV98'), 4-char ICAO,
+    or junk — none are IATA airports the hierarchy can place, and a non-3-char code doesn't
+    fit the display.  Applied at get_route's boundary only; raw codes stay in debug logs."""
+    code = (code or "").strip().upper()
+    return code if (len(code) == 3 and code.isalpha()) else ""
+
+
 def _route_display(origin: str, dest: str) -> str:
     """
     Build a log-friendly route string with city names where known.
@@ -3297,6 +3306,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         _al_tr_o, _al_tr_d = (al_origin, al_dest) if (al_origin or al_dest) else (al2_origin, al2_dest)
         _trace["airlabs"]      = {"origin": _al_tr_o, "destination": _al_tr_d}
         _trace["aeroapi"]      = {"origin": fa_origin, "destination": fa_dest}
+
+    # Drop non-IATA airport codes (e.g. OpenSky FAA identifiers like "NV98") to "?" — real
+    # IATA codes are 3 letters and a 4-char code doesn't fit the display.  Done at the
+    # boundary (after the shadow), so internal resolution/diagnostics keep the raw code.
+    # If both endpoints drop out there's no usable route, so the source label becomes "none".
+    origin, destination = _clean_iata(origin), _clean_iata(destination)
+    if not (origin or destination):
+        source = "none"
     return origin, destination, source or "none", _ov_plane, _ov_display
 
 

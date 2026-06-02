@@ -486,6 +486,15 @@ SCENARIOS = [
         "airlabs1": None, "aeroapi": None,
         "expect": ("ABQ", "DEN", "opensky:cached"),
     },
+    {
+        # Non-IATA airport codes (FAA local identifiers like NV98 — the medevac case) are
+        # dropped to '?' at the boundary: a 4-char code isn't a real IATA airport and
+        # doesn't fit the display.  Both endpoints gone -> source "none".
+        "name": "clean-iata: non-IATA code (NV98) from a source dropped to '?'",
+        "callsign": "N555HE", "reg": "N555HE",
+        "fr24": [{"origin": "NV98", "dest": ""}],   # FR24 returns an FAA LID, not IATA
+        "expect": ("", "", "none"),
+    },
     # ── decision B: a local endpoint outranks completeness ─────────────────────
     {
         "name": "decision-B: local partial beats held non-local complete",
