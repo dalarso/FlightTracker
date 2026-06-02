@@ -1573,6 +1573,9 @@ _last_free_api_check:    dict[str, tuple] = {}
 _last_ga_free_api_check: dict[tuple, tuple] = {}
 # (api_name, callsign) -> last_logged_ts  — suppresses repeat "in backoff" log spam
 _last_backoff_log: dict[tuple, float] = {}
+# callsign -> last-logged route signature; suppresses repeating the identical [route:..]
+# display line every poll for a lingering flight (the [overhead] alt lines still show it).
+_last_route_log: dict[str, tuple] = {}
 
 def _in_backoff(api_name: str) -> bool:
     """True if we should skip this API because it recently told us to back off."""
@@ -3141,7 +3144,22 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             if _route_tier(_best[1], _best[2]) < _cur_tier:
                 _tier_label = ("local" if _has_local_endpoint(_best[1], _best[2])
                                else "non-local (no local found anywhere)")
-                origin, destination, source = _best[1], _best[2], _best[0]
+                origin, destination = _best[1], _best[2]
+                # Preserve the :cached marker the picker otherwise drops — a cached
+                # last-resort route was served under a bare source name and looked live
+                # (e.g. a cached OpenSky NV98->? read as [route:opensky], not :cached).
+                _bs = _best[0]
+                if   _bs == "airlabs":  source = _al_src
+                elif _bs == "airlabs2": source = _al2_src
+                elif _bs == "aeroapi":  source = "aeroapi:cached" if _cached_fa else "aeroapi"
+                elif _bs == "fr24":     source = _fr24_com_src
+                elif _bs == "adsbdb":   source = _adsbdb_src
+                elif _bs == "opensky":  source = _sky_src
+                elif _bs == "adsbdb+opensky":
+                    source = ("adsbdb+opensky:cached"
+                              if _adsbdb_src.endswith(":cached") and _sky_src.endswith(":cached")
+                              else "adsbdb+opensky")
+                else:                   source = _bs
                 _log(f"[route] {_airline_display(callsign)}: no committed local route — "
                      f"serving {_tier_label} {_route_display(origin, destination)} from {source} "
                      f"(short-TTL; not written to resolved cache)")
@@ -3786,7 +3804,13 @@ class Overhead:
                     _cache_db_set_reg(flight.hex_code, reg)
                 reg_suffix     = f" {reg}" if reg else ""
                 display_suffix = f" [display:{display_name}]" if display_name and display_name != plane else ""
-                _log(f"[route:{_display_src(route_src)}] [type:{_display_src(type_src)}]{display_suffix} {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
+                # Log the route line only on first sighting or a change — not every poll,
+                # so a lingering flight (e.g. a circling medevac helicopter) doesn't repeat
+                # an identical line every ~15 s.  Tracking lines ([overhead] alt=) still print.
+                _route_sig = (route_src, origin, destination, type_src, plane, display_name, reg)
+                if _last_route_log.get(callsign) != _route_sig:
+                    _last_route_log[callsign] = _route_sig
+                    _log(f"[route:{_display_src(route_src)}] [type:{_display_src(type_src)}]{display_suffix} {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
                 if callsign != _test_cs:
                     _record_flight_stat(callsign, plane, origin, destination, reg, route_src)
 

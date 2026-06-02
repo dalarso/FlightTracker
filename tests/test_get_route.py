@@ -475,7 +475,16 @@ SCENARIOS = [
         "name": "review-fix: AeroAPI cached non-local route served (not dropped)",
         "callsign": "AAL_FAC", "airlabs1": None,
         "cache": {("AAL_FAC", "aeroapi"): ("DEN", "ORD", None, None, None, None, "aeroapi")},
-        "expect": ("DEN", "ORD", "aeroapi"),
+        "expect": ("DEN", "ORD", "aeroapi:cached"),  # picker now preserves the :cached marker
+    },
+    {
+        # Picker label honesty: a CACHED OpenSky route served as last-resort must show
+        # 'opensky:cached', not a bare 'opensky' that looks live (the NV98->? confusion).
+        "name": "label-fix: picker serves a cached OpenSky route as opensky:cached",
+        "callsign": "AAL_LBL", "hex": "lblhex1",
+        "cache": {("lblhex1", "route"): ("ABQ", "DEN", None, None, None, None, "opensky")},
+        "airlabs1": None, "aeroapi": None,
+        "expect": ("ABQ", "DEN", "opensky:cached"),
     },
     # ── decision B: a local endpoint outranks completeness ─────────────────────
     {
