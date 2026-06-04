@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import requests
 from collections import namedtuple
 from utilities.geometry import _haversine_km, _route_plausible  # pure geometry, extracted
-from utilities.refdata import _AIRPORT_CITIES, _AIRLINE_NAMES, _AIRCRAFT_TYPE_MAP  # reference data tables
+from utilities.refdata import (_AIRPORT_CITIES, _AIRLINE_NAMES, _AIRCRAFT_TYPE_MAP,
+                               _clean_iata, _route_display, _airline_display, _translate_type)
 from threading import Thread, Lock, local
 _cache_bypass = local()  # set .on=True to make cache READS miss (test-flight no-cache mode)
 
@@ -250,53 +251,6 @@ except Exception:
 # Falls back gracefully to the old single-value LOCAL_AIRPORT key for compatibility.
 _raw_airports = LOCAL_AIRPORTS if LOCAL_AIRPORTS else _LOCAL_AIRPORT_LEGACY
 _LOCAL_AIRPORTS = frozenset(a.strip().upper() for a in _raw_airports.split(",") if a.strip())
-
-# _AIRPORT_CITIES -> moved to utilities/refdata.py
-
-def _clean_iata(code):
-    """Return a real 3-letter IATA airport code, else '' (rendered as '?').
-    OpenSky and other feeds sometimes report FAA local identifiers ('NV98'), 4-char ICAO,
-    or junk — none are IATA airports the hierarchy can place, and a non-3-char code doesn't
-    fit the display.  Applied at get_route's boundary only; raw codes stay in debug logs."""
-    code = (code or "").strip().upper()
-    return code if (len(code) == 3 and code.isalpha()) else ""
-
-
-def _route_display(origin: str, dest: str) -> str:
-    """
-    Build a log-friendly route string with city names where known.
-    'LAS->MKE (Las Vegas to Milwaukee)'
-    Falls back gracefully: 'LAS->XYZ (Las Vegas)' or 'LAS->MKE' if neither known.
-    """
-    o = (origin or "?").upper()
-    d = (dest   or "?").upper()
-    route  = f"{o}->{d}"
-    o_city = _AIRPORT_CITIES.get(o)
-    d_city = _AIRPORT_CITIES.get(d)
-    if o_city and d_city:
-        return f"{route} ({o_city} to {d_city})"
-    if o_city:
-        return f"{route} ({o_city})"
-    if d_city:
-        return f"{route} (to {d_city})"
-    return route
-
-# _AIRLINE_NAMES -> moved to utilities/refdata.py
-
-def _airline_display(callsign: str) -> str:
-    """Return 'SWA123 (Southwest Airlines)' if prefix known, else just callsign."""
-    if not callsign or len(callsign) < 3:
-        return callsign
-    name = _AIRLINE_NAMES.get(callsign[:3].upper())
-    return f"{callsign} ({name})" if name else callsign
-
-# _AIRCRAFT_TYPE_MAP -> moved to utilities/refdata.py
-
-def _translate_type(type_str: str) -> str:
-    """Map a raw ICAO type code (e.g. 'B738') to a readable name if known."""
-    if not type_str:
-        return type_str
-    return _AIRCRAFT_TYPE_MAP.get(type_str.strip().upper(), type_str)
 
 
 def _vrs_airport_to_iata(vrs_str: str) -> str:
@@ -1407,7 +1361,6 @@ def _check_period_reset(api_name: str, reset_day: int) -> None:
         _api_backoff.pop(api_name, None)
         _api_credit_exhausted.pop(api_name, None)
         _log(f"[{api_name}] new billing period — credit backoff cleared, resuming")
-
 
 
 # ── Override rules ─────────────────────────────────────────────────────────────

@@ -270,3 +270,47 @@ _AIRCRAFT_TYPE_MAP: dict[str, str] = {
     "R22":  "Robinson R22",     "R44":  "Robinson R44",
     "S76":  "Sikorsky S-76",
 }
+
+
+def _clean_iata(code):
+    """Return a real 3-letter IATA airport code, else '' (rendered as '?').
+    OpenSky and other feeds sometimes report FAA local identifiers ('NV98'), 4-char ICAO,
+    or junk — none are IATA airports the hierarchy can place, and a non-3-char code doesn't
+    fit the display.  Applied at get_route's boundary only; raw codes stay in debug logs."""
+    code = (code or "").strip().upper()
+    return code if (len(code) == 3 and code.isalpha()) else ""
+
+
+def _route_display(origin: str, dest: str) -> str:
+    """
+    Build a log-friendly route string with city names where known.
+    'LAS->MKE (Las Vegas to Milwaukee)'
+    Falls back gracefully: 'LAS->XYZ (Las Vegas)' or 'LAS->MKE' if neither known.
+    """
+    o = (origin or "?").upper()
+    d = (dest   or "?").upper()
+    route  = f"{o}->{d}"
+    o_city = _AIRPORT_CITIES.get(o)
+    d_city = _AIRPORT_CITIES.get(d)
+    if o_city and d_city:
+        return f"{route} ({o_city} to {d_city})"
+    if o_city:
+        return f"{route} ({o_city})"
+    if d_city:
+        return f"{route} (to {d_city})"
+    return route
+
+
+def _airline_display(callsign: str) -> str:
+    """Return 'SWA123 (Southwest Airlines)' if prefix known, else just callsign."""
+    if not callsign or len(callsign) < 3:
+        return callsign
+    name = _AIRLINE_NAMES.get(callsign[:3].upper())
+    return f"{callsign} ({name})" if name else callsign
+
+
+def _translate_type(type_str: str) -> str:
+    """Map a raw ICAO type code (e.g. 'B738') to a readable name if known."""
+    if not type_str:
+        return type_str
+    return _AIRCRAFT_TYPE_MAP.get(type_str.strip().upper(), type_str)
