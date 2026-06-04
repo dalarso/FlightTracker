@@ -539,5 +539,183 @@ class ServiceControl(unittest.TestCase):
         m.assert_not_called()                            # guard short-circuits the handler
 
 
+class DisplayFlags(unittest.TestCase):
+    """POST /api/display/{night,off,on} flip the NIGHT_FLAG / PAUSE_FLAG files — redirected
+    to a temp dir so the live display is never paused or dimmed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._orig = {k: getattr(self.srv, k) for k in ("NIGHT_FLAG", "PAUSE_FLAG")}
+        self.srv.NIGHT_FLAG = self._dir / "ft_night"
+        self.srv.PAUSE_FLAG = self._dir / "ft_paused"
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(self.srv, k, v)
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def test_night_toggles(self):
+        r = self.client.post("/api/display/night", headers=_CSRF)
+        self.assertTrue(r.get_json()["night"])
+        self.assertTrue(self.srv.NIGHT_FLAG.exists())
+        r = self.client.post("/api/display/night", headers=_CSRF)
+        self.assertFalse(r.get_json()["night"])
+        self.assertFalse(self.srv.NIGHT_FLAG.exists())
+
+    def test_off_then_on(self):
+        self.client.post("/api/display/off", headers=_CSRF)
+        self.assertTrue(self.srv.PAUSE_FLAG.exists())
+        self.client.post("/api/display/on", headers=_CSRF)
+        self.assertFalse(self.srv.PAUSE_FLAG.exists())
+
+    def test_csrf_required(self):
+        self.assertEqual(self.client.post("/api/display/night").status_code, 403)
+        self.assertFalse(self.srv.NIGHT_FLAG.exists())
+
+
+_CACHE_DDL = """
+CREATE TABLE cache (key TEXT NOT NULL, cache_type TEXT NOT NULL, origin TEXT NOT NULL DEFAULT '',
+    dest TEXT NOT NULL DEFAULT '', olat REAL, olon REAL, dlat REAL, dlon REAL,
+    value TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (key, cache_type));
+"""
+
+
+class CacheClear(unittest.TestCase):
+    """POST /api/cache/clear[/entry] delete from the cache table — DB_FILE redirected to a
+    temp DB so the live cache is never touched."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        conn = sqlite3.connect(self._tmp.name)
+        conn.executescript(_CACHE_DDL)
+        conn.executemany(
+            "INSERT INTO cache (key, cache_type, source) VALUES (?, ?, ?)",
+            [("SWA1", "route", "adsbdb"), ("UAL2", "route", "opensky"), ("AAL3", "resolved", "airlabs")],
+        )
+        conn.commit()
+        conn.close()
+        self._orig = self.srv.DB_FILE
+        self.srv.DB_FILE = Path(self._tmp.name)
+
+    def tearDown(self):
+        self.srv.DB_FILE = self._orig
+        os.remove(self._tmp.name)
+
+    def test_clear_by_api(self):
+        r = self.client.post("/api/cache/clear", headers=_CSRF, json={"api": "adsbdb"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["deleted"], 1)          # only the adsbdb-sourced route
+
+    def test_clear_all(self):
+        r = self.client.post("/api/cache/clear", headers=_CSRF, json={"api": "all"})
+        self.assertEqual(r.get_json()["deleted"], 3)          # 2 route + 1 resolved
+
+    def test_unknown_api_returns_400(self):
+        self.assertEqual(self.client.post("/api/cache/clear", headers=_CSRF,
+                                          json={"api": "bogus"}).status_code, 400)
+
+    def test_clear_entry_by_callsign(self):
+        r = self.client.post("/api/cache/clear/entry", headers=_CSRF, json={"value": "SWA1"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["deleted"], 1)
+
+    def test_clear_entry_value_required_400(self):
+        self.assertEqual(self.client.post("/api/cache/clear/entry", headers=_CSRF,
+                                          json={}).status_code, 400)
+
+    def test_csrf_required(self):
+        self.assertEqual(self.client.post("/api/cache/clear", json={"api": "all"}).status_code, 403)
+
+
+class UsageAdjust(unittest.TestCase):
+    """POST /api/usage/adjust rewrites a usage JSON file — paths redirected to a temp dir."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._orig = {k: getattr(self.srv, k)
+                      for k in ("AIRLABS_USAGE_FILE", "AIRLABS2_USAGE_FILE", "AEROAPI_USAGE_FILE")}
+        self.srv.AIRLABS_USAGE_FILE = self._dir / "al.json"
+        self.srv.AIRLABS2_USAGE_FILE = self._dir / "al2.json"
+        self.srv.AEROAPI_USAGE_FILE = self._dir / "fa.json"
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(self.srv, k, v)
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def test_airlabs_stored_as_int_count(self):
+        r = self.client.post("/api/usage/adjust", headers=_CSRF, json={"api": "airlabs", "value": 523.7})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(json.loads(self.srv.AIRLABS_USAGE_FILE.read_text())["value"], 524)
+
+    def test_flightaware_stored_as_dollars(self):
+        r = self.client.post("/api/usage/adjust", headers=_CSRF, json={"api": "flightaware", "value": 4.2536})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(json.loads(self.srv.AEROAPI_USAGE_FILE.read_text())["value"], 4.2536)
+
+    def test_negative_value_400(self):
+        self.assertEqual(self.client.post("/api/usage/adjust", headers=_CSRF,
+                                          json={"api": "airlabs", "value": -1}).status_code, 400)
+
+    def test_unknown_api_400(self):
+        self.assertEqual(self.client.post("/api/usage/adjust", headers=_CSRF,
+                                          json={"api": "bogus", "value": 1}).status_code, 400)
+
+    def test_csrf_required(self):
+        self.assertEqual(self.client.post("/api/usage/adjust",
+                                          json={"api": "airlabs", "value": 1}).status_code, 403)
+
+
+class TestFlightEndpoint(unittest.TestCase):
+    """POST /api/test_flight validates the callsign, then runs the real resolver — which we
+    mock so no live API lookup fires.  (Validation rejects before the lookup, so it's safe.)"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def test_callsign_required_400(self):
+        self.assertEqual(self.client.post("/api/test_flight", headers=_CSRF, json={}).status_code, 400)
+
+    def test_invalid_callsign_400(self):
+        self.assertEqual(self.client.post("/api/test_flight", headers=_CSRF,
+                                          json={"callsign": "BAD!@#"}).status_code, 400)
+
+    def test_success_returns_lookup_result(self):
+        fake = {"final_origin": "LAS", "final_destination": "JFK", "route_source": "airlabs",
+                "final_plane": "B738", "type_source": "fr24"}
+        with mock.patch("utilities.overhead.run_test_lookup", return_value=fake) as m:
+            r = self.client.post("/api/test_flight", headers=_CSRF, json={"callsign": "SWA123"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["final_origin"], "LAS")
+        m.assert_called_once()       # the real resolver was reached only via the mock
+
+    def test_csrf_required(self):
+        self.assertEqual(self.client.post("/api/test_flight",
+                                          json={"callsign": "SWA123"}).status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
