@@ -19,7 +19,7 @@ except Exception:
 # Setup
 DAY_COLOUR = colours.PINK_DARK
 DAY_FONT = fonts.small
-DAY_POSITION = (0, 23)
+DAY_POSITION = (1, 23)
 
 
 class DayScene(object):
@@ -27,10 +27,13 @@ class DayScene(object):
         super().__init__()
         self._last_day = None
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 1)
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * 1))
     def day(self, count):
         if len(self._data):
             # Ensure redraw when there's new data
+            self._last_day = None
+
+        elif getattr(self, "_scoreboard_active", False):
             self._last_day = None
 
         else:

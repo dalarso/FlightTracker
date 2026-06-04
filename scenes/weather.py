@@ -1,6 +1,7 @@
 import urllib.request
 import datetime
 import time
+import threading
 import json
 from math import ceil
 from functools import lru_cache
@@ -73,7 +74,7 @@ RAINFALL_OVERSPILL_FLASH_ENABLED = True
 TEMPERATURE_REFRESH_SECONDS = 60
 TEMPERATURE_FONT = fonts.small
 TEMPERATURE_FONT_HEIGHT = 5
-TEMPERATURE_POSITION = (43, TEMPERATURE_FONT_HEIGHT + 2)
+TEMPERATURE_POSITION = (44, TEMPERATURE_FONT_HEIGHT + 2)
 
 TEMPERATURE_COLOURS = (
     (0,   colours.WHITE),       # °F
@@ -98,7 +99,7 @@ class WeatherError(Exception):
     pass
 
 
-@lru_cache()
+@lru_cache(maxsize=4)
 def grab_weather(location, ttl_hash=None):
     del ttl_hash  # not used directly, just part of the cache key
 
@@ -151,18 +152,20 @@ def grab_upcoming_rainfall_and_temperature(location, hours):
 
         # We want to parse the data to find the
         # rainfall from now for <hours>
-        forecast_today = weather["forecast"][0]["hourly"]
-        forecast_tomorrow = weather["forecast"][1]["hourly"]
-        hourly_forecast = forecast_today + forecast_tomorrow
-
-        hourly_data = [
-            {
-                "precip_mm": hour["precip_mm"],
-                "temp_c": hour["temp_c"],
-                "hour": hour["hour"],
-            }
-            for hour in hourly_forecast
-        ]
+        try:
+            forecast_today    = weather["forecast"][0]["hourly"]
+            forecast_tomorrow = weather["forecast"][1]["hourly"]
+            hourly_forecast   = forecast_today + forecast_tomorrow
+            hourly_data = [
+                {
+                    "precip_mm": hour["precip_mm"],
+                    "temp_c":    hour["temp_c"],
+                    "hour":      hour["hour"],
+                }
+                for hour in hourly_forecast
+            ]
+        except (KeyError, IndexError, TypeError):
+            return None
 
         now = datetime.datetime.now(_TZ)
         current_hour = now.hour
@@ -223,6 +226,47 @@ class WeatherScene(object):
                 )] if OPENWEATHER_API_KEY else [] ),
             lambda: grab_current_temperature(WEATHER_LOCATION, TEMPERATURE_UNITS)
         ]
+
+        # Network fetches run on a background daemon so a slow/unreachable weather API can
+        # never stall the render thread (mirrors how Overhead backgrounds its polls). The
+        # KeyFrames below only READ self.current_temperature / self.upcoming_rain_and_temp.
+        self._weather_thread = threading.Thread(
+            target=self._weather_refresh_loop, daemon=True
+        )
+        self._weather_thread.start()
+
+    def _weather_refresh_loop(self):
+        """Background daemon: run the blocking weather fetches OFF the render thread.
+
+        Previously the fetch ran inside the temperature()/rainfall() KeyFrames, so a slow
+        or unreachable weather API froze the whole matrix.  Now it runs here and only
+        publishes results to the plain attributes the KeyFrames read (a single reference
+        assignment, atomic under the GIL — same sharing model as Overhead.data)."""
+        last_temp = 0.0
+        last_rain = 0.0
+        while True:
+            now = time.time()
+            if now - last_temp >= TEMPERATURE_REFRESH_SECONDS:
+                last_temp = now
+                temp = None
+                for provider in self._temperature_providers:
+                    try:
+                        temp = provider()
+                        break
+                    except Exception:
+                        # WeatherError or a malformed-but-200 payload (KeyError, etc.) —
+                        # try the next provider; never let it escape onto this thread.
+                        continue
+                self.current_temperature = temp
+            if RAINFALL_ENABLED and (now - last_rain >= RAINFALL_REFRESH_SECONDS):
+                last_rain = now
+                try:
+                    self.upcoming_rain_and_temp = grab_upcoming_rainfall_and_temperature(
+                        WEATHER_LOCATION, RAINFALL_HOURS
+                    )
+                except Exception:
+                    pass
+            time.sleep(1.0)
 
     def colour_gradient(self, colour_A, colour_B, ratio):
         return graphics.Color(
@@ -321,6 +365,10 @@ class WeatherScene(object):
         if not RAINFALL_ENABLED:
             return
 
+        if getattr(self, "_scoreboard_active", False):
+            self._last_upcoming_rain_and_temp = None
+            return
+
         if len(self._data):
             # Don't draw if there's plane data
             # and force a redraw when this is visible
@@ -331,10 +379,8 @@ class WeatherScene(object):
             # Don't draw anything
             return
 
-        if not (count % RAINFALL_REFRESH_SECONDS):
-            self.upcoming_rain_and_temp = grab_upcoming_rainfall_and_temperature(
-                WEATHER_LOCATION, RAINFALL_HOURS
-            )
+        # Rainfall is fetched on the background thread (_weather_refresh_loop);
+        # here we only render the latest published value.
 
         # Test for drawing rainfall if data is available
         if self._last_upcoming_rain_and_temp != self.upcoming_rain_and_temp:
@@ -358,18 +404,20 @@ class WeatherScene(object):
     @Animator.KeyFrame.add(int(frames.PER_SECOND * 1))
     def temperature(self, count):
 
-        if len(self._data):
-            # Don't draw if there's plane data
+        if getattr(self, "_scoreboard_active", False):
+            self._last_temperature_str = None
             return
 
-        if not (count % TEMPERATURE_REFRESH_SECONDS):
-            self.current_temperature = None
-            for temperature in self._temperature_providers:
-                try:
-                    self.current_temperature = temperature()
-                    break
-                except WeatherError:
-                    continue
+        if len(self._data):
+            # Don't draw if there's plane data
+            # and force a redraw when this is visible again —
+            # same pattern as clock.py to ensure the temperature
+            # reappears after a flight without waiting for a value change.
+            self._last_temperature_str = None
+            return
+
+        # Temperature is fetched on the background thread (_weather_refresh_loop);
+        # here we only render the latest published value.
 
         # Compute the string we *want* to show (None if no data)
         if self.current_temperature is not None:

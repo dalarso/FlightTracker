@@ -12,15 +12,15 @@ except (ModuleNotFoundError, NameError, ImportError):
     # If there's no config data
     LOADING_LED_GPIO_PIN = 25
 
-BLINKER_STEPS = 4
-
 class LoadingLEDScene(object):
     def __init__(self):
         self.gpio_setup_complete = False
+        self._gpio_attempts = 0
         self.gpio_setup()
         super().__init__()
 
     def gpio_setup(self):
+        self._gpio_attempts += 1
         try:
             GPIO.setwarnings(False)
             GPIO.setmode(GPIO.BCM)
@@ -35,7 +35,9 @@ class LoadingLEDScene(object):
     def loading_led(self, count):
         reset_count = True
 
-        if not self.gpio_setup_complete:
+        # Retry setup a few times then give up — don't spam stderr every frame forever
+        # if the GPIO pin is genuinely unavailable.
+        if not self.gpio_setup_complete and self._gpio_attempts < 5:
             self.gpio_setup()
 
         if self.overhead.processing:

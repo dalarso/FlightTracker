@@ -2,6 +2,11 @@
 # Custom
 _crap/
 .vscode/
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 config.py
 ft_overrides.json
 ft_flights.db
@@ -146,3 +151,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# stray editor/backup files
+*.bak

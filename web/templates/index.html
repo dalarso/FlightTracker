@@ -69,7 +69,25 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
   }
   nav .display-toggle:hover { border-color: transparent; border-bottom-color: var(--border); background: rgba(255,255,255,.04); }
   nav > *:last-child { border-bottom: none !important; }
+
+  /* ── Mobile data-density fixes ─────────────────────────────────── */
+  /* Wide tables scroll horizontally instead of forcing whole-page sideways scroll */
+  .rules-table, .sb-table, #stats-tab table, #apis-tab table {
+    display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap;
+  }
+  /* The Save / Save & Restart action bar must wrap, not overflow */
+  .config-footer { flex-wrap: wrap; }
+  .footer-credit { margin-left: 0; flex-basis: 100%; white-space: normal; }
+  /* Comfortable touch targets on a phone (≈44px) */
+  .btn, nav button, .unit-btn, .eye-btn,
+  .field input, .field select,
+  input[type="date"], input[type="number"], input[type="text"] { min-height: 44px; }
+  /* Stats period: let the date inputs take the full row */
+  #period-from, #period-to { flex: 1; min-width: 0; }
 }
+
+/* Visible keyboard-focus ring (don't strip the outline entirely for keyboard users) */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* TABS */
 .tab-content { display: none; flex: 1; overflow: hidden; }
@@ -104,8 +122,8 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .toggle-slider:before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
 .toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
 .config-footer { padding: 14px 20px; border-top: 1px solid var(--border); background: var(--surface); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
-.footer-credit { margin-left: auto; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
-.footer-credit a { color: var(--text-muted); text-decoration: none; }
+.footer-credit { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.footer-credit a { color: var(--muted); text-decoration: none; }
 .footer-credit a:hover { color: var(--accent); text-decoration: underline; }
 .btn { padding: 7px 18px; border-radius: 6px; border: none; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
 .btn-primary { background: var(--accent); color: #000; }
@@ -268,7 +286,37 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .m-date { font-size: 9cqi; color: #60017d; text-shadow: 0 0 8px rgba(96,1,125,.5); line-height: 1; }
 .m-off { flex: 1; display: flex; align-items: center; justify-content: center; }
 .m-off-text { font-size: 4cqi; color: #1e1e1e; letter-spacing: .25em; }
+.m-hockey { flex: 1; display: flex; flex-direction: column; justify-content: space-between; padding: 4% 2% 3%; }
+.m-hk-teams { display: flex; align-items: center; justify-content: space-between; }
+.m-hk-team { font-size: 10cqi; font-weight: bold; color: #c8a020; text-shadow: 0 0 8px rgba(200,160,32,.6); }
+.m-hk-opp { font-size: 10cqi; font-weight: bold; color: #e0e0e0; text-shadow: 0 0 6px rgba(224,224,224,.4); }
+.m-hk-score-row { display: flex; align-items: center; justify-content: center; gap: 6%; }
+.m-hk-score-team { font-size: 28cqi; font-weight: bold; color: #c8a020; text-shadow: 0 0 12px rgba(200,160,32,.7); line-height: 1; }
+.m-hk-score-team.win { color: #22c55e; text-shadow: 0 0 12px rgba(34,197,94,.7); }
+.m-hk-sep { font-size: 12cqi; color: #444; line-height: 1; }
+.m-hk-score-opp { font-size: 28cqi; font-weight: bold; color: #e0e0e0; text-shadow: 0 0 8px rgba(224,224,224,.4); line-height: 1; }
+.m-hk-status { font-size: 8cqi; color: #555; text-align: center; letter-spacing: .04em; }
+.m-goal { flex: 1; display: flex; align-items: center; overflow: hidden; }
+.m-goal-text { font-size: 20cqi; color: #c8a020; text-shadow: 0 0 16px rgba(200,160,32,.9), 0 0 32px rgba(200,160,32,.4); white-space: nowrap; display: inline-block; animation: matrix-scroll 8s linear infinite; padding-left: 100%; font-weight: bold; }
 .m-service-off { color: #2a2a2a; }
+.sb-table { width:100%; border-collapse:collapse; font-size:13px; }
+.sb-table th { text-align:left; padding:4px 8px 6px; color:var(--muted); font-weight:600; font-size:11px; letter-spacing:.04em; border-bottom:1px solid var(--border); }
+.sb-table td { padding:5px 8px; border-bottom:1px solid rgba(255,255,255,.04); vertical-align:middle; }
+.sb-table tr:last-child td { border-bottom:none; }
+.sb-league { display:inline-block; font-size:10px; font-weight:700; letter-spacing:.06em; padding:2px 7px; border-radius:3px; min-width:32px; text-align:center; }
+.sb-league.nhl { background:#003f7f; color:#c8d8ff; }
+.sb-league.nfl { background:#013369; color:#d6a5a5; }
+.sb-league.mlb { background:#002D72; color:#d6a5a5; }
+.sb-league.nba { background:#17408B; color:#f5b8c0; }
+.sb-league.mls { background:#005293; color:#b8d4f0; }
+.sb-find-link { font-size:11px; color:var(--accent); text-decoration:none; white-space:nowrap; }
+.sb-find-link:hover { text-decoration:underline; }
+.sb-table input[type=number] { width:70px; }
+.sb-table input[type=text]   { width:55px; text-transform:uppercase; }
+.sb-drag { cursor:grab; color:var(--muted); font-size:14px; user-select:none; padding:0 4px; opacity:.55; }
+.sb-drag:active { cursor:grabbing; }
+.sb-table tbody tr.dragging { opacity:.35; }
+.sb-table tbody tr.drag-over td { border-top:2px solid var(--accent); }
 .matrix-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding: 0 2px; }
 .matrix-label { font-size: 11px; color: #3a3a3a; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; }
 .matrix-meta { font-size: 11px; color: var(--muted); }
@@ -376,12 +424,6 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
         <div class="field"><label>GPIO Slowdown</label><input type="number" min="1" max="4" id="gpio_slowdown"><div class="hint">Increase if display flickers</div></div>
         <div class="field"><label>Journey Code</label><input type="text" id="journey_code"></div>
         <div class="field"><label>Journey Blank Filler</label><input type="text" id="journey_blank"></div>
-        <div class="field"><label>Time Format</label>
-          <select id="time_format" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
-            <option value="24h">24-hour (14:30)</option>
-            <option value="12h">12-hour AM/PM (2:30 PM)</option>
-          </select>
-        </div>
         <div class="field"><label>Date Format</label>
           <select id="date_format" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
             <option value="MDY">M/D/YYYY — 5/14/2026 (US)</option>
@@ -427,6 +469,95 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
             <span style="font-size:12px;color:var(--muted)">Show rainfall overlay on weather display</span>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">Scoreboard</div>
+      <div class="field-grid">
+
+        <div class="field" style="grid-column:1/-1">
+          <label>Scoreboard</label>
+          <div class="toggle-wrap">
+            <label class="toggle"><input type="checkbox" id="scoreboard_enabled" onchange="toggleScoreboardBody()"><span class="toggle-slider"></span></label>
+            <span style="font-size:12px;color:var(--muted)">Replace idle display with live scores when a team plays — disabled by default</span>
+          </div>
+        </div>
+
+        <div id="sb-body" style="display:none;grid-column:1/-1">
+        <div class="field-grid" style="padding:0;gap:inherit">
+
+        <div class="field" style="grid-column:1/-1">
+          <label>Sports &amp; Teams</label>
+          <div class="hint" style="margin-bottom:10px">Enable the sports you want to follow. When a game is live the idle display switches to a live scoreboard; flights always take priority. Use the links to find your team's numeric ID.</div>
+          <table class="sb-table">
+            <thead>
+              <tr>
+                <th style="width:18px"></th>
+                <th>League</th>
+                <th>Enable</th>
+                <th>Team ID</th>
+                <th>Abbr <span style="font-weight:400;font-size:10px">(≤4 ch)</span></th>
+                <th>Find Team ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr draggable="true" data-league="NHL">
+                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
+                <td><span class="sb-league nhl">NHL</span></td>
+                <td><label class="toggle"><input type="checkbox" id="sb_nhl_enabled"><span class="toggle-slider"></span></label></td>
+                <td><input type="number" min="1" id="sb_nhl_team_id"></td>
+                <td><input type="text" id="sb_nhl_team_name" maxlength="4"></td>
+                <td><a href="https://api-web.nhle.com/v1/standings/now" target="_blank" class="sb-find-link">NHL standings API ↗</a></td>
+              </tr>
+              <tr draggable="true" data-league="NFL">
+                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
+                <td><span class="sb-league nfl">NFL</span></td>
+                <td><label class="toggle"><input type="checkbox" id="sb_nfl_enabled"><span class="toggle-slider"></span></label></td>
+                <td><input type="number" min="1" id="sb_nfl_team_id"></td>
+                <td><input type="text" id="sb_nfl_team_name" maxlength="4"></td>
+                <td><a href="https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams" target="_blank" class="sb-find-link">ESPN NFL teams ↗</a></td>
+              </tr>
+              <tr draggable="true" data-league="MLB">
+                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
+                <td><span class="sb-league mlb">MLB</span></td>
+                <td><label class="toggle"><input type="checkbox" id="sb_mlb_enabled"><span class="toggle-slider"></span></label></td>
+                <td><input type="number" min="1" id="sb_mlb_team_id"></td>
+                <td><input type="text" id="sb_mlb_team_name" maxlength="4"></td>
+                <td><a href="https://statsapi.mlb.com/api/v1/teams?sportId=1" target="_blank" class="sb-find-link">MLB Stats API ↗</a></td>
+              </tr>
+              <tr draggable="true" data-league="NBA">
+                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
+                <td><span class="sb-league nba">NBA</span></td>
+                <td><label class="toggle"><input type="checkbox" id="sb_nba_enabled"><span class="toggle-slider"></span></label></td>
+                <td><input type="number" min="1" id="sb_nba_team_id"></td>
+                <td><input type="text" id="sb_nba_team_name" maxlength="4"></td>
+                <td><a href="https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams" target="_blank" class="sb-find-link">ESPN NBA teams ↗</a></td>
+              </tr>
+              <tr draggable="true" data-league="MLS">
+                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
+                <td><span class="sb-league mls">MLS</span></td>
+                <td><label class="toggle"><input type="checkbox" id="sb_mls_enabled"><span class="toggle-slider"></span></label></td>
+                <td><input type="number" min="1" id="sb_mls_team_id"></td>
+                <td><input type="text" id="sb_mls_team_name" maxlength="4"></td>
+                <td><a href="https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/teams" target="_blank" class="sb-find-link">ESPN MLS teams ↗</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="field"><label>Post-Game Display <span style="font-size:10px;color:var(--muted)">(minutes)</span></label>
+          <input type="number" min="0" max="120" id="scoreboard_post_game_minutes">
+          <div class="hint">How long to show the final score after the game ends (0 = hide immediately)</div>
+        </div>
+        <div class="field"><label>Score Celebration <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
+          <input type="number" min="0" max="120" id="scoreboard_goal_celebration_seconds">
+          <div class="hint">Score celebration animation duration — flights suppressed during this window</div>
+        </div>
+
+        </div><!-- /.field-grid inner -->
+        </div><!-- /#sb-body -->
+
       </div>
     </div>
 
@@ -593,7 +724,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
     <div class="usage-grid">
       <div class="usage-card" id="usage-airlabs">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h3 style="margin-bottom:0">AirLabs — Route Data</h3>
+          <h3 style="margin-bottom:0">AirLabs 1 — Route Data</h3>
           <button class="btn" onclick="toggleAdjust('airlabs')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
         </div>
         <div class="usage-stat"><span class="label">Calls used</span><span class="value" id="al-calls">—</span></div>
@@ -709,6 +840,12 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
       <div id="free-api-content"><span style="font-size:11px;color:var(--muted)">Loading…</span></div>
     </div>
 
+    <!-- ── GA Free API Accuracy card ─────────────────────────────────────── -->
+    <div class="usage-card" style="margin-bottom:16px" id="ga-accuracy-card">
+      <h3 style="margin-bottom:12px">GA Free API Accuracy <span style="font-weight:400;font-size:10px;color:var(--muted);margin-left:6px">adsbdb &amp; OpenSky vs. FR24 · N-number aircraft</span></h3>
+      <div id="ga-accuracy-content"><span style="font-size:11px;color:var(--muted)">Loading…</span></div>
+    </div>
+
     <!-- ── Period / date-range card ─────────────────────────────────────── -->
     <div class="usage-card" style="margin-bottom:16px">
       <!-- Header row: title + date picker -->
@@ -811,7 +948,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
       <div style="padding:14px 18px 12px">
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.7">
           Enter any callsign or tail number to run a full live lookup — same API pipeline as a real overhead flight.
-          LOCAL_AIRPORTS heuristic skipped — results come from APIs only.
+          The same trust rules as a live flight apply, including the LOCAL_AIRPORTS filter.
           Logs are prefixed <code style="color:#22d3ee">[TEST:]</code> and the flight shows on the matrix for 30 seconds.<br>
           <strong style="color:var(--text)">Use cached data</strong> checked: calls the real <code>get_route()</code> / <code>get_aircraft_type()</code> — exact same code path including cache reads. Unchecked: skips cache, hits every API fresh.
         </div>
@@ -907,6 +1044,17 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 </div>
 
 <script>
+// CSRF: tag every same-origin request so the server can reject cross-site drive-by POSTs.
+// (The server requires this header on all state-changing requests — see _csrf_guard.)
+(function () {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    init.headers = Object.assign({}, init.headers, { 'X-Requested-With': 'FlightTracker' });
+    return _origFetch(input, init);
+  };
+})();
+
 // ── Constants ──────────────────────────────────────────────────
 const FT_TO_M  = 0.3048;
 const FT_TO_KM = 0.0003048;
@@ -959,6 +1107,18 @@ function showTab(name, btn) {
   if (name === 'stats')   loadStatsTab();
   if (name === 'rules')   initRulesTab();
 }
+
+// Pause the heavy polling timers when the tab/screen is hidden (saves phone battery and
+// Pi load for a 24/7-open dashboard); resume the active tab's poller when it returns.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopMatrixPreview(); stopAPIsTab(); }
+  else {
+    const active = document.querySelector('.tab-content.active');
+    const tab = active ? active.id.replace('-tab', '') : '';
+    if (tab === 'display') initMatrixPreview();
+    else if (tab === 'apis') initAPIsTab();
+  }
+});
 
 function goToTab(name) {
   const btn = [...document.querySelectorAll('nav button')].find(b => (b.getAttribute('onclick') || '').includes("'" + name + "'"));
@@ -1163,9 +1323,27 @@ function showToast(msg, type = 'ok') {
 }
 
 // ── Eye Toggle ─────────────────────────────────────────────────
-function toggleEye(id, btn) {
+// Password-field id -> the config key it holds (for on-demand secret reveal).
+const _SECRET_FIELDS = {
+  ow_key: 'OPENWEATHER_API_KEY', airlabs_key: 'AIRLABS_API_KEY',
+  airlabs_key2: 'AIRLABS_API_KEY_2', fa_key: 'FLIGHTAWARE_API_KEY',
+  opensky_secret: 'OPENSKY_CLIENT_SECRET',
+};
+const _SECRET_SENTINEL = '********';
+
+async function toggleEye(id, btn) {
   const inp = document.getElementById(id);
-  inp.type = inp.type === 'password' ? 'text' : 'password';
+  const revealing = inp.type === 'password';
+  // Secrets are masked by default and not shipped in the page; fetch the real value on
+  // demand the first time the eye is opened while the field still holds the mask.
+  if (revealing && _SECRET_FIELDS[id] && inp.value === _SECRET_SENTINEL) {
+    try {
+      const r = await fetch('/api/config/reveal?key=' + encodeURIComponent(_SECRET_FIELDS[id]));
+      const d = await r.json();
+      if (d && typeof d.value === 'string') inp.value = d.value;
+    } catch (e) { /* leave the mask in place if the reveal fetch fails */ }
+  }
+  inp.type = revealing ? 'text' : 'password';
   btn.style.opacity = inp.type === 'text' ? '1' : '0.5';
 }
 
@@ -1203,11 +1381,48 @@ async function loadConfig() {
   document.getElementById('temp_units').value = config.TEMPERATURE_UNITS || 'imperial';
   document.getElementById('ow_key').value = config.OPENWEATHER_API_KEY || '';
   document.getElementById('rainfall_enabled').checked = config.RAINFALL_ENABLED || false;
+  // Scoreboard master switch — default false for new installs
+  const _sbMasterEnabled = config.SCOREBOARD_ENABLED !== undefined
+    ? config.SCOREBOARD_ENABLED
+    : false;
+  document.getElementById('scoreboard_enabled').checked = _sbMasterEnabled;
+  toggleScoreboardBody();
+  // Per-sport scoreboard settings
+  // Backward-compat: old SCOREBOARD_ENABLED / SCOREBOARD_TEAM_ID / SCOREBOARD_TEAM_NAME map to NHL
+  const _sbNhlEnabled = config.SCOREBOARD_NHL_ENABLED !== undefined ? config.SCOREBOARD_NHL_ENABLED
+                      : (config.SCOREBOARD_ENABLED !== undefined ? config.SCOREBOARD_ENABLED : true);
+  const _sbNhlId   = config.SCOREBOARD_NHL_TEAM_ID   ?? config.SCOREBOARD_TEAM_ID   ?? '';
+  const _sbNhlName = (config.SCOREBOARD_NHL_TEAM_NAME ?? config.SCOREBOARD_TEAM_NAME ?? '').toString().toUpperCase();
+  document.getElementById('sb_nhl_enabled').checked    = _sbNhlEnabled;
+  document.getElementById('sb_nhl_team_id').value      = _sbNhlId;
+  document.getElementById('sb_nhl_team_name').value    = _sbNhlName;
+  document.getElementById('sb_nfl_enabled').checked    = config.SCOREBOARD_NFL_ENABLED || false;
+  document.getElementById('sb_nfl_team_id').value      = config.SCOREBOARD_NFL_TEAM_ID ?? '';
+  document.getElementById('sb_nfl_team_name').value    = (config.SCOREBOARD_NFL_TEAM_NAME || '').toUpperCase();
+  document.getElementById('sb_mlb_enabled').checked    = config.SCOREBOARD_MLB_ENABLED || false;
+  document.getElementById('sb_mlb_team_id').value      = config.SCOREBOARD_MLB_TEAM_ID ?? '';
+  document.getElementById('sb_mlb_team_name').value    = (config.SCOREBOARD_MLB_TEAM_NAME || '').toUpperCase();
+  document.getElementById('sb_nba_enabled').checked    = config.SCOREBOARD_NBA_ENABLED || false;
+  document.getElementById('sb_nba_team_id').value      = config.SCOREBOARD_NBA_TEAM_ID ?? '';
+  document.getElementById('sb_nba_team_name').value    = (config.SCOREBOARD_NBA_TEAM_NAME || '').toUpperCase();
+  document.getElementById('sb_mls_enabled').checked    = config.SCOREBOARD_MLS_ENABLED || false;
+  document.getElementById('sb_mls_team_id').value      = config.SCOREBOARD_MLS_TEAM_ID ?? '';
+  document.getElementById('sb_mls_team_name').value    = (config.SCOREBOARD_MLS_TEAM_NAME || '').toUpperCase();
+  // Reorder table rows to match saved priority
+  const _sbPriority = Array.isArray(config.SCOREBOARD_PRIORITY)
+    ? config.SCOREBOARD_PRIORITY
+    : ['NHL', 'NFL', 'MLB', 'NBA', 'MLS'];
+  const _sbTbody = document.querySelector('.sb-table tbody');
+  _sbPriority.forEach(league => {
+    const row = _sbTbody.querySelector(`tr[data-league="${league}"]`);
+    if (row) _sbTbody.appendChild(row);
+  });
+  document.getElementById('scoreboard_post_game_minutes').value = config.SCOREBOARD_POST_GAME_MINUTES ?? 30;
+  document.getElementById('scoreboard_goal_celebration_seconds').value = config.SCOREBOARD_GOAL_CELEBRATION_SECONDS ?? 30;
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
   document.getElementById('receiver_type').value = config.RECEIVER_TYPE || 'dump1090';
   document.getElementById('poll_interval').value = config.POLL_INTERVAL ?? 15;
   document.getElementById('data_check_interval').value = config.DATA_CHECK_INTERVAL ?? 2;
-  document.getElementById('time_format').value = config.TIME_FORMAT || '24h';
   document.getElementById('date_format').value = config.DATE_FORMAT || 'MDY';
   document.getElementById('airlabs_key').value  = config.AIRLABS_API_KEY   || '';
   document.getElementById('airlabs_key2').value = config.AIRLABS_API_KEY_2 || '';
@@ -1256,12 +1471,31 @@ function buildConfigPayload() {
     TEMPERATURE_UNITS: document.getElementById('temp_units').value,
     OPENWEATHER_API_KEY: document.getElementById('ow_key').value,
     RAINFALL_ENABLED: document.getElementById('rainfall_enabled').checked,
+    SCOREBOARD_ENABLED: document.getElementById('scoreboard_enabled').checked,
+    // Priority derived from current DOM row order (drag-to-reorder)
+    SCOREBOARD_PRIORITY: [...document.querySelectorAll('.sb-table tbody tr[data-league]')].map(r => r.dataset.league),
+    SCOREBOARD_NHL_ENABLED:  document.getElementById('sb_nhl_enabled').checked,
+    SCOREBOARD_NHL_TEAM_ID:  parseInt(document.getElementById('sb_nhl_team_id').value)  || 0,
+    SCOREBOARD_NHL_TEAM_NAME: (document.getElementById('sb_nhl_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_NFL_ENABLED:  document.getElementById('sb_nfl_enabled').checked,
+    SCOREBOARD_NFL_TEAM_ID:  parseInt(document.getElementById('sb_nfl_team_id').value)  || 0,
+    SCOREBOARD_NFL_TEAM_NAME: (document.getElementById('sb_nfl_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_MLB_ENABLED:  document.getElementById('sb_mlb_enabled').checked,
+    SCOREBOARD_MLB_TEAM_ID:  parseInt(document.getElementById('sb_mlb_team_id').value)  || 0,
+    SCOREBOARD_MLB_TEAM_NAME: (document.getElementById('sb_mlb_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_NBA_ENABLED:  document.getElementById('sb_nba_enabled').checked,
+    SCOREBOARD_NBA_TEAM_ID:  parseInt(document.getElementById('sb_nba_team_id').value)  || 0,
+    SCOREBOARD_NBA_TEAM_NAME: (document.getElementById('sb_nba_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_MLS_ENABLED:  document.getElementById('sb_mls_enabled').checked,
+    SCOREBOARD_MLS_TEAM_ID:  parseInt(document.getElementById('sb_mls_team_id').value)  || 0,
+    SCOREBOARD_MLS_TEAM_NAME: (document.getElementById('sb_mls_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_POST_GAME_MINUTES: parseInt(document.getElementById('scoreboard_post_game_minutes').value) || 30,
+    SCOREBOARD_GOAL_CELEBRATION_SECONDS: parseInt(document.getElementById('scoreboard_goal_celebration_seconds').value) || 30,
     TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
     RECEIVER_TYPE: document.getElementById('receiver_type').value,
     POLL_INTERVAL: parseInt(document.getElementById('poll_interval').value) || 15,
     DATA_CHECK_INTERVAL: parseInt(document.getElementById('data_check_interval').value) || 2,
-    TIME_FORMAT: document.getElementById('time_format').value,
     DATE_FORMAT: document.getElementById('date_format').value,
     AIRLABS_API_KEY:   document.getElementById('airlabs_key').value,
     AIRLABS_API_KEY_2: document.getElementById('airlabs_key2').value,
@@ -1495,6 +1729,14 @@ function stopLog() {
 
 // ── Matrix Preview ─────────────────────────────────────────────
 let matrixTimer = null;
+// Goal celebration tracking
+let _lastTeamScore        = null;
+let _goalCelebrationUntil = 0;
+let _sbTeamName           = 'VGK';
+let _sbSportKey           = 'NHL';
+// Sport-specific celebration verb (NHL/MLS → GOAL!, NFL → SCORE!, MLB → SCORES!, NBA → SCORE!)
+const _CELEB_VERB = { NHL: 'GOAL!', MLS: 'GOAL!', NFL: 'SCORE!', MLB: 'SCORES!', NBA: 'SCORE!' };
+// Post-game timeout tracking is now server-side — see game_ended_at in /api/scoreboard response.
 
 function initMatrixPreview() {
   if (matrixTimer) return;
@@ -1509,14 +1751,30 @@ function stopMatrixPreview() {
 
 async function updateMatrixPreview() {
   try {
-    const [status, flightData] = await Promise.all([
+    const [status, flightData, sbData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/flights').then(r => r.json()),
+      fetch('/api/scoreboard').then(r => r.json()).catch(() => ({ game: null, team_name: 'VGK', enabled: true })),
       fetchWeather(),
     ]);
-    renderMatrix(status, flightData);
+    // Track team name + sport for goal celebration display
+    if (sbData.team_name) _sbTeamName = sbData.team_name;
+    if (sbData.sport_key) _sbSportKey = sbData.sport_key;
+    const g = sbData.game;
+    // Detect goals
+    if (g && (g.state === 'LIVE' || g.state === 'CRIT') && sbData.enabled !== false) {
+      const teamScore = g.team_score ?? 0;
+      if (_lastTeamScore !== null && teamScore > _lastTeamScore) {
+        const celebSecs = config.SCOREBOARD_GOAL_CELEBRATION_SECONDS ?? 30;
+        _goalCelebrationUntil = Date.now() / 1000 + celebSecs;
+      }
+      _lastTeamScore = teamScore;
+    } else if (!g || g.state === 'FINAL' || g.state === 'OFF' || g.state === 'FUT' || g.state === 'PRE') {
+      _lastTeamScore = null;  // reset between games
+    }
+    renderMatrix(status, flightData, sbData);
     const ts = flightData.ts
-      ? new Date(flightData.ts * 1000).toLocaleTimeString((config.TIME_FORMAT||'24h')==='12h'?'en-US':'en-GB', {hour:(config.TIME_FORMAT||'24h')==='12h'?'numeric':'2-digit',minute:'2-digit',second:'2-digit',hour12:(config.TIME_FORMAT||'24h')==='12h', timeZone: config.TIMEZONE || 'America/Los_Angeles'})
+      ? new Date(flightData.ts * 1000).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false, timeZone: config.TIMEZONE || 'America/Los_Angeles'})
       : '—';
     document.getElementById('matrix-meta').textContent = `Last poll: ${ts}${flightData.stale ? ' (stale)' : ''}`;
   } catch(e) {
@@ -1524,7 +1782,19 @@ async function updateMatrixPreview() {
   }
 }
 
-function renderMatrix(status, flightData) {
+function _scoreboardStatusLabel(game) {
+  // Only called for LIVE / CRIT / FINAL / OFF — FUT/PRE are filtered before renderMatrix.
+  const state = game.state;
+  if (state === 'LIVE' || state === 'CRIT') {
+    // Period label only — no clock (matches LED display: 30 s poll isn't accurate enough).
+    return game.period_label || '';
+  }
+  // FINAL / OFF
+  const pt = game.period_type || 'REG';
+  return pt === 'REG' ? 'FINAL' : `FINAL ${pt}`;
+}
+
+function renderMatrix(status, flightData, sbData) {
   const screen = document.getElementById('matrix-screen');
   const flights = (!flightData.stale && Array.isArray(flightData.flights)) ? flightData.flights : [];
 
@@ -1538,12 +1808,55 @@ function renderMatrix(status, flightData) {
     screen.innerHTML = '<div class="m-off"><span class="m-off-text">&#9632;&#9632;&#9632;</span></div>';
     return;
   }
+
+  // ── Goal celebration — suppress everything ────────────────────────────────
+  if (Date.now() / 1000 < _goalCelebrationUntil) {
+    const _celebVerb = _CELEB_VERB[_sbSportKey] || 'GOAL!';
+    screen.innerHTML = `<div class="m-goal"><span class="m-goal-text">${escHtml(_sbTeamName)} ${_celebVerb}</span></div>`;
+    return;
+  }
+
   if (flights.length === 0) {
+    // ── Scoreboard takes over the idle display ────────────────────────────
+    // server `enabled` already reflects whether any configured sport is on
+    const sbEnabled = (sbData.enabled !== false);
+    const game = sbData.game;
+    const teamName = sbData.team_name || config.SCOREBOARD_NHL_TEAM_NAME || 'VGK';
+    const isLive    = game && (game.state === 'LIVE' || game.state === 'CRIT');
+    const isFinal   = game && (game.state === 'FINAL' || game.state === 'OFF');
+    // Post-game: hide after SCOREBOARD_POST_GAME_MINUTES (default 30).
+    // Use the server-provided game_ended_at so the countdown survives page refreshes.
+    const postGameSecs    = (config.SCOREBOARD_POST_GAME_MINUTES ?? 30) * 60;
+    const serverEndedAt   = sbData.game_ended_at ?? null;
+    const postGameExpired = isFinal && serverEndedAt !== null &&
+                            (Date.now() / 1000 - serverEndedAt > postGameSecs);
+    // Only show scoreboard once game is live or finished, and within post-game window
+    if (game && sbEnabled && (isLive || isFinal) && !postGameExpired) {
+      const teamScore = game.team_score ?? 0;
+      const oppScore  = game.opp_score ?? 0;
+      const won       = isFinal && teamScore > oppScore;
+      const statusLbl = _scoreboardStatusLabel(game);
+      screen.innerHTML = `
+        <div class="m-hockey">
+          <div class="m-hk-teams">
+            <span class="m-hk-team">${escHtml(teamName)}</span>
+            <span class="m-hk-opp">${escHtml(game.opp_abbr)}</span>
+          </div>
+          <div class="m-hk-score-row">
+            <span class="m-hk-score-team${won ? ' win' : ''}">${teamScore}</span>
+            <span class="m-hk-sep">-</span>
+            <span class="m-hk-score-opp">${oppScore}</span>
+          </div>
+          <div class="m-hk-status">${escHtml(statusLbl)}</div>
+        </div>`;
+      return;
+    }
+
+    // ── Default idle: clock / date / weather ──────────────────────────────
     const now      = new Date();
     const tz       = config.TIMEZONE || 'America/Los_Angeles';
-    const _use12h  = (config.TIME_FORMAT || '24h') === '12h';
     const _dateFmt = config.DATE_FORMAT || 'MDY';
-    const timeStr  = now.toLocaleTimeString(_use12h ? 'en-US' : 'en-GB', { hour: _use12h ? 'numeric' : '2-digit', minute: '2-digit', hour12: _use12h, timeZone: tz });
+    const timeStr  = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz });
     const dayName  = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: tz });
     const _d       = now.toLocaleDateString('en-US', { day: 'numeric',  timeZone: tz });
     const _m       = now.toLocaleDateString('en-US', { month: 'numeric', timeZone: tz });
@@ -1643,9 +1956,10 @@ async function loadStatsTab() {
   document.getElementById('period-apply-btn').style.display = 'none';
   _statsPeriodDirty = false;
   try {
-    const [d, acc] = await Promise.all([
+    const [d, acc, gaAcc] = await Promise.all([
       fetch('/api/stats?days=90').then(r => r.json()),
       fetch('/api/free-api-accuracy').then(r => r.json()).catch(() => null),
+      fetch('/api/ga-accuracy').then(r => r.json()).catch(() => null),
     ]);
     if (d.today) {
       _serverToday = d.today;
@@ -1653,7 +1967,8 @@ async function loadStatsTab() {
     }
     renderTodayStats(d);
     renderRecentFlights(d);
-    if (acc && !acc.error) renderFreeApiAccuracy(acc);
+    if (acc   && !acc.error)   renderFreeApiAccuracy(acc);
+    if (gaAcc && !gaAcc.error) renderGaAccuracy(gaAcc);
     renderPeriodStats(d);
   } catch(e) {
     document.getElementById('stats-total').textContent = '—';
@@ -1672,13 +1987,13 @@ async function applyStatsPeriod() {
   document.getElementById('period-apply-btn').textContent = '…';
   try {
     const d = await fetch(`/api/stats?from=${from}&to=${to}`).then(r => r.json());
-    if (d.error) { alert(d.error); return; }
+    if (d.error) { showToast(d.error, 'err'); return; }
     renderRecentFlights(d);
     renderPeriodStats(d);
     document.getElementById('period-apply-btn').style.display = 'none';
     _statsPeriodDirty = false;
   } catch(e) {
-    alert('Failed to load stats for that range.');
+    showToast('Failed to load stats for that range.', 'err');
   } finally {
     document.getElementById('period-apply-btn').textContent = 'Apply';
   }
@@ -1750,6 +2065,7 @@ function renderTodayStats(d) {
     : (d.today ? fmtDate(d.today, { weekday:'short', month:'short', day:'numeric' }) : '—');
 
   const ac = d.api_calls || {};
+  // 'airlabs' is the combined total of both AirLabs keys (summed server-side).
   document.getElementById('stats-api-calls').textContent =
     `AirLabs: ${ac.airlabs ?? 0} · AeroAPI: ${ac.aeroapi ?? 0}`;
 
@@ -1901,6 +2217,80 @@ function renderFreeApiAccuracy(d) {
         <td style="padding:4px 6px;font-family:monospace;font-weight:600">${escHtml(r.callsign)}</td>
         <td style="padding:4px 6px;font-family:monospace;color:var(--muted)">${escHtml(r.free_route)}</td>
         <td style="padding:4px 6px;font-family:monospace;color:var(--accent)">${escHtml(r.paid_route)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+  }
+  el.innerHTML = html;
+}
+
+function renderGaAccuracy(d) {
+  const el = document.getElementById('ga-accuracy-content');
+  if (!el) return;
+
+  function _apiBlock(apiData, apiName) {
+    const total30 = apiData?.thirty_day?.total ?? 0;
+    if (!total30) {
+      return `<div style="margin-bottom:12px">
+        <div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">${escHtml(apiName)}</div>
+        <span style="font-size:11px;color:var(--muted)">No checks recorded yet.</span>
+      </div>`;
+    }
+    const pct30    = apiData.thirty_day.pct ?? 0;
+    const mm30     = apiData.thirty_day.mismatches ?? 0;
+    const todayN   = apiData.today?.total ?? 0;
+    const todayPct = apiData.today?.pct != null ? apiData.today.pct + '%' : '—';
+    const barColor = pct30 >= 90 ? 'var(--accent)' : pct30 >= 70 ? '#f59e0b' : '#ef4444';
+    return `
+      <div style="margin-bottom:14px">
+        <div style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">${escHtml(apiName)}</div>
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">
+          <span style="font-size:24px;font-weight:700;font-family:monospace;color:${barColor}">${pct30}%</span>
+          <span style="font-size:12px;color:var(--muted)">match rate · last 30 days · ${total30.toLocaleString()} check${total30 !== 1 ? 's' : ''} · ${mm30.toLocaleString()} override${mm30 !== 1 ? 's' : ''}</span>
+        </div>
+        <div style="background:var(--bg);border-radius:4px;height:6px;margin-bottom:6px;overflow:hidden">
+          <div style="height:100%;width:${Math.round(pct30)}%;background:${barColor};border-radius:4px;transition:width .4s"></div>
+        </div>
+        <div style="font-size:11px;color:var(--muted)">Today: ${todayN} check${todayN !== 1 ? 's' : ''} · ${todayPct} match</div>
+      </div>`;
+  }
+
+  const hasAdsbdb  = (d.adsbdb?.thirty_day?.total  ?? 0) > 0;
+  const hasOpensky = (d.opensky?.thirty_day?.total ?? 0) > 0;
+
+  if (!hasAdsbdb && !hasOpensky) {
+    el.innerHTML = '<span style="font-size:11px;color:var(--muted)">No GA cross-checks recorded yet — data accumulates as N-number aircraft are seen overhead with FR24 route data available.</span>';
+    return;
+  }
+
+  let html = _apiBlock(d.adsbdb,  'adsbdb');
+  html    += _apiBlock(d.opensky, 'OpenSky');
+
+  // Merge and sort mismatches from both APIs (newest first, max 10)
+  const allMm = [];
+  (d.adsbdb?.last_mismatches  || []).forEach(r => allMm.push({...r, _api: 'adsbdb'}));
+  (d.opensky?.last_mismatches || []).forEach(r => allMm.push({...r, _api: 'OpenSky'}));
+  allMm.sort((a, b) => b.seen_at.localeCompare(a.seen_at));
+  const mm = allMm.slice(0, 10);
+
+  if (mm.length) {
+    html += `<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Recent Overrides (free API → FR24 corrected to)</div>`;
+    html += `<table style="width:100%;font-size:11px;border-collapse:collapse">
+      <thead><tr style="color:var(--muted)">
+        <th style="text-align:left;padding:3px 6px;font-weight:500">Time</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">Aircraft</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">API</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">Free API had</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:500">FR24 corrected to</th>
+      </tr></thead><tbody>`;
+    mm.forEach(r => {
+      const aircraft = r.registration || r.callsign || '';
+      html += `<tr style="border-top:1px solid var(--border)">
+        <td style="padding:4px 6px;color:var(--muted);white-space:nowrap">${escHtml(_formatDate(r.seen_at.slice(0,10)) + ' ' + _formatTime(r.seen_at.slice(11,16)))}</td>
+        <td style="padding:4px 6px;font-family:monospace;font-weight:600">${escHtml(aircraft)}</td>
+        <td style="padding:4px 6px;color:var(--muted)">${escHtml(r._api)}</td>
+        <td style="padding:4px 6px;font-family:monospace;color:var(--muted)">${escHtml(r.free_route)}</td>
+        <td style="padding:4px 6px;font-family:monospace;color:var(--accent)">${escHtml(r.fr24_route)}</td>
       </tr>`;
     });
     html += '</tbody></table>';
@@ -2117,7 +2507,7 @@ async function doStatsSearch() {
   try {
     const r = await fetch(`/api/stats/search?q=${encodeURIComponent(q)}&limit=100&offset=0`);
     const d = await r.json();
-    if (d.error) { resEl.innerHTML = `<span style="font-size:11px;color:var(--red)">${d.error}</span>`; return; }
+    if (d.error) { resEl.innerHTML = `<span style="font-size:11px;color:var(--red)">${escHtml(d.error)}</span>`; return; }
     const items = d.sightings || [];
     if (!items.length) { resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">No matches found.</span>'; return; }
 
@@ -2319,12 +2709,12 @@ function renderStack(stack) {
       : api.key_set
         ? `<span class="badge key-set">key set</span>`
         : `<span class="badge no-key">no key</span>`;
-    const urlLink = api.url
-      ? `<a href="${api.url}" target="_blank" style="color:var(--accent);font-size:11px;text-decoration:none">${api.url.replace('https://','')}</a>`
+    const urlLink = (api.url && /^https:\/\//.test(api.url))
+      ? `<a href="${escHtml(api.url)}" target="_blank" style="color:var(--accent);font-size:11px;text-decoration:none">${escHtml(api.url.replace('https://',''))}</a>`
       : '';
 
     // Enable/disable toggle — only for APIs that have a flag (api_key !== null)
-    const canToggle = api.api_key && api.priority > 0 && api.priority < 6;
+    const canToggle = api.api_key && api.priority > 0 && api.priority < 7;
     const toggleHtml = canToggle ? (() => {
       const enabled = !api.disabled;
       const col  = enabled ? 'var(--accent)' : 'var(--muted)';
@@ -2426,14 +2816,6 @@ function _tempColor(temp) {
 
 function _formatTime(hhmm) {
   // hhmm is "HH:MM" in 24-hour format (from server/SQLite)
-  if (!hhmm || hhmm.length < 5) return hhmm;
-  if ((config.TIME_FORMAT || '24h') === '12h') {
-    const [hStr, mStr] = hhmm.split(':');
-    let h = parseInt(hStr, 10);
-    const suffix = h >= 12 ? 'PM' : 'AM';
-    h = h % 12 || 12;
-    return `${h}:${mStr} ${suffix}`;
-  }
   return hhmm;
 }
 
@@ -3131,9 +3513,68 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// ── Scoreboard master toggle ────────────────────────────────────
+function toggleScoreboardBody() {
+  const on = document.getElementById('scoreboard_enabled').checked;
+  document.getElementById('sb-body').style.display = on ? '' : 'none';
+}
+
+// ── Scoreboard drag-to-reorder priority ────────────────────────
+function initSbDragDrop() {
+  const tbody = document.querySelector('.sb-table tbody');
+  if (!tbody) return;
+  let dragSrc = null;
+
+  tbody.addEventListener('dragstart', e => {
+    dragSrc = e.target.closest('tr');
+    if (!dragSrc) return;
+    dragSrc.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragSrc.dataset.league);
+  });
+
+  tbody.addEventListener('dragend', () => {
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('dragging', 'drag-over'));
+    dragSrc = null;
+  });
+
+  tbody.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const target = e.target.closest('tr');
+    if (target && target !== dragSrc) {
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
+      target.classList.add('drag-over');
+    }
+  });
+
+  tbody.addEventListener('dragleave', e => {
+    // Only clear if leaving the tbody entirely, not just moving between cells
+    if (!tbody.contains(e.relatedTarget)) {
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
+    }
+  });
+
+  tbody.addEventListener('drop', e => {
+    e.preventDefault();
+    const target = e.target.closest('tr');
+    if (!target || !dragSrc || target === dragSrc) return;
+    // Insert before or after based on vertical midpoint
+    const rect = target.getBoundingClientRect();
+    const mid  = rect.top + rect.height / 2;
+    if (e.clientY < mid) {
+      tbody.insertBefore(dragSrc, target);
+    } else {
+      target.after(dragSrc);
+    }
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over'));
+  });
+}
+
 // ── Init ───────────────────────────────────────────────────────
 loadConfig();
 checkInitialStatus();
+initSbDragDrop();
 </script>
 </body>
 </html>

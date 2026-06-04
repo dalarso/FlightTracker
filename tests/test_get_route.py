@@ -200,8 +200,8 @@ def run_scenario(scn):
             "value": scn.get("usage_value", 0) if "airlabs_usage" in path else 0,
             "period_start": "2026-06-01"}),
         "_write_usage": mock.MagicMock(),
-        "_airlabs_increment": mock.MagicMock(return_value=1),
-        "_airlabs2_increment": mock.MagicMock(return_value=1),
+        "_airlabs_increment": mock.MagicMock(return_value=scn.get("airlabs1_count", 1)),
+        "_airlabs2_increment": mock.MagicMock(return_value=scn.get("airlabs2_count", 1)),
         "_aeroapi_increment": mock.MagicMock(return_value=None),
         "_record_api_stat": mock.MagicMock(),
         "_set_backoff": mock.MagicMock(),
@@ -332,10 +332,13 @@ SCENARIOS = [
         "expect": ("DEN", "ORD", "adsbdb+opensky"),
     },
     {
-        "name": "partial fill: AirLabs origin-only, AeroAPI fills destination",
+        # Phase 3 (_select authoritative): AeroAPI returned the COMPLETE LAS->JFK, so it
+        # is credited alone — the cleaner attribution we deliberately adopted.  (Pre-flip
+        # the inline logic combined AirLabs' redundant origin-only into 'airlabs+aeroapi'.)
+        "name": "partial fill: AirLabs origin-only, AeroAPI returns complete -> AeroAPI credited",
         "callsign": "AAL207", "airlabs1": {"origin": "LAS", "dest": ""},
         "aeroapi": {"origin": "LAS", "dest": "JFK"},
-        "expect": ("LAS", "JFK", "airlabs+aeroapi"),
+        "expect": ("LAS", "JFK", "aeroapi"),
     },
     {
         "name": "resolved-cache hit (scheduled, local origin) -> immediate",
@@ -753,6 +756,46 @@ SCENARIOS = [
         "expect": ("LAS", "EWR", "airlabs"),
         "expect_cache_types": ["resolved"],
     },
+    {
+        # Issue A: when AirLabs-1 is OVER QUOTA it returns a 200-empty.  That empty is
+        # meaningless (the backend was never consulted) and must NOT be cached — a cached
+        # empty trips the §3b gate (_al1_cache_was_empty) into skipping the still-quota'd
+        # AirLabs-2 next poll, leaking the lookup to the costlier AeroAPI.  Here AL-1 is
+        # over quota, AL-2 has the route and WINS, and AeroAPI is never reached.
+        "name": "Issue A: AL-1 over-quota -> AL-2 resolves (no AeroAPI leak), poison empty NOT cached",
+        "callsign": "AAL8001",
+        "airlabs1": None, "airlabs1_count": 1332,           # over the 1000 limit -> 200-empty
+        "airlabs2": {"origin": "LAS", "dest": "ORD"},
+        "aeroapi": {"origin": "LAS", "dest": "ORD"},        # available but must NOT be needed
+        "expect": ("LAS", "ORD", "airlabs2"),
+        "expect_calls": {"airlabs2": 1, "aeroapi": 0},      # AL-2 consulted & wins; AeroAPI not reached
+        "expect_no_cache_key": ["airlabs:AAL8001"],         # over-quota empty must NOT be cached (the fix)
+        "expect_backoff": [("airlabs", overhead.QUOTA_PROBE_BACKOFF_SECS)],
+    },
+    {
+        # Control / no regression: a genuine WITHIN-quota empty IS still cached, and the
+        # §3b optimization (skip AL-2 when AL-1 found nothing in the shared backend) holds.
+        "name": "Issue A control: AL-1 within-quota empty IS cached, AL-2 correctly skipped",
+        "callsign": "AAL8002",
+        "airlabs1": None, "airlabs1_count": 1,              # within limit
+        "airlabs2": None, "aeroapi": None,
+        "expect": ("", "", "none"),
+        "expect_cache_key": ["airlabs:AAL8002"],            # within-quota empty IS cached
+        "expect_calls": {"airlabs2": 0},                    # shared-backend empty correctly skips AL-2
+    },
+    {
+        # Phase-3 flip regression: an AeroAPI-resolved ARRIVAL (non-local origin -> home
+        # airport) must still write the 7-day resolved cache.  The flip's _select candidate
+        # for AeroAPI carries no inline coords, so coords are looked up from the harvested
+        # airport table; without that the non-local-origin write guard skips the entry and
+        # the paid chain re-bills every poll.
+        "name": "flip-regression: AeroAPI arrival (non-local origin) still writes resolved cache",
+        "callsign": "AAL7700", "airlabs1": None, "airlabs2": None,
+        "aeroapi": {"origin": "JFK", "dest": "LAS",
+                    "olat": 40.64, "olon": -73.78, "dlat": 36.08, "dlon": -115.15},
+        "expect": ("JFK", "LAS", "aeroapi"),
+        "expect_cache_types": ["resolved"],
+    },
 ]
 
 
@@ -795,6 +838,15 @@ def _mk(scn):
         for ctype in scn.get("expect_cache_types", []):
             hits = [w for w in sx["cache_writes"] if w["type"] == ctype]
             self.assertTrue(hits, f"\n{scn['name']}: expected a '{ctype}' cache write, got none")
+        # cache-key-absent: these exact keys must NOT be written (Issue A: an over-quota
+        # empty must not be cached, or it poisons the §3b secondary-key gate next poll).
+        for key in scn.get("expect_no_cache_key", []):
+            hits = [w for w in sx["cache_writes"] if w["key"] == key]
+            self.assertFalse(hits, f"\n{scn['name']}: unexpected cache write for key '{key}': {hits}")
+        # cache-key-present: these exact keys MUST be written.
+        for key in scn.get("expect_cache_key", []):
+            hits = [w for w in sx["cache_writes"] if w["key"] == key]
+            self.assertTrue(hits, f"\n{scn['name']}: expected a cache write for key '{key}', got none")
         # paid-miss recorded? (True/False)
         if "expect_paid_miss" in scn:
             self.assertEqual(sx["paid_miss_set"], scn["expect_paid_miss"],
@@ -890,7 +942,7 @@ class RunTestLookupFidelity(unittest.TestCase):
 class SelectFunction(unittest.TestCase):
     """Direct tests for the centralized _select() — the single route-selection point the
     structural refactor is built on.  Sources only PRODUCE candidates; _select() decides.
-    (Phase 1 scaffolding — _select() is not wired into get_route() yet.)"""
+    _select() is now the sole route authority in get_route() (Phase-3 flip, made permanent)."""
 
     def setUp(self):
         self._lp = mock.patch.object(overhead, "_LOCAL_AIRPORTS",
@@ -942,6 +994,109 @@ class SelectFunction(unittest.TestCase):
     def test_empty_and_blank_candidates_return_none(self):
         self.assertIsNone(overhead._select([], None, None))
         self.assertIsNone(overhead._select([self._c("", "", "airlabs")], None, None))
+
+
+class CacheRoundTrip(unittest.TestCase):
+    """Exercise the REAL SQLite cache helpers against a temp DB.  The rest of the suite
+    mocks these away, so this is the only place write -> read -> expire -> bypass is
+    verified end to end (the bug class behind the 'Issue B' stale-resolved entries)."""
+
+    def setUp(self):
+        import sqlite3, tempfile
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self._conn = sqlite3.connect(self._tmp.name, check_same_thread=False)
+        self._conn.execute(
+            """CREATE TABLE cache (
+                   key TEXT NOT NULL, cache_type TEXT NOT NULL,
+                   origin TEXT NOT NULL DEFAULT '', dest TEXT NOT NULL DEFAULT '',
+                   olat REAL, olon REAL, dlat REAL, dlon REAL,
+                   value TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+                   expires_at INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY (key, cache_type))""")
+        self._conn.commit()
+        self._orig_conn = overhead._cache_conn
+        overhead._cache_conn = self._conn
+        overhead._cache_bypass.on = False
+
+    def tearDown(self):
+        overhead._cache_conn = self._orig_conn
+        overhead._cache_bypass.on = False
+        self._conn.close()
+        try:
+            os.remove(self._tmp.name)
+        except OSError:
+            pass
+
+    def test_write_then_read_roundtrip(self):
+        exp = int(time.time()) + 3600
+        overhead._cache_db_set_route("AAL1", "resolved", "LAS", "JFK",
+                                     36.08, -115.15, 40.64, -73.78, exp, source="adsbdb")
+        row = overhead._cache_db_get_route("AAL1", "resolved")
+        self.assertIsNotNone(row)
+        self.assertEqual((row[0], row[1], row[6]), ("LAS", "JFK", "adsbdb"))
+
+    def test_expired_entry_is_invisible(self):
+        past = int(time.time()) - 10
+        overhead._cache_db_set_route("AAL2", "resolved", "LAS", "JFK",
+                                     None, None, None, None, past, source="adsbdb")
+        self.assertIsNone(overhead._cache_db_get_route("AAL2", "resolved"))
+
+    def test_bypass_masks_reads_without_deleting(self):
+        exp = int(time.time()) + 3600
+        overhead._cache_db_set_route("AAL3", "resolved", "LAS", "JFK",
+                                     None, None, None, None, exp)
+        overhead._cache_bypass.on = True
+        self.assertIsNone(overhead._cache_db_get_route("AAL3", "resolved"))
+        overhead._cache_bypass.on = False
+        self.assertIsNotNone(overhead._cache_db_get_route("AAL3", "resolved"))
+
+    def test_upsert_keeps_single_row(self):
+        exp = int(time.time()) + 3600
+        overhead._cache_db_set_route("AAL4", "resolved", "LAS", "JFK",
+                                     None, None, None, None, exp)
+        overhead._cache_db_set_route("AAL4", "resolved", "LAS", "ORD",
+                                     None, None, None, None, exp)
+        n = self._conn.execute(
+            "SELECT COUNT(*) FROM cache WHERE key='AAL4' AND cache_type='resolved'"
+        ).fetchone()[0]
+        self.assertEqual(n, 1)
+        self.assertEqual(overhead._cache_db_get_route("AAL4", "resolved")[1], "ORD")
+
+    def test_delete_removes_entry(self):
+        exp = int(time.time()) + 3600
+        overhead._cache_db_set_route("AAL5", "resolved", "LAS", "JFK",
+                                     None, None, None, None, exp)
+        overhead._cache_db_delete_route("AAL5", "resolved")
+        self.assertIsNone(overhead._cache_db_get_route("AAL5", "resolved"))
+
+
+class RoutePlausibleGeometry(unittest.TestCase):
+    """Direct unit tests for the _route_plausible detour-ratio guard — the core anti-stale-
+    route check, otherwise exercised only indirectly through full get_route scenarios."""
+
+    LAS = (36.08, -115.15)
+    JFK = (40.64, -73.78)
+
+    def test_missing_coords_assumed_plausible(self):
+        self.assertTrue(overhead._route_plausible(None, None, *self.LAS, *self.JFK))
+
+    def test_same_airport_rejected(self):
+        # origin == dest -> zero-length route -> no valid flight path
+        self.assertFalse(overhead._route_plausible(*self.LAS, *self.LAS, *self.LAS))
+
+    def test_short_hop_assumed_plausible(self):
+        # ~0.3 km apart -> below the short-hop floor where geometry isn't reliable
+        self.assertTrue(overhead._route_plausible(0.0, 0.0,
+                                                  36.000, -115.000, 36.003, -115.000))
+
+    def test_on_route_is_plausible(self):
+        # plane sitting at the origin -> detour ratio 1.0
+        self.assertTrue(overhead._route_plausible(*self.LAS, *self.LAS, *self.JFK))
+
+    def test_far_off_route_is_implausible(self):
+        # LAS->JFK route, but the plane is off west Africa -> enormous detour ratio
+        self.assertFalse(overhead._route_plausible(0.0, 0.0, *self.LAS, *self.JFK))
 
 
 if __name__ == "__main__":

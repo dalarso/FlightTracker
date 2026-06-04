@@ -45,6 +45,10 @@ class JourneyScene(object):
         if len(self._data) == 0:
             return
 
+        # Yield canvas to goal celebration animation
+        if getattr(self, "_goal_celebration_active", False):
+            return
+
         origin = self._data[self._data_index]["origin"]
         destination = self._data[self._data_index]["destination"]
 
@@ -83,6 +87,10 @@ class JourneyScene(object):
     def journey_arrow(self):
         # Guard against no data
         if len(self._data) == 0:
+            return
+
+        # Yield canvas to goal celebration animation
+        if getattr(self, "_goal_celebration_active", False):
             return
 
         # Black area before arrow

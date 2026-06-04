@@ -6,18 +6,23 @@ For every scheduled-airline callsign that has a complete route (origin + destina
 in the sightings table, insert a 7-day 'resolved' cache entry so the live lookup
 skips the full API chain for known daily flights.
 
-Safe to re-run: INSERT OR REPLACE is idempotent.  Existing fresh entries are left
-alone unless --force is passed (which rewrites their TTL to now+7d regardless).
+Only routes with a LOCAL endpoint are written (mirrors overhead.py's own resolved-write
+guard) — a non-local, coordless entry would just be busted + re-billed on the next poll.
+
+Safe to re-run: existing fresh entries are left alone unless --force is passed.  --force
+rewrites every matching entry's TTL to now+7d, so it requires confirmation (or --yes).
+Use --dry-run to preview without writing.  A timestamped DB backup is made before writes.
 
 Usage (on the Pi):
-    python3 /home/pi/FlightTracker/utilities/backfill_resolved_cache.py
-    python3 /home/pi/FlightTracker/utilities/backfill_resolved_cache.py --verbose
-    python3 /home/pi/FlightTracker/utilities/backfill_resolved_cache.py --force
-    python3 /home/pi/FlightTracker/utilities/backfill_resolved_cache.py --db /path/to/ft_flights.db
+    python3 .../backfill_resolved_cache.py [--verbose] [--dry-run]
+    python3 .../backfill_resolved_cache.py --force [--yes]
+    python3 .../backfill_resolved_cache.py --db /path/to/ft_flights.db
 """
 
 import argparse
+import shutil
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -67,7 +72,32 @@ def _is_scheduled(callsign: str) -> bool:
     return len(callsign) >= 3 and callsign[:3].upper() in _SCHEDULED_PREFIXES
 
 
-def backfill(db_path: Path, verbose: bool = False, force: bool = False) -> None:
+def _local_airports() -> frozenset:
+    """Read LOCAL_AIRPORTS from config.py (best-effort) so we only persist routes the live
+    resolver would also keep.  Empty set (or no config) → the locality gate is skipped."""
+    try:
+        sys.path.insert(0, str(_PROJECT_DIR))
+        import config
+        raw = getattr(config, "LOCAL_AIRPORTS", "") or getattr(config, "LOCAL_AIRPORT", "")
+        return frozenset(a.strip().upper() for a in str(raw).split(",") if a.strip())
+    except Exception:
+        return frozenset()
+
+
+def _backup_db(db_path: Path) -> None:
+    """Timestamped copy of the DB before any writes, so a bad run can be undone."""
+    if not db_path.exists():
+        return
+    backup = db_path.with_name(f"{db_path.name}-{time.strftime('%Y%m%d-%H%M%S')}.bak")
+    try:
+        shutil.copy2(db_path, backup)
+        print(f"Backup written: {backup}")
+    except Exception as exc:
+        print(f"WARNING: could not back up DB ({exc}); continuing without backup", file=sys.stderr)
+
+
+def backfill(db_path: Path, verbose: bool = False, force: bool = False,
+             dry_run: bool = False, assume_yes: bool = False) -> None:
     if not db_path.exists():
         print(f"ERROR: database not found: {db_path}")
         return
@@ -75,6 +105,7 @@ def backfill(db_path: Path, verbose: bool = False, force: bool = False) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")   # wait (don't error) if the live service is mid-write
 
     # Ensure cache table exists (mirrors _init_db in overhead.py exactly)
     conn.execute("""
@@ -117,8 +148,23 @@ def backfill(db_path: Path, verbose: bool = False, force: bool = False) -> None:
         if callsign not in best:
             best[callsign] = (origin, dest)
 
-    # ── Step 3: Filter to scheduled-airline prefixes ───────────────────────────
-    scheduled = {cs: route for cs, route in best.items() if _is_scheduled(cs)}
+    # ── Step 3: Filter to scheduled-airline prefixes with a LOCAL endpoint ──────
+    # The locality gate mirrors overhead.py's resolved-write guard: a non-local route
+    # written with NULL coords would just be busted + re-resolved on the next live poll,
+    # wasting a delete + a paid re-lookup.  Empty LOCAL_AIRPORTS → gate skipped.
+    locals_ = _local_airports()
+
+    def _keep(cs: str, route: tuple) -> bool:
+        if not _is_scheduled(cs):
+            return False
+        if locals_ and not (route[0] in locals_ or route[1] in locals_):
+            return False
+        return True
+
+    scheduled = {cs: route for cs, route in best.items() if _keep(cs, route)}
+    if not locals_:
+        print("WARNING: LOCAL_AIRPORTS not found in config — locality gate skipped "
+              "(writing all scheduled routes).", file=sys.stderr)
 
     # ── Step 4: Check which already have a fresh 'resolved' entry ─────────────
     already_fresh: set[str] = set()
@@ -130,6 +176,31 @@ def backfill(db_path: Path, verbose: bool = False, force: bool = False) -> None:
             ).fetchone()
             if row and row[0] > now:
                 already_fresh.add(cs)
+
+    # ── Guard rails: dry-run preview, --force confirmation, pre-write backup ───
+    to_write = [cs for cs in scheduled if cs not in already_fresh]
+    if dry_run:
+        print("DRY RUN — no changes will be written.")
+        print(f"  Would write {len(to_write)} resolved entries "
+              f"({'force-refresh' if force else 'new only'}); "
+              f"{len(scheduled) - len(to_write)} already fresh (skipped).")
+        if verbose:
+            for cs in to_write:
+                o, d = scheduled[cs]
+                print(f"    would write {cs:12s} {o}->{d}")
+        conn.close()
+        return
+    if force and not assume_yes:
+        if not sys.stdin.isatty():
+            print("Refusing --force without --yes in a non-interactive run.", file=sys.stderr)
+            conn.close()
+            return
+        if input(f"--force will rewrite {len(to_write)} entries' TTL to now+7d. Continue? [yes/no] "
+                 ).strip().lower() not in ("yes", "y"):
+            print("Aborted.")
+            conn.close()
+            return
+    _backup_db(db_path)
 
     # ── Step 5: Insert resolved cache entries ─────────────────────────────────
     inserted = 0
@@ -186,6 +257,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Rewrite TTL even for already-fresh entries (sets all to now+7d)",
     )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Preview what would change without writing")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip the --force confirmation prompt (for non-interactive runs)")
     args = parser.parse_args()
 
-    backfill(Path(args.db), verbose=args.verbose, force=args.force)
+    backfill(Path(args.db), verbose=args.verbose, force=args.force,
+             dry_run=args.dry_run, assume_yes=args.yes)

@@ -2,8 +2,9 @@
 """
 backfill_db.py — Parse plane.log and populate ft_flights.db from historical data.
 
-Safe to re-run: INSERT OR REPLACE updates any row already in the DB, so re-running
-always produces a fully up-to-date database.
+Safe to re-run: re-running fills in any BLANK fields on existing rows — it never
+overwrites data the live service has since enriched, and never changes row ids.
+A timestamped DB backup is written before any changes.
 
 Usage (on the Pi):
     python3 /home/pi/FlightTracker/utilities/backfill_db.py [--log /path/to/plane.log]
@@ -13,8 +14,10 @@ The script auto-locates ft_flights.db relative to this file's parent directory.
 
 import json
 import re
+import shutil
 import sqlite3
 import sys
+import time
 import argparse
 from pathlib import Path
 
@@ -50,6 +53,7 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")   # wait (don't error) if the live service is mid-write
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sightings (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +91,19 @@ def _open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _backup_db(db_path: Path) -> None:
+    """Write a timestamped copy of the DB before any changes, so a bad run can be undone.
+    Best-effort (ideally stop the FlightTracker service first so the DB is quiescent)."""
+    if not db_path.exists():
+        return
+    backup = db_path.with_name(f"{db_path.name}-{time.strftime('%Y%m%d-%H%M%S')}.bak")
+    try:
+        shutil.copy2(db_path, backup)
+        print(f"Backup written: {backup}")
+    except Exception as exc:
+        print(f"WARNING: could not back up DB ({exc}); continuing without backup", file=sys.stderr)
+
+
 def backfill(log_path: Path, db_path: Path, verbose: bool = False) -> None:
     if not log_path.exists():
         print(f"ERROR: log not found: {log_path}", file=sys.stderr)
@@ -95,8 +112,9 @@ def backfill(log_path: Path, db_path: Path, verbose: bool = False) -> None:
     conn = _open_db(db_path)
 
     inserted = 0
-    skipped  = 0
+    updated  = 0
     errors   = 0
+    drift    = 0   # route-format lines we failed to parse (log-format-drift signal)
 
     with open(log_path, "r", errors="replace") as fh:
         for raw in fh:
@@ -105,6 +123,8 @@ def backfill(log_path: Path, db_path: Path, verbose: bool = False) -> None:
                 continue
             m = _ROUTE_RE.match(line)
             if not m:
+                if "[route:" in line:      # looks like a route line but didn't parse → drift
+                    drift += 1
                 continue
             seen_at, route_src, callsign, origin, dest = m.groups()
             date   = seen_at[:10]
@@ -120,24 +140,36 @@ def backfill(log_path: Path, db_path: Path, verbose: bool = False) -> None:
             if dest   == "?":   dest   = ""
 
             try:
-                # INSERT OR REPLACE so re-runs update rows that had wrong aircraft
-                # data from a previous version of this script.
-                cur = conn.execute(
+                existed = conn.execute(
+                    "SELECT 1 FROM sightings WHERE date=? AND callsign=?",
+                    (date, callsign),
+                ).fetchone() is not None
+                # Fill only BLANK fields on an existing row — never overwrite data the live
+                # service enriched after this log line, and preserve the row id (the old
+                # INSERT OR REPLACE deleted+reinserted, reverting enrichment + churning ids).
+                conn.execute(
                     """
-                    INSERT OR REPLACE INTO sightings
+                    INSERT INTO sightings
                         (seen_at, date, callsign, registration,
                          origin, destination, aircraft, route_source, airline)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date, callsign) DO UPDATE SET
+                        registration = CASE WHEN sightings.registration='' THEN excluded.registration ELSE sightings.registration END,
+                        origin       = CASE WHEN sightings.origin=''       THEN excluded.origin       ELSE sightings.origin       END,
+                        destination  = CASE WHEN sightings.destination=''  THEN excluded.destination  ELSE sightings.destination  END,
+                        aircraft     = CASE WHEN sightings.aircraft=''     THEN excluded.aircraft     ELSE sightings.aircraft     END,
+                        route_source = CASE WHEN sightings.route_source='' THEN excluded.route_source ELSE sightings.route_source END,
+                        airline      = CASE WHEN sightings.airline=''      THEN excluded.airline      ELSE sightings.airline      END
                     """,
                     (seen_at, date, callsign, registration,
                      origin, dest, aircraft, route_src, prefix),
                 )
-                if cur.rowcount:
+                if existed:
+                    updated += 1
+                else:
                     inserted += 1
                     if verbose:
                         print(f"  + {seen_at} {callsign:10s} {origin or '?'}→{dest or '?'}  '{aircraft}'")
-                else:
-                    skipped += 1
             except Exception as exc:
                 errors += 1
                 if verbose:
@@ -146,12 +178,13 @@ def backfill(log_path: Path, db_path: Path, verbose: bool = False) -> None:
     conn.commit()
     conn.close()
 
-    total = inserted + skipped + errors
-    print(f"Backfill complete: {total} log lines matched")
-    print(f"  Inserted : {inserted}")
-    print(f"  Skipped  : {skipped}  (already in DB)")
-    print(f"  Errors   : {errors}")
-    print(f"  DB       : {db_path}")
+    print("Backfill complete:")
+    print(f"  Inserted (new)         : {inserted}")
+    print(f"  Updated (filled blanks): {updated}")
+    print(f"  Errors                 : {errors}")
+    if drift:
+        print(f"  WARNING: {drift} route-format lines did not parse — log format may have drifted")
+    print(f"  DB                     : {db_path}")
 
 
 def backfill_api_calls(stats_path: Path, db_path: Path, verbose: bool = False) -> None:
@@ -216,5 +249,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="store_true",         help="Print each inserted row")
     args = parser.parse_args()
 
-    backfill(Path(args.log), Path(args.db), verbose=args.verbose)
-    backfill_api_calls(Path(args.stats), Path(args.db), verbose=args.verbose)
+    db_path = Path(args.db)
+    _backup_db(db_path)   # timestamped safety copy before any writes
+    backfill(Path(args.log), db_path, verbose=args.verbose)
+    backfill_api_calls(Path(args.stats), db_path, verbose=args.verbose)

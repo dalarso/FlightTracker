@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -33,7 +34,36 @@ def _log(msg):
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
+# ── LAN hardening (no password by design — single-user trusted LAN) ───────────
+# CSRF: a cross-site page can't set a custom request header without a CORS preflight
+# (which this app never grants), so requiring one on every state-changing request blocks
+# drive-by POST/DELETE from other sites the operator's browser happens to have open. The
+# dashboard's own JS sets this header on every fetch.
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+@app.before_request
+def _csrf_guard():
+    if request.method in _MUTATING_METHODS and request.headers.get("X-Requested-With") != "FlightTracker":
+        return jsonify({"error": "missing or invalid X-Requested-With header"}), 403
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
+
 BASE_DIR = Path(__file__).parent.parent
+
+# Ensure the project root is on sys.path so the utility imports below work
+# whether server.py is launched from its own directory or from the project root.
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from functools import partial as _partial
+from utilities.nhl  import fetch_game      as _sb_fetch_nhl
+from utilities.espn import fetch_espn_game as _sb_fetch_espn
+from utilities.mlb  import fetch_mlb_game  as _sb_fetch_mlb
 CONFIG_PATH      = BASE_DIR / "config.py"
 PAUSE_FLAG       = Path("/tmp/ft_paused")
 NIGHT_FLAG       = Path("/tmp/ft_night")
@@ -43,6 +73,7 @@ OPENSKY_DISABLED_FLAG = Path("/tmp/ft_opensky_disabled")
 AIRLABS_DISABLED_FLAG  = Path("/tmp/ft_airlabs_disabled")
 AIRLABS2_DISABLED_FLAG = Path("/tmp/ft_airlabs2_disabled")
 AEROAPI_DISABLED_FLAG  = Path("/tmp/ft_aeroapi_disabled")
+FR24_DISABLED_FLAG     = Path("/tmp/ft_fr24_disabled")
 
 _API_FLAGS: dict[str, Path] = {
     "adsbdb":      ADSBDB_DISABLED_FLAG,
@@ -50,6 +81,7 @@ _API_FLAGS: dict[str, Path] = {
     "airlabs":     AIRLABS_DISABLED_FLAG,
     "airlabs2":    AIRLABS2_DISABLED_FLAG,
     "flightaware": AEROAPI_DISABLED_FLAG,
+    "fr24":        FR24_DISABLED_FLAG,
 }
 FLIGHT_DATA_FILE = Path("/tmp/ft_data.json")
 
@@ -123,15 +155,27 @@ _KNOWN_KEYS = {
     "TEMPERATURE_UNITS", "MIN_ALTITUDE", "MAX_ALTITUDE", "BRIGHTNESS",
     "GPIO_SLOWDOWN", "NIGHT_BRIGHTNESS", "TIMEZONE", "JOURNEY_CODE_SELECTED",
     "JOURNEY_BLANK_FILLER", "HAT_PWM_ENABLED", "RECEIVER_HOST", "LOCAL_AIRPORTS",
-    "LOCAL_AIRPORT",  # deprecated single-value key — kept here so it's NOT written as an "extra key" when migrating old configs
+    "LOCAL_AIRPORT",      # deprecated single-value key — kept so it's NOT written as an "extra key"
     "OPENSKY_CLIENT_ID", "OPENSKY_CLIENT_SECRET", "FLIGHTAWARE_API_KEY",
     "AIRLABS_API_KEY", "AIRLABS_API_KEY_2",
     # Display extras
     "LOADING_LED_ENABLED", "LOADING_LED_GPIO_PIN", "RAINFALL_ENABLED",
+    # Scoreboard — master switch + shared settings
+    "SCOREBOARD_ENABLED",
+    "SCOREBOARD_POST_GAME_MINUTES", "SCOREBOARD_GOAL_CELEBRATION_SECONDS",
+    "SCOREBOARD_PRIORITY",
+    # Scoreboard — per-sport
+    "SCOREBOARD_NHL_ENABLED", "SCOREBOARD_NHL_TEAM_ID", "SCOREBOARD_NHL_TEAM_NAME",
+    "SCOREBOARD_NFL_ENABLED", "SCOREBOARD_NFL_TEAM_ID", "SCOREBOARD_NFL_TEAM_NAME",
+    "SCOREBOARD_MLB_ENABLED", "SCOREBOARD_MLB_TEAM_ID", "SCOREBOARD_MLB_TEAM_NAME",
+    "SCOREBOARD_NBA_ENABLED", "SCOREBOARD_NBA_TEAM_ID", "SCOREBOARD_NBA_TEAM_NAME",
+    "SCOREBOARD_MLS_ENABLED", "SCOREBOARD_MLS_TEAM_ID", "SCOREBOARD_MLS_TEAM_NAME",
+    # Legacy scoreboard keys — kept so they're silently dropped on next save
+    "SCOREBOARD_LEAGUE", "SCOREBOARD_TEAM_ID", "SCOREBOARD_TEAM_NAME",
     # Billing tracking
     "FEEDER_MONTHLY_CREDIT",
     "RECEIVER_TYPE", "POLL_INTERVAL", "DATA_CHECK_INTERVAL",
-    "TIME_FORMAT", "DATE_FORMAT",
+    "DATE_FORMAT",
     "AIRLABS_MONTHLY_LIMIT", "AIRLABS_RESET_DAY",
     "AIRLABS2_MONTHLY_LIMIT", "AIRLABS2_RESET_DAY",
     "AEROAPI_RESET_DAY",
@@ -149,13 +193,27 @@ _SENSITIVE_KEYS = {
     "FLIGHTAWARE_API_KEY", "AIRLABS_API_KEY", "AIRLABS_API_KEY_2",
 }
 
+# Placeholder sent to the browser in place of real secrets (GET /api/config). Saving it
+# back unchanged is treated as "keep the existing key" — secrets never leave the Pi.
+_SECRET_SENTINEL = "********"
+
+
+_config_cache = {"mtime": None, "data": None}
 
 def read_config():
-    """Execute config.py in a sandboxed namespace and return its variables."""
-    safe_globals = {"__builtins__": {}}
-    with open(CONFIG_PATH) as f:
-        exec(compile(f.read(), str(CONFIG_PATH), "exec"), safe_globals)
-    return {k: v for k, v in safe_globals.items() if not k.startswith("_")}
+    """Execute config.py in a sandboxed namespace and return its variables.
+    Cached by file mtime so the timer-polled endpoints don't re-exec the file every hit."""
+    try:
+        mtime = os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        mtime = None
+    if _config_cache["data"] is None or _config_cache["mtime"] != mtime:
+        safe_globals = {"__builtins__": {}}
+        with open(CONFIG_PATH) as f:
+            exec(compile(f.read(), str(CONFIG_PATH), "exec"), safe_globals)
+        _config_cache["data"] = {k: v for k, v in safe_globals.items() if not k.startswith("_")}
+        _config_cache["mtime"] = mtime
+    return dict(_config_cache["data"])   # shallow copy so callers (and masking) can't mutate the cache
 
 
 # Update timezone from config — _log() looks up _PACIFIC at call time so this applies immediately
@@ -187,8 +245,8 @@ def write_config(data):
     # blank a real credential by saving a page that loaded in a degraded state.
     for k in _KNOWN_KEYS:
         if k in data:
-            if k in _SENSITIVE_KEYS and not data[k] and existing.get(k):
-                continue  # keep the existing non-empty value
+            if k in _SENSITIVE_KEYS and (not data[k] or data[k] == _SECRET_SENTINEL) and existing.get(k):
+                continue  # empty or the masked sentinel = unchanged → keep the existing value
             existing[k] = data[k]
 
     # Validate TIMEZONE before writing — an invalid string would break the service on restart
@@ -198,9 +256,7 @@ def write_config(data):
     except Exception:
         existing["TIMEZONE"] = "America/Los_Angeles"
 
-    # Clamp TIME_FORMAT and DATE_FORMAT to known-good values
-    if existing.get("TIME_FORMAT") not in ("24h", "12h"):
-        existing["TIME_FORMAT"] = "24h"
+    # Clamp DATE_FORMAT to known-good values
     if existing.get("DATE_FORMAT") not in ("MDY", "DMY", "YMD"):
         existing["DATE_FORMAT"] = "MDY"
     if existing.get("RECEIVER_TYPE") not in ("dump1090", "vrs"):
@@ -225,44 +281,62 @@ LOCATION_HOME = [
 WEATHER_LOCATION = {repr(str(existing.get("WEATHER_LOCATION", "")))}
 OPENWEATHER_API_KEY = {repr(str(existing.get("OPENWEATHER_API_KEY", "")))}
 TEMPERATURE_UNITS = {repr(str(existing.get("TEMPERATURE_UNITS", "imperial")))}
-MIN_ALTITUDE = {int(existing.get("MIN_ALTITUDE", 100))}
-MAX_ALTITUDE = {int(existing.get("MAX_ALTITUDE", 15000))}
-BRIGHTNESS = {int(existing.get("BRIGHTNESS", 80))}
-GPIO_SLOWDOWN = {int(existing.get("GPIO_SLOWDOWN", 2))}
-NIGHT_BRIGHTNESS = {int(existing.get("NIGHT_BRIGHTNESS", 20))}
-JOURNEY_CODE_SELECTED = {repr(str(existing.get("JOURNEY_CODE_SELECTED", "")))}
-JOURNEY_BLANK_FILLER = {repr(str(existing.get("JOURNEY_BLANK_FILLER", " ? ")))}
-TIME_FORMAT = {repr(str(existing.get("TIME_FORMAT", "24h")))}
-DATE_FORMAT = {repr(str(existing.get("DATE_FORMAT", "MDY")))}
+MIN_ALTITUDE = {int(existing.get("MIN_ALTITUDE") or 100)}
+MAX_ALTITUDE = {int(existing.get("MAX_ALTITUDE") or 15000)}
+BRIGHTNESS = {int(existing.get("BRIGHTNESS") or 80)}
+GPIO_SLOWDOWN = {int(existing.get("GPIO_SLOWDOWN") if existing.get("GPIO_SLOWDOWN") is not None else 2)}
+NIGHT_BRIGHTNESS = {int(existing.get("NIGHT_BRIGHTNESS") or 20)}
+JOURNEY_CODE_SELECTED = {repr(str(existing.get("JOURNEY_CODE_SELECTED") or ""))}
+JOURNEY_BLANK_FILLER = {repr(str(existing.get("JOURNEY_BLANK_FILLER") or " ? "))}
+DATE_FORMAT = {repr(str(existing.get("DATE_FORMAT") or "MDY"))}
 HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
 
-RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST", "localhost")))}
-RECEIVER_TYPE = {repr(str(existing.get("RECEIVER_TYPE", "dump1090")))}
-POLL_INTERVAL = {int(existing.get("POLL_INTERVAL", 15))}
-DATA_CHECK_INTERVAL = {int(existing.get("DATA_CHECK_INTERVAL", 2))}
+RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST") or "localhost"))}
+RECEIVER_TYPE = {repr(str(existing.get("RECEIVER_TYPE") or "dump1090"))}
+POLL_INTERVAL = {int(existing.get("POLL_INTERVAL") or 15)}
+DATA_CHECK_INTERVAL = {int(existing.get("DATA_CHECK_INTERVAL") or 2)}
 
-LOCAL_AIRPORTS = {repr(str(existing.get("LOCAL_AIRPORTS", existing.get("LOCAL_AIRPORT", ""))))}
-OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID", "")))}
-OPENSKY_CLIENT_SECRET = {repr(str(existing.get("OPENSKY_CLIENT_SECRET", "")))}
-FLIGHTAWARE_API_KEY = {repr(str(existing.get("FLIGHTAWARE_API_KEY", "")))}
-AIRLABS_API_KEY = {repr(str(existing.get("AIRLABS_API_KEY", "")))}
-AIRLABS_API_KEY_2 = {repr(str(existing.get("AIRLABS_API_KEY_2", "")))}
-TIMEZONE = {repr(str(existing.get("TIMEZONE", "America/Los_Angeles")))}
+LOCAL_AIRPORTS = {repr(str(existing.get("LOCAL_AIRPORTS") or existing.get("LOCAL_AIRPORT") or ""))}
+OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID") or ""))}
+OPENSKY_CLIENT_SECRET = {repr(str(existing.get("OPENSKY_CLIENT_SECRET") or ""))}
+FLIGHTAWARE_API_KEY = {repr(str(existing.get("FLIGHTAWARE_API_KEY") or ""))}
+AIRLABS_API_KEY = {repr(str(existing.get("AIRLABS_API_KEY") or ""))}
+AIRLABS_API_KEY_2 = {repr(str(existing.get("AIRLABS_API_KEY_2") or ""))}
+TIMEZONE = {repr(str(existing.get("TIMEZONE") or "America/Los_Angeles"))}
 LOADING_LED_ENABLED = {bool(existing.get("LOADING_LED_ENABLED", False))}
-LOADING_LED_GPIO_PIN = {int(existing.get("LOADING_LED_GPIO_PIN", 25))}
+LOADING_LED_GPIO_PIN = {int(existing.get("LOADING_LED_GPIO_PIN") or 25)}
 RAINFALL_ENABLED = {bool(existing.get("RAINFALL_ENABLED", False))}
-FEEDER_MONTHLY_CREDIT = {float(existing.get("FEEDER_MONTHLY_CREDIT", 10.00))}
-AIRLABS_MONTHLY_LIMIT = {int(existing.get("AIRLABS_MONTHLY_LIMIT", 1000))}
-AIRLABS_RESET_DAY = {int(existing.get("AIRLABS_RESET_DAY", 9))}
-AIRLABS2_MONTHLY_LIMIT = {int(existing.get("AIRLABS2_MONTHLY_LIMIT", 1000))}
-AIRLABS2_RESET_DAY = {int(existing.get("AIRLABS2_RESET_DAY", 9))}
-AEROAPI_RESET_DAY = {int(existing.get("AEROAPI_RESET_DAY", 1))}
-ADSBDB_CACHE_TTL = {int(existing.get("ADSBDB_CACHE_TTL", 3600))}
-OPENSKY_CACHE_TTL = {int(existing.get("OPENSKY_CACHE_TTL", 3600))}
-ROUTE_TTL_SCHEDULED = {int(existing.get("ROUTE_TTL_SCHEDULED", 604800))}
-ROUTE_TTL_DEFAULT = {int(existing.get("ROUTE_TTL_DEFAULT", 3600))}
-ROUTE_MISS_TTL = {int(existing.get("ROUTE_MISS_TTL", 300))}
-ROUTE_PAID_MISS_TTL = {int(existing.get("ROUTE_PAID_MISS_TTL", 7200))}
+SCOREBOARD_ENABLED = {bool(existing.get("SCOREBOARD_ENABLED", False))}
+SCOREBOARD_POST_GAME_MINUTES = {int(existing.get("SCOREBOARD_POST_GAME_MINUTES") or 30)}
+SCOREBOARD_GOAL_CELEBRATION_SECONDS = {int(existing.get("SCOREBOARD_GOAL_CELEBRATION_SECONDS") or 30)}
+SCOREBOARD_PRIORITY = {repr(existing.get("SCOREBOARD_PRIORITY") or ["NHL", "NFL", "MLB", "NBA", "MLS"])}
+SCOREBOARD_NHL_ENABLED = {bool(existing.get("SCOREBOARD_NHL_ENABLED", existing.get("SCOREBOARD_ENABLED", True)))}
+SCOREBOARD_NHL_TEAM_ID = {int(existing.get("SCOREBOARD_NHL_TEAM_ID") or existing.get("SCOREBOARD_TEAM_ID") or 0)}
+SCOREBOARD_NHL_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_NHL_TEAM_NAME") or existing.get("SCOREBOARD_TEAM_NAME") or ""))}
+SCOREBOARD_NFL_ENABLED = {bool(existing.get("SCOREBOARD_NFL_ENABLED", False))}
+SCOREBOARD_NFL_TEAM_ID = {int(existing.get("SCOREBOARD_NFL_TEAM_ID") or 0)}
+SCOREBOARD_NFL_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_NFL_TEAM_NAME") or ""))}
+SCOREBOARD_MLB_ENABLED = {bool(existing.get("SCOREBOARD_MLB_ENABLED", False))}
+SCOREBOARD_MLB_TEAM_ID = {int(existing.get("SCOREBOARD_MLB_TEAM_ID") or 0)}
+SCOREBOARD_MLB_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_MLB_TEAM_NAME") or ""))}
+SCOREBOARD_NBA_ENABLED = {bool(existing.get("SCOREBOARD_NBA_ENABLED", False))}
+SCOREBOARD_NBA_TEAM_ID = {int(existing.get("SCOREBOARD_NBA_TEAM_ID") or 0)}
+SCOREBOARD_NBA_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_NBA_TEAM_NAME") or ""))}
+SCOREBOARD_MLS_ENABLED = {bool(existing.get("SCOREBOARD_MLS_ENABLED", False))}
+SCOREBOARD_MLS_TEAM_ID = {int(existing.get("SCOREBOARD_MLS_TEAM_ID") or 0)}
+SCOREBOARD_MLS_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_MLS_TEAM_NAME") or ""))}
+FEEDER_MONTHLY_CREDIT = {float(existing.get("FEEDER_MONTHLY_CREDIT") or 10.00)}
+AIRLABS_MONTHLY_LIMIT = {int(existing.get("AIRLABS_MONTHLY_LIMIT") or 1000)}
+AIRLABS_RESET_DAY = {int(existing.get("AIRLABS_RESET_DAY") or 9)}
+AIRLABS2_MONTHLY_LIMIT = {int(existing.get("AIRLABS2_MONTHLY_LIMIT") or 1000)}
+AIRLABS2_RESET_DAY = {int(existing.get("AIRLABS2_RESET_DAY") or 9)}
+AEROAPI_RESET_DAY = {int(existing.get("AEROAPI_RESET_DAY") or 1)}
+ADSBDB_CACHE_TTL = {int(existing.get("ADSBDB_CACHE_TTL") or 3600)}
+OPENSKY_CACHE_TTL = {int(existing.get("OPENSKY_CACHE_TTL") or 3600)}
+ROUTE_TTL_SCHEDULED = {int(existing.get("ROUTE_TTL_SCHEDULED") or 604800)}
+ROUTE_TTL_DEFAULT = {int(existing.get("ROUTE_TTL_DEFAULT") or 3600)}
+ROUTE_MISS_TTL = {int(existing.get("ROUTE_MISS_TTL") or 300)}
+ROUTE_PAID_MISS_TTL = {int(existing.get("ROUTE_PAID_MISS_TTL") or 7200)}
 """
     # Preserve any extra keys not managed by this template (e.g. custom user keys)
     for k, v in existing.items():
@@ -285,32 +359,60 @@ def index():
 @app.route("/api/config", methods=["GET"])
 def get_config():
     try:
-        return jsonify(read_config())
+        cfg = read_config()
+        # Never send real secrets to the browser — mask them. write_config() treats the
+        # sentinel (or empty) as "unchanged", so the masked value round-trips safely on save.
+        for _k in _SENSITIVE_KEYS:
+            if cfg.get(_k):
+                cfg[_k] = _SECRET_SENTINEL
+        return jsonify(cfg)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/config/reveal", methods=["GET"])
+def reveal_secret():
+    # Return the real value of ONE sensitive field, on explicit user request (the eye button).
+    # Secrets are masked in GET /api/config by default; this is the opt-in, one-key-at-a-time
+    # reveal — never auto-loaded into the page. LAN-trusted (no auth by design).
+    key = request.args.get("key", "")
+    if key not in _SENSITIVE_KEYS:
+        return jsonify({"error": "not a revealable field"}), 400
+    try:
+        return jsonify({"value": read_config().get(key, "")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+_restart_lock = threading.Lock()
+
+def _trigger_restart():
+    """Restart the display service once, debounced — rapid saves can't spawn racing restarts."""
+    def _do_restart():
+        if not _restart_lock.acquire(blocking=False):
+            return  # a restart is already in flight
+        try:
+            subprocess.run(
+                ["sudo", "/usr/bin/systemctl", "restart", "FlightTracker"],
+                check=True, capture_output=True, timeout=15,
+            )
+            _log("[web] service restarted via config save")
+        except Exception as e:
+            _log(f"[web] ERROR: service restart failed: {e}")
+        finally:
+            _restart_lock.release()
+    threading.Thread(target=_do_restart, daemon=True).start()
 
 
 @app.route("/api/config", methods=["POST"])
 def post_config():
     try:
-        data = request.json
+        data = request.get_json(force=True, silent=True)
         if not isinstance(data, dict):
             return jsonify({"error": "Invalid payload"}), 400
         write_config(data)
         if data.get("restart"):
-            # Run in a daemon thread so the HTTP response returns immediately,
-            # but log any sudo/systemctl failure rather than silently ignoring it.
-            import threading
-            def _do_restart():
-                try:
-                    subprocess.run(
-                        ["sudo", "/usr/bin/systemctl", "restart", "FlightTracker"],
-                        check=True, capture_output=True, timeout=15,
-                    )
-                    _log("[web] service restarted via config save")
-                except Exception as e:
-                    _log(f"[web] ERROR: service restart failed: {e}")
-            threading.Thread(target=_do_restart, daemon=True).start()
+            _trigger_restart()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -335,7 +437,7 @@ def apis_toggle():
     Body: { "api": "adsbdb"|"opensky"|"airlabs"|"flightaware" }
     Omit body (or send {}) to toggle the combined paid-API kill-switch (legacy).
     """
-    data = request.json or {}
+    data = request.get_json(force=True, silent=True) or {}
     api  = data.get("api", "").lower()
 
     if api in _API_FLAGS:
@@ -351,6 +453,9 @@ def apis_toggle():
             "api":     api,
             "enabled": not flag.exists(),
         })
+
+    if api:
+        return jsonify({"ok": False, "error": f"unknown api: {api}"}), 400
 
     # Legacy: no api → toggle the combined kill-switch
     if APIS_DISABLED_FLAG.exists():
@@ -369,7 +474,7 @@ def cache_clear():
     Body: { "api": "adsbdb"|"opensky"|"airlabs"|"flightaware"|"resolved"|"all" }
     Returns: { "ok": true, "deleted": N }
     """
-    data = request.json or {}
+    data = request.get_json(force=True, silent=True) or {}
     api  = (data.get("api") or "").lower()
 
     # Cache keys for airlabs1 are 'airlabs:{cs}'; for airlabs2 'airlabs2:{cs}'.
@@ -383,6 +488,8 @@ def cache_clear():
         "airlabs2":    "DELETE FROM cache WHERE cache_type='route' AND "
                        "(key LIKE 'airlabs2:%' OR source LIKE '%airlabs2%')",
         "flightaware": "DELETE FROM cache WHERE cache_type='aeroapi'",
+        "fr24":        "DELETE FROM cache WHERE cache_type='route' AND "
+                       "(key LIKE 'fr24:%' OR source='fr24')",
         "resolved":    "DELETE FROM cache WHERE cache_type='resolved'",
         "all":         "DELETE FROM cache WHERE cache_type IN ('route','aeroapi','resolved')",
     }
@@ -416,7 +523,7 @@ def cache_clear_entry():
     Body:    { "value": "N9003B" }  or  { "value": "SWA1230" }
     Returns: { "ok": true, "deleted": N, "found_as": "aircraft type|route|..." }
     """
-    data  = request.json or {}
+    data  = request.get_json(force=True, silent=True) or {}
     value = (data.get("value") or "").strip().upper()
     if not value:
         return jsonify({"error": "value required"}), 400
@@ -447,7 +554,7 @@ def cache_clear_entry():
         #    Keys may be bare (SWA1230), airlabs-prefixed (airlabs:SWA1230),
         #    or airlabs2-prefixed (airlabs2:SWA1230).
         route_deleted = 0
-        for key in [value, f"airlabs:{value}", f"airlabs2:{value}"]:
+        for key in [value, f"airlabs:{value}", f"airlabs2:{value}", f"fr24:{value}"]:
             route_deleted += conn.execute(
                 "DELETE FROM cache WHERE UPPER(key)=? "
                 "AND cache_type IN ('route','aeroapi','resolved','paid_miss')",
@@ -476,6 +583,7 @@ def cache_stats():
     participating API bucket so the totals reflect true cache coverage.
     """
     now = int(time.time())
+    conn = None
     try:
         conn = sqlite3.connect(str(DB_FILE))
         conn.execute("PRAGMA journal_mode=WAL")
@@ -484,11 +592,13 @@ def cache_stats():
             "SELECT cache_type, source, COUNT(*) cnt FROM cache WHERE expires_at>? GROUP BY cache_type, source",
             (now,)
         ).fetchall()
-        conn.close()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
-    counts = {"adsbdb": 0, "opensky": 0, "airlabs": 0, "airlabs2": 0, "flightaware": 0, "resolved": 0}
+    counts = {"adsbdb": 0, "opensky": 0, "airlabs": 0, "airlabs2": 0, "flightaware": 0, "fr24": 0, "resolved": 0}
     for r in rows:
         ct, src = r["cache_type"], r["source"] or ""
         cnt = r["cnt"]
@@ -503,6 +613,7 @@ def cache_stats():
             if "opensky"  in parts: counts["opensky"]  += cnt
             if "airlabs"  in parts: counts["airlabs"]  += cnt
             if "airlabs2" in parts: counts["airlabs2"] += cnt
+            if "fr24"     in parts: counts["fr24"]     += cnt
     return jsonify(counts)
 
 
@@ -525,7 +636,7 @@ def combined_status():
             capture_output=True, text=True, timeout=5,
         )
         running = svc.stdout.strip() == "active"
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         running = False
     return jsonify({
         "running": running,
@@ -631,10 +742,10 @@ def _db_stats(date_from: str, date_to: str, today: str | None = None) -> dict | 
                 (today,),
             ).fetchall()
             today_ac_rows = conn.execute(
-                "SELECT api_name, count FROM api_calls WHERE date = ?",
+                "SELECT api_name, SUM(count) total FROM api_calls WHERE date = ? GROUP BY api_name",
                 (today,),
             ).fetchall()
-            today_ac = {r["api_name"]: r["count"] for r in today_ac_rows}
+            today_ac = {r["api_name"]: r["total"] for r in today_ac_rows}
 
     except Exception as exc:
         _log(f"[web] DB stats error: {exc}")
@@ -898,7 +1009,7 @@ def flight_stats():
             history.append({
                 "date":    d,
                 "total":   db["day_counts"].get(d, 0),
-                "airlabs": day_ac.get("airlabs", 0),
+                "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
                 "aeroapi": day_ac.get("aeroapi", 0),
             })
             cur_date += timedelta(days=1)
@@ -909,7 +1020,7 @@ def flight_stats():
             "range_from": range_from,
             "range_to":   range_to,
             "total":      db["range_total"],
-            "api_calls":  {"airlabs": db["range_api_calls"].get("airlabs", 0),
+            "api_calls":  {"airlabs": db["range_api_calls"].get("airlabs", 0) + db["range_api_calls"].get("airlabs2", 0),
                            "aeroapi": db["range_api_calls"].get("aeroapi", 0)},
             "top_today":  db["range_top"],
             "rollup":     db["rollup"],
@@ -942,8 +1053,8 @@ def flight_stats():
         "range_from":       cutoff,
         "range_to":         today,
         "total":            db["today_total"],
-        "api_calls":        {"airlabs": ac.get("airlabs", 0),  "aeroapi": ac.get("aeroapi", 0)},
-        "range_api_calls":  {"airlabs": rac.get("airlabs", 0), "aeroapi": rac.get("aeroapi", 0)},
+        "api_calls":        {"airlabs": ac.get("airlabs", 0) + ac.get("airlabs2", 0),  "aeroapi": ac.get("aeroapi", 0)},
+        "range_api_calls":  {"airlabs": rac.get("airlabs", 0) + rac.get("airlabs2", 0), "aeroapi": rac.get("aeroapi", 0)},
         "top_today":        db["today_top"],
         "rollup":           db["rollup"],
         "history":          history,
@@ -984,7 +1095,7 @@ def stats_search():
             or q in s["destination"]
         ]
         total_count = len(sightings)
-        sightings = sightings[:limit]
+        sightings = sightings[offset:offset + limit]
         source = "log"
     else:
         sightings, total_count = db_result
@@ -1061,6 +1172,81 @@ def free_api_accuracy():
             conn.close()
 
 
+@app.route("/api/ga-accuracy", methods=["GET"])
+def ga_accuracy():
+    """Accuracy report: adsbdb / OpenSky (free) vs. FR24 route cross-checks for GA (N-number) aircraft."""
+    if not DB_FILE.exists():
+        return jsonify({"error": "Database unavailable"}), 503
+    conn = None
+    try:
+        today      = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+        thirty_ago = (datetime.now(_PACIFIC) - timedelta(days=29)).strftime("%Y-%m-%d")
+        conn = sqlite3.connect(str(DB_FILE))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+
+        # Silently return empty data if the table doesn't exist yet
+        # (e.g. running an old DB before the migration has run).
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "ga_free_api_checks" not in tables:
+            return jsonify({
+                "adsbdb":  {"today": {"total": 0}, "thirty_day": {"total": 0}, "last_mismatches": [], "daily": []},
+                "opensky": {"today": {"total": 0}, "thirty_day": {"total": 0}, "last_mismatches": [], "daily": []},
+            })
+
+        def _row_stats(row):
+            total      = row["total"]      or 0
+            matches    = int(row["matches"]    or 0)
+            mismatches = int(row["mismatches"] or 0)
+            pct        = round(matches / total * 100, 1) if total else None
+            return {"total": total, "matches": matches, "mismatches": mismatches, "pct": pct}
+
+        def _api_stats(api_name):
+            t = conn.execute(
+                """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
+                   FROM ga_free_api_checks WHERE date=? AND free_api=?""",
+                (today, api_name),
+            ).fetchone()
+            t30 = conn.execute(
+                """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
+                   FROM ga_free_api_checks WHERE date>=? AND free_api=?""",
+                (thirty_ago, api_name),
+            ).fetchone()
+            mm = conn.execute(
+                """SELECT seen_at, registration, callsign, free_route, fr24_route
+                   FROM ga_free_api_checks WHERE matched=0 AND free_api=?
+                   ORDER BY id DESC LIMIT 10""",
+                (api_name,),
+            ).fetchall()
+            daily = conn.execute(
+                """SELECT date, COUNT(*) total, SUM(matched) matches
+                   FROM ga_free_api_checks WHERE date>=? AND free_api=?
+                   GROUP BY date ORDER BY date""",
+                (thirty_ago, api_name),
+            ).fetchall()
+            return {
+                "today":           _row_stats(t),
+                "thirty_day":      _row_stats(t30),
+                "last_mismatches": [dict(r) for r in mm],
+                "daily":           [{"date": r["date"], "total": r["total"],
+                                     "matches": r["matches"] or 0} for r in daily],
+            }
+
+        return jsonify({
+            "adsbdb":  _api_stats("adsbdb"),
+            "opensky": _api_stats("opensky"),
+        })
+    except Exception as e:
+        _log(f"[server] ga-accuracy error: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.route("/api/display", methods=["GET"])
 def display_status():
     try:
@@ -1069,7 +1255,7 @@ def display_status():
             capture_output=True, text=True, timeout=5,
         )
         active = svc.stdout.strip() == "active"
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         active = False
     if not active:
         return jsonify({"paused": True})
@@ -1146,6 +1332,239 @@ def api_weather():
     return jsonify({"temp": temp, "unit": unit_sym})
 
 
+# In-process scoreboard cache so rapid page refreshes don't hammer the NHL API.
+# game_ended_at: unix timestamp when FINAL/OFF was first seen this session (None = not yet final).
+# Persists in the server process so page refreshes don't reset the post-game countdown.
+_scoreboard_cache      = {"game": None, "team_name": "VGK", "sport_key": "NHL", "enabled": True, "ts": 0.0, "game_ended_at": None}
+_scoreboard_cache_lock = threading.Lock()
+_SCOREBOARD_CACHE_TTL  = 30   # seconds
+
+# File that persists game_ended_at across web-service restarts (keyed by game_id
+# so yesterday's game doesn't suppress today's).
+_GAME_ENDED_AT_FILE = Path("/tmp/ft_game_ended_at.json")
+
+
+def _load_persisted_game_ended_at(game_id) -> float | None:
+    """Return the persisted ended_at timestamp for game_id, or None if missing/stale."""
+    try:
+        data = json.loads(_GAME_ENDED_AT_FILE.read_text())
+        if data.get("game_id") == game_id:
+            return float(data["ended_at"])
+    except Exception:
+        pass
+    return None
+
+
+def _persist_game_ended_at(game_id, ended_at: float) -> None:
+    """Write game_ended_at to disk so it survives web-service restarts."""
+    try:
+        tmp = Path(str(_GAME_ENDED_AT_FILE) + ".tmp")
+        tmp.write_text(json.dumps({"game_id": game_id, "ended_at": ended_at}))
+        tmp.replace(_GAME_ENDED_AT_FILE)
+    except Exception:
+        pass
+
+
+def _clear_persisted_game_ended_at() -> None:
+    """Remove the persisted ended_at file (game is no longer final)."""
+    _GAME_ENDED_AT_FILE.unlink(missing_ok=True)
+
+
+def _fetch_scoreboard_data():
+    """
+    Fetch today's highest-priority active game across all configured sports.
+    Returns (game, team_name, sport_key, enabled).
+      game       — dict or None
+      team_name  — abbreviation for the team with the active game
+      sport_key  — e.g. "NHL", "NFL", "MLB", "NBA", "MLS"
+      enabled    — True if at least one sport is configured and master switch is on
+    """
+    cfg = {}
+    try:
+        cfg = read_config()
+    except Exception:
+        pass
+
+    # Master switch — default True when key is absent so configs written before
+    # this feature was added keep working until the user saves via the web UI.
+    if not cfg.get("SCOREBOARD_ENABLED", True):
+        return None, "VGK", "NHL", False
+
+    tz_name = cfg.get("TIMEZONE", "America/Los_Angeles")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = None
+
+    # Backward-compat: old SCOREBOARD_ENABLED / SCOREBOARD_TEAM_ID map to NHL
+    def _b(key, fallback_key=None, default=None):
+        v = cfg.get(key)
+        if v is None and fallback_key:
+            v = cfg.get(fallback_key)
+        return v if v is not None else default
+
+    priority = cfg.get("SCOREBOARD_PRIORITY", ["NHL", "NFL", "MLB", "NBA", "MLS"])
+
+    _SPORT_DEFS = {
+        "NHL": {
+            "enabled":   bool(_b("SCOREBOARD_NHL_ENABLED", "SCOREBOARD_ENABLED",   True)),
+            "team_id":   int(_b("SCOREBOARD_NHL_TEAM_ID",  "SCOREBOARD_TEAM_ID",   0)),
+            "team_name": str(_b("SCOREBOARD_NHL_TEAM_NAME","SCOREBOARD_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_nhl(tid, tz),
+        },
+        "NFL": {
+            "enabled":   bool(cfg.get("SCOREBOARD_NFL_ENABLED", False)),
+            "team_id":   int(cfg.get("SCOREBOARD_NFL_TEAM_ID",  0)),
+            "team_name": str(cfg.get("SCOREBOARD_NFL_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_espn("football/nfl", tid, tz),
+        },
+        "MLB": {
+            "enabled":   bool(cfg.get("SCOREBOARD_MLB_ENABLED", False)),
+            "team_id":   int(cfg.get("SCOREBOARD_MLB_TEAM_ID",  0)),
+            "team_name": str(cfg.get("SCOREBOARD_MLB_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_mlb(tid, tz),
+        },
+        "NBA": {
+            "enabled":   bool(cfg.get("SCOREBOARD_NBA_ENABLED", False)),
+            "team_id":   int(cfg.get("SCOREBOARD_NBA_TEAM_ID",  0)),
+            "team_name": str(cfg.get("SCOREBOARD_NBA_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_espn("basketball/nba", tid, tz),
+        },
+        "MLS": {
+            "enabled":   bool(cfg.get("SCOREBOARD_MLS_ENABLED", False)),
+            "team_id":   int(cfg.get("SCOREBOARD_MLS_TEAM_ID",  0)),
+            "team_name": str(cfg.get("SCOREBOARD_MLS_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_espn("soccer/usa.1", tid, tz),
+        },
+    }
+
+    any_enabled = any(
+        _SPORT_DEFS[k]["enabled"] and _SPORT_DEFS[k]["team_id"]
+        for k in priority if k in _SPORT_DEFS
+    )
+
+    # Check sports in priority order; return first active (LIVE/CRIT) game,
+    # then fall back to first FINAL game, then the first game found at all.
+    best_live      = None
+    best_live_name = "VGK"
+    best_live_key  = "NHL"
+    best_final      = None
+    best_final_name = "VGK"
+    best_final_key  = "NHL"
+
+    for league in priority:
+        spec = _SPORT_DEFS.get(league)
+        if not spec or not spec["enabled"] or not spec["team_id"]:
+            continue
+        try:
+            game = spec["fetch_fn"](spec["team_id"])
+        except Exception:
+            game = None
+        if game is None:
+            continue
+        state = game.get("state", "FUT")
+        if state in ("LIVE", "CRIT") and best_live is None:
+            best_live      = game
+            best_live_name = spec["team_name"]
+            best_live_key  = league
+        if state in ("FINAL", "OFF") and best_final is None:
+            best_final      = game
+            best_final_name = spec["team_name"]
+            best_final_key  = league
+
+    if best_live:
+        return best_live, best_live_name, best_live_key, any_enabled
+    if best_final:
+        return best_final, best_final_name, best_final_key, any_enabled
+
+    # No active game — return None so the cache signals no scoreboard
+    return None, "VGK", "NHL", any_enabled
+
+
+@app.route("/api/scoreboard", methods=["GET"])
+def api_scoreboard():
+    """Return today's game state for the configured scoreboard team (cached 30 s)."""
+    now = time.time()
+    with _scoreboard_cache_lock:
+        cached = _scoreboard_cache.copy()
+    if now - cached["ts"] < _SCOREBOARD_CACHE_TTL:
+        return jsonify({
+            "game":          cached["game"],
+            "team_name":     cached["team_name"],
+            "sport_key":     cached.get("sport_key", "NHL"),
+            "enabled":       cached["enabled"],
+            "game_ended_at": cached.get("game_ended_at"),
+        })
+
+    try:
+        game, team_name, sport_key, enabled = _fetch_scoreboard_data()
+    except Exception:
+        game, team_name, sport_key, enabled = None, "VGK", "NHL", True
+
+    # Track when the game first became FINAL/OFF so the post-game countdown
+    # survives page refreshes AND web-service restarts.
+    # File I/O (read/persist) is done outside the lock to avoid blocking other
+    # threads; the lock is then held for a single atomic read-compute-write.
+    state   = game["state"] if game else None
+    game_id = game.get("game_id") if game else None
+
+    # Determine game_ended_at before acquiring the lock so file I/O is cheap.
+    if state in ("FINAL", "OFF") and game_id:
+        # Peek at the cached value without the lock (worst case: two threads
+        # both compute the same value on the very first post-game poll).
+        prev_ended_at_peek = _scoreboard_cache.get("game_ended_at")
+        if prev_ended_at_peek is None:
+            # Try the persisted file first (survives service restart).
+            persisted = _load_persisted_game_ended_at(game_id)
+            if persisted is None:
+                # Estimate from game start rather than using now, so a service
+                # restart doesn't reset the 30-min window for an already-over game.
+                # Use a period-aware buffer — err on the LATER side so we never
+                # hide the score before the real post-game window expires.
+                #   regulation (period ≤ 3): start + 3 h  (~2.5 h typical)
+                #   OT / SO   (period  > 3): start + 4 h  (conservative for multi-OT)
+                try:
+                    start_utc = game.get("start_time_utc", "")
+                    if start_utc:
+                        start_ts = datetime.fromisoformat(
+                            start_utc.replace("Z", "+00:00")
+                        ).timestamp()
+                        period = game.get("period", 0) or 0
+                        buffer = 4 * 3600 if period > 3 else 3 * 3600
+                        persisted = start_ts + buffer
+                    else:
+                        persisted = now
+                except Exception:
+                    persisted = now
+                _persist_game_ended_at(game_id, persisted)
+            new_ended_at = persisted
+        else:
+            new_ended_at = prev_ended_at_peek
+    else:
+        new_ended_at = None  # live / no game — reset the timer
+        _clear_persisted_game_ended_at()
+
+    with _scoreboard_cache_lock:
+        # If another thread already set game_ended_at, keep the earlier value.
+        existing = _scoreboard_cache.get("game_ended_at")
+        if new_ended_at is not None and existing is not None:
+            game_ended_at = min(existing, new_ended_at)
+        else:
+            game_ended_at = new_ended_at  # None or first-set value
+        _scoreboard_cache.update({
+            "game": game, "team_name": team_name, "sport_key": sport_key,
+            "enabled": enabled, "ts": now, "game_ended_at": game_ended_at,
+        })
+    return jsonify({
+        "game":         game,
+        "team_name":    team_name,
+        "sport_key":    sport_key,    # e.g. "NHL", "NFL", "MLB", "NBA", "MLS"
+        "enabled":      enabled,
+        "game_ended_at": game_ended_at,   # unix timestamp or null
+    })
+
+
+
 @app.route("/api/service", methods=["GET"])
 def service_status():
     try:
@@ -1154,7 +1573,7 @@ def service_status():
             capture_output=True, text=True, timeout=5,
         )
         running = result.stdout.strip() == "active"
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         running = False
     return jsonify({"running": running})
 
@@ -1172,6 +1591,8 @@ def service_stop():
         return jsonify({"error": "systemctl timed out"}), 504
     except subprocess.CalledProcessError as e:
         return jsonify({"error": (e.stderr or b"").decode()}), 500
+    except OSError as e:
+        return jsonify({"error": str(e)}), 503
 
 
 @app.route("/api/service/start", methods=["POST"])
@@ -1187,13 +1608,17 @@ def service_start():
         return jsonify({"error": "systemctl timed out"}), 504
     except subprocess.CalledProcessError as e:
         return jsonify({"error": (e.stderr or b"").decode()}), 500
+    except OSError as e:
+        return jsonify({"error": str(e)}), 503
 
 
 def _billing_period_start(reset_day):
     """Return the current billing period start as YYYY-MM-DD."""
     today = datetime.now(_PACIFIC)
     if today.day >= reset_day:
-        return today.replace(day=reset_day).strftime("%Y-%m-%d")
+        # Clamp to actual days in this month (e.g. reset_day=31 in February)
+        this_month_days = calendar.monthrange(today.year, today.month)[1]
+        return today.replace(day=min(reset_day, this_month_days)).strftime("%Y-%m-%d")
     first_of_month = today.replace(day=1)
     last_month = first_of_month - timedelta(days=1)
     # Clamp reset_day to actual days in last month (defensive for reset_day > 28)
@@ -1290,7 +1715,7 @@ def api_usage_adjust():
       - airlabs   → value is call count (integer)
       - flightaware → value is dollar spend (float, e.g. 4.253)
     """
-    data = request.json or {}
+    data = request.get_json(force=True, silent=True) or {}
     api  = data.get("api")
     try:
         value = float(data.get("value", -1))
@@ -1395,9 +1820,9 @@ def api_stack():
             },
             {
                 "priority":     3,
-                "name":         "AirLabs",
+                "name":         "AirLabs 1",
                 "api_key":      "airlabs",
-                "type":         "Route data (real-time, by callsign)",
+                "type":         "Route data (real-time, by callsign — primary key)",
                 "url":          "https://airlabs.co",
                 "cost":         f"Free — {int(cfg.get('AIRLABS_MONTHLY_LIMIT', AIRLABS_MONTHLY_LIMIT)):,} calls/month",
                 "key_set":      bool(cfg.get("AIRLABS_API_KEY")),
@@ -1405,9 +1830,10 @@ def api_stack():
                 "disabled":     AIRLABS_DISABLED_FLAG.exists(),
                 "cache_ttl":    _sched_ttl,
                 "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
-                "notes":    "Handles through-traffic that OpenSky couldn't auto-trust. "
+                "notes":    "Primary AirLabs key. Called first for commercial routes. "
                             "Returns airport coordinates for geometry plausibility. "
-                            f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
+                            "Non-local routes cached at miss TTL (5 min) — never persisted long-term. "
+                            f"Local route cache TTL: {_fmt_ttl(_default_ttl)}. "
                             f"Per-callsign miss cache: {_fmt_ttl(_miss_ttl)}. "
                             "Falls back to AirLabs 2 automatically when this key's quota is exhausted.",
             },
@@ -1443,13 +1869,35 @@ def api_stack():
                 "disabled":     AEROAPI_DISABLED_FLAG.exists(),
                 "cache_ttl":    _sched_ttl,
                 "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
-                "notes":    "True last resort — only called when all free sources and both AirLabs "
-                            "keys return no route. Cascades automatically on 402 (credit exhausted) or 429. "
+                "notes":    "Called when all free sources and both AirLabs keys return no route. "
+                            "Falls back to FR24 (§5) if still no result. "
+                            "Cascades automatically on 402 (credit exhausted) or 429. "
                             f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
                             f"Miss suppression: {_fmt_ttl(_paid_miss)}.",
             },
             {
                 "priority":     6,
+                "name":         "FlightRadar24",
+                "api_key":      "fr24",
+                "type":         "Route data (real-time, free — unofficial API)",
+                "url":          "https://www.flightradar24.com",
+                "cost":         "Free — no key required",
+                "key_set":      False,
+                "requires_key": False,
+                "disabled":     FR24_DISABLED_FLAG.exists(),
+                "cache_ttl":    _default_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_default_ttl),
+                "notes":    "Serves three roles: §1 first resort for GA (N-number) aircraft — "
+                            "real-time registration lookup, more reliable than adsbdb's static DB. "
+                            "§5 last resort for commercial flights — called only when all paid APIs "
+                            "return no route. Step 5 of the aircraft type lookup chain — queries by "
+                            "registration when all static databases miss. "
+                            "Not affected by the APIs On/Off toggle (free). "
+                            f"Route cache TTL: {_fmt_ttl(_sched_ttl)} commercial / "
+                            f"{_fmt_ttl(_default_ttl)} GA / {_fmt_ttl(_miss_ttl)} miss.",
+            },
+            {
+                "priority":     0,
                 "name":         "LOCAL_AIRPORTS trust filter",
                 "api_key":      None,
                 "type":         "Trust filter (not a data source)",
@@ -1477,8 +1925,9 @@ def api_stack():
                 "cache_ttl":    86400,
                 "cache_ttl_fmt": "24h",
                 "notes":    "Used for aircraft type/model (e.g. 'BOEING 737-800'). "
-                            "Separate from the route chain; falls back to adsbdb aircraft endpoint. "
-                            "Results cached 24 hr.",
+                            "Step 1 and 4 of a 5-step type lookup chain: "
+                            "airplanes.live (by hex) → adsbdb → OpenSky metadata → "
+                            "airplanes.live (by reg) → FR24. Results cached 24 hr.",
             },
         ],
         "ttls": {
@@ -1527,7 +1976,7 @@ def save_overrides():
     """Replace the full override rules list in SQLite and bump the version counter."""
     conn = None
     try:
-        data = request.json
+        data = request.get_json(force=True, silent=True)
         if not isinstance(data, list):
             return jsonify({"error": "Expected a JSON array"}), 400
         for rule in data:
@@ -1576,15 +2025,16 @@ def save_overrides():
 def test_flight():
     """
     Run a full no-cache API lookup for testing.  Same pipeline as a real
-    overhead flight — override rules, adsbdb, OpenSky, AirLabs, AeroAPI —
-    with two exceptions: no cache reads/writes, and the LOCAL_AIRPORTS
-    heuristic is skipped.  All log lines are prefixed [TEST:{callsign}].
+    overhead flight — override rules, adsbdb, OpenSky, AirLabs, AeroAPI,
+    including the same LOCAL_AIRPORTS trust filter.  The only difference is
+    cache handling (no-cache mode hits every API fresh).  All log lines are
+    prefixed [TEST:{callsign}].
 
     The result is also written to /tmp/ft_test_display.json so the next
     grab_data() cycle injects the flight into the LED matrix for 30 s.
     """
     try:
-        data = request.json or {}
+        data = request.get_json(force=True, silent=True) or {}
         callsign = (data.get("callsign") or "").strip().upper()
         if not callsign:
             return jsonify({"error": "callsign is required"}), 400
@@ -1593,7 +2043,6 @@ def test_flight():
 
         # Lazy import — overhead.py is already loaded by flight-tracker.py
         # when running as a service, so this just retrieves the cached module.
-        import sys
         if str(BASE_DIR) not in sys.path:
             sys.path.insert(0, str(BASE_DIR))
         from utilities.overhead import run_test_lookup
@@ -1622,7 +2071,7 @@ def clear_test_flight():
 def log_history():
     try:
         result = subprocess.run(
-            ["tail", "-n", "500", str(LOG_PATH)], capture_output=True, text=True
+            ["tail", "-n", "500", str(LOG_PATH)], capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
             return jsonify({"lines": [], "error": result.stderr or "tail failed"})
@@ -1640,12 +2089,17 @@ def log_stream():
             with open(LOG_PATH) as f:
                 log_inode = os.fstat(f.fileno()).st_ino
                 f.seek(0, 2)
+                _last_beat = time.time()
                 while True:
                     line = f.readline()
                     if line:
                         yield f"data: {line.rstrip()}\n\n"
                     else:
-                        # Detect log rotation (inode change)
+                        # Heartbeat through quiet periods keeps the SSE channel alive (and
+                        # makes waitress / any proxy flush); also detect log rotation.
+                        if time.time() - _last_beat > 10:
+                            _last_beat = time.time()
+                            yield ": keepalive\n\n"
                         try:
                             if os.stat(LOG_PATH).st_ino != log_inode:
                                 break  # generator ends; EventSource client auto-reconnects
@@ -1665,4 +2119,11 @@ def log_stream():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
+    _host, _port = "0.0.0.0", 5000
+    try:
+        from waitress import serve
+        _log("[web] serving via waitress (production WSGI, bounded thread pool)")
+        serve(app, host=_host, port=_port, threads=8, channel_timeout=120)
+    except ImportError:
+        _log("[web] waitress not installed — falling back to the Flask dev server")
+        app.run(host=_host, port=_port, debug=False, threaded=True, use_reloader=False)

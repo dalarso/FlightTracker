@@ -156,6 +156,20 @@ SQLite with WAL mode and NORMAL sync (SD-card friendly). Two persistent connecti
 
 A Flask application running as a separate systemd service (`FlightTrackerWeb.service`). Provides:
 
+### Security & network exposure
+
+The web UI is a convenience dashboard for a **trusted LAN** — it has **no password** by design. Harden it for your network:
+
+- **Binds `0.0.0.0:5000`** (reachable from any device on your LAN). Keep the Pi behind your router/firewall — do **not** port-forward `:5000` to the internet.
+- **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The dashboard's 👁 button reveals one key on demand (one request per field).
+- **CSRF-guarded:** every state-changing request must carry an `X-Requested-With` header (the dashboard sends it automatically), so a malicious page you happen to visit can't drive the dashboard through your browser.
+- **Production server:** served by [`waitress`](https://pypi.org/project/waitress/) when installed (it's in `requirements.txt`); falls back to the Flask dev server otherwise.
+- **Service control needs sudo** (the Save & Restart and service buttons run `systemctl`). Grant a **narrow** rule — never `NOPASSWD: ALL`:
+  ```
+  # sudo visudo -f /etc/sudoers.d/flighttracker
+  pi ALL=(root) NOPASSWD: /usr/bin/systemctl start FlightTracker, /usr/bin/systemctl stop FlightTracker, /usr/bin/systemctl restart FlightTracker
+  ```
+
 ### Live Display Tab
 - Current overhead flights with route, aircraft type, and registration
 - Leaflet map showing the configured zone

@@ -1,9 +1,11 @@
 import os
 import sys
+import time
 
 from setup import frames
 from utilities.animator import Animator
 from utilities.overhead import Overhead
+from utilities import planeding
 
 from scenes.weather import WeatherScene
 from scenes.flightdetails import FlightDetailsScene
@@ -14,13 +16,14 @@ from scenes.clock import ClockScene
 from scenes.planedetails import PlaneDetailsScene
 from scenes.day import DayScene
 from scenes.date import DateScene
+from scenes.sportscore import SportScoreScene
 
 from rgbmatrix import graphics
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 
 def callsigns_match(flights_a, flights_b):
-    return {f["callsign"] for f in flights_a} == {f["callsign"] for f in flights_b}
+    return {f.get("callsign") for f in flights_a} == {f.get("callsign") for f in flights_b}
 
 
 try:
@@ -74,6 +77,7 @@ class Display(
     ClockScene,
     DayScene,
     DateScene,
+    SportScoreScene,
     Animator,
 ):
     def __init__(self):
@@ -145,9 +149,19 @@ class Display(
             data_is_different = not callsigns_match(self._data, new_data)
 
             if data_is_different:
+                # Capture what's already on screen BEFORE swapping in the new set,
+                # so the ding fires only for genuinely new aircraft (not planes leaving).
+                _prev_callsigns = {f.get("callsign") for f in self._data}
                 self._data_index = 0
                 self._data_all_looped = False
                 self._data = new_data
+                # Fire-and-forget LAN ding: a new plane just went up on the matrix.
+                try:
+                    _new = [f for f in new_data if f.get("callsign") not in _prev_callsigns]
+                    if _new:
+                        planeding.send_ding(_new[0], len(new_data))
+                except Exception:
+                    pass
 
             # Only reset if there's flight data already
             # on the screen, or if there's some new
@@ -159,13 +173,15 @@ class Display(
                 self.reset_scene()
 
     def _reset_idle_scenes(self):
-        """Force clock/date/day/weather to redraw on their next tick."""
+        """Force clock/date/day/weather/sport-score to redraw on their next tick."""
         self._last_time = None
         self._last_date = None
         self._last_day = None
         # WeatherScene tracking — forces temperature and rainfall to erase+redraw
         self._last_temperature_str = None
         self._last_upcoming_rain_and_temp = None
+        # SportScoreScene tracking — forces score to redraw on next tick
+        self._reset_sport_draws()
 
     @Animator.KeyFrame.add(1)
     def sync(self, count):
@@ -207,6 +223,15 @@ class Display(
             self._data_all_looped or len(self._data) <= 1
         ):
             self.overhead.grab_data()
+
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * 2))
+    def ping_plane_ding(self, count):
+        # Heartbeat → desktop listener shows connection status + what's overhead.
+        # Throttled internally to PLANE_DING_PING_SECS; non-blocking and swallowed.
+        try:
+            planeding.send_state(self._data, time.time())
+        except Exception:
+            pass
 
     def run(self):
         try:

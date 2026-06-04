@@ -33,6 +33,10 @@ class FlightDetailsScene(object):
         if len(self._data) == 0:
             return
 
+        # Yield canvas to goal celebration animation
+        if getattr(self, "_goal_celebration_active", False):
+            return
+
         # Clear the whole area
         self.draw_square(
             0,

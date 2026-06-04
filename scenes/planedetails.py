@@ -23,6 +23,10 @@ class PlaneDetailsScene(object):
         if len(self._data) == 0:
             return
 
+        # Yield canvas to goal celebration animation
+        if getattr(self, "_goal_celebration_active", False):
+            return
+
         plane = self._data[self._data_index].get("display_name") or self._data[self._data_index].get("plane", "")
 
         # Draw background

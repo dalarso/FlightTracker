@@ -819,8 +819,12 @@ def _cache_db_set_route(key: str, cache_type: str,
                  olat, olon, dlat, dlon, expires_at, source or ''),
             )
             _cache_conn.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        # A swallowed write here was the leading suspect for stale resolved entries
+        # (Issue B): if the resolved-cache INSERT throws, the route silently re-resolves
+        # every flyover.  Surface it instead of failing invisibly so a genuine DB-write
+        # problem shows up in the log rather than as a phantom cache miss.
+        _log(f"[cache] write failed for {cache_type}:{key} — {type(_e).__name__}: {_e}")
 
 
 def _cache_db_delete_route(key: str, cache_type: str) -> None:
@@ -836,6 +840,65 @@ def _cache_db_delete_route(key: str, cache_type: str) -> None:
             _cache_conn.commit()
     except Exception:
         pass
+
+
+# Expired cache rows are invisible to reads (every SELECT filters `expires_at>?`), but
+# nothing deletes them, so the table grows monotonically on the SD card — bloating the
+# file and the B-trees.  A low-frequency sweep reclaims the space using idx_cache_expires.
+_CACHE_PURGE_INTERVAL_SECS = 6 * 3600
+_last_cache_purge = 0.0
+
+# Retention windows (days) for the historical stats tables, applied by the same sweep.
+# The two accuracy cross-check tables are internal diagnostics → bounded by default so they
+# can't grow forever on the SD card.  `sightings` is user-facing history → kept forever
+# unless the user opts into a window (SIGHTINGS_RETENTION_DAYS > 0).
+try:
+    from config import API_CHECK_RETENTION_DAYS as _API_CHECK_RETENTION_DAYS
+    _API_CHECK_RETENTION_DAYS = int(_API_CHECK_RETENTION_DAYS)
+except (ImportError, NameError, ValueError, TypeError):
+    _API_CHECK_RETENTION_DAYS = 90
+try:
+    from config import SIGHTINGS_RETENTION_DAYS as _SIGHTINGS_RETENTION_DAYS
+    _SIGHTINGS_RETENTION_DAYS = int(_SIGHTINGS_RETENTION_DAYS)
+except (ImportError, NameError, ValueError, TypeError):
+    _SIGHTINGS_RETENTION_DAYS = 0   # 0 = keep all sighting history (default)
+
+
+def _purge_expired_cache() -> None:
+    """Delete expired rows from the cache table.  Behaviour-preserving (reads already
+    ignore expired rows); this only reclaims space + keeps indexes lean.  Time-gated so
+    it runs ~4x/day regardless of caller, and wrapped so it can never crash the poll loop."""
+    global _last_cache_purge
+    _now = time.time()
+    if (_now - _last_cache_purge) < _CACHE_PURGE_INTERVAL_SECS or _cache_conn is None:
+        return
+    _last_cache_purge = _now   # set before the delete so concurrent callers skip
+    try:
+        with _cache_lock:
+            cur = _cache_conn.execute("DELETE FROM cache WHERE expires_at < ?", (int(_now),))
+            _cache_conn.commit()
+            _n = cur.rowcount
+        if _n and _n > 0:
+            _log(f"[cache] purged {_n} expired rows")
+    except Exception as _e:
+        _log(f"[cache] purge failed — {type(_e).__name__}: {_e}")
+
+    # Retention sweep for the historical stats tables (same low-frequency gate, but the
+    # stats connection/lock).  Bounds the internal accuracy tables by default; only touches
+    # the user-facing `sightings` history when SIGHTINGS_RETENTION_DAYS is explicitly set.
+    if _db_conn is not None and (_API_CHECK_RETENTION_DAYS > 0 or _SIGHTINGS_RETENTION_DAYS > 0):
+        try:
+            with _stats_lock:
+                if _API_CHECK_RETENTION_DAYS > 0:
+                    _arg = f"-{_API_CHECK_RETENTION_DAYS} days"
+                    _db_conn.execute("DELETE FROM free_api_checks    WHERE date < date('now', ?)", (_arg,))
+                    _db_conn.execute("DELETE FROM ga_free_api_checks WHERE date < date('now', ?)", (_arg,))
+                if _SIGHTINGS_RETENTION_DAYS > 0:
+                    _db_conn.execute("DELETE FROM sightings WHERE date < date('now', ?)",
+                                     (f"-{_SIGHTINGS_RETENTION_DAYS} days",))
+                _db_conn.commit()
+        except Exception as _e:
+            _log(f"[stats] retention sweep failed — {type(_e).__name__}: {_e}")
 
 
 def _cache_db_get_aircraft(hex_code: str):
@@ -909,7 +972,7 @@ def _cache_db_set_reg(hex_code: str, reg: str) -> None:
 
 def _cache_db_check_paid_miss(callsign: str) -> bool:
     """Return True if callsign has a fresh paid-API-miss entry."""
-    if _cache_conn is None:
+    if _cache_conn is None or getattr(_cache_bypass, "on", False):
         return False
     try:
         with _cache_lock:
@@ -1106,7 +1169,7 @@ def _record_free_api_check(callsign: str, free_route: str,
             if _last and _last[0] == free_route and _last[1] == paid_route:
                 if _now_ts - _last[2] < _FREE_API_CHECK_DEDUP_SECS:
                     return
-            _last_free_api_check[callsign] = (free_route, paid_route, _now_ts)
+            _bounded_put(_last_free_api_check, callsign, (free_route, paid_route, _now_ts))
             _db_conn.execute(
                 """INSERT INTO free_api_checks
                        (seen_at, date, callsign, free_route, paid_route, matched)
@@ -1146,7 +1209,7 @@ def _record_ga_free_api_check(registration: str, callsign: str, free_api: str,
             if _last and _last[0] == free_route and _last[1] == fr24_route:
                 if _now_ts - _last[2] < _FREE_API_CHECK_DEDUP_SECS:
                     return
-            _last_ga_free_api_check[_dedup_key] = (free_route, fr24_route, _now_ts)
+            _bounded_put(_last_ga_free_api_check, _dedup_key, (free_route, fr24_route, _now_ts))
             _db_conn.execute(
                 """INSERT INTO ga_free_api_checks
                        (seen_at, date, registration, callsign, free_api,
@@ -1479,13 +1542,15 @@ def _fr24_route_plausible(plane_lat, plane_lon, o_iata, d_iata):
     return _route_plausible(plane_lat, plane_lon, o[0], o[1], d[0], d[1])
 
 
-# ── Route candidate model + unified selection (structural-refactor scaffold) ──────
+# ── Route candidate model + unified selection ─────────────────────────────────────
 # A source FETCHER produces one _Cand (or None) describing what it found — origin/dest,
 # optional airport coords (for geometry), its source name, and whether it was a live call.
 # It does NOT commit anything.  _select() is the SINGLE place a route is chosen from the
-# gathered candidates.  Built and tested in isolation first (Phase 1); get_route() is
-# migrated onto it in later phases.
-_SHADOW_SELECT = True   # Phase 2: log when _select() disagrees with the live inline logic
+# gathered candidates — sole authority in get_route() as of the Phase-3 flip, validated by
+# a 4-day route shadow soak (1,437/0) + a second ~660/0 live soak, then made permanent: the
+# [flip-check] shadow backstop was retired once it had logged zero disagreements.  The inline
+# per-source commits remain ONLY to short-circuit paid API calls and to complete override-
+# partials (a path _select() intentionally does not handle) — they no longer pick the route.
 _Cand = namedtuple("_Cand", "origin dest olat olon dlat dlon source is_live")
 
 
@@ -1576,6 +1641,22 @@ def _display_src(src: str) -> str:
 # Cross-check dedup: suppress re-recording the same result while a flight is
 # still overhead.  Resets on restart (intentional — fresh start = fresh stats).
 _FREE_API_CHECK_DEDUP_SECS = 1800  # 30 minutes
+_DEDUP_MAP_CAP = 2048              # hard cap on each per-callsign dedup map (24/7 leak guard)
+
+
+def _bounded_put(d: dict, key, value) -> None:
+    """Insert into a module-level per-callsign dedup map, evicting the oldest entry once it
+    exceeds _DEDUP_MAP_CAP so these maps can't grow without bound on a 24/7 process.  FIFO
+    is fine here: evicting a long-stale callsign at worst costs one extra log/stat line if
+    it is ever seen again."""
+    d[key] = value
+    if len(d) > _DEDUP_MAP_CAP:
+        try:
+            del d[next(iter(d))]
+        except (StopIteration, KeyError):
+            pass
+
+
 # callsign -> (free_route, paid_route, last_recorded_ts)
 _last_free_api_check:    dict[str, tuple] = {}
 # (registration, free_api) -> (free_route, fr24_route, last_recorded_ts)
@@ -1585,6 +1666,10 @@ _last_backoff_log: dict[tuple, float] = {}
 # callsign -> last-logged route signature; suppresses repeating the identical [route:..]
 # display line every poll for a lingering flight (the [overhead] alt lines still show it).
 _last_route_log: dict[str, tuple] = {}
+# callsign -> last-logged override-match signature; same idea for the [override] match
+# lines, so a lingering override flight (e.g. JANET77 orbiting) logs the match once and
+# then only the [overhead] alt= tracking line repeats until the rule (or its result) changes.
+_last_override_log: dict[str, tuple] = {}
 
 def _in_backoff(api_name: str) -> bool:
     """True if we should skip this API because it recently told us to back off."""
@@ -1608,10 +1693,14 @@ def _check_period_reset(api_name: str, reset_day: int) -> None:
     """If this API is in backoff due to a 402 and a new billing period has since
     started, clear the backoff so the API resumes immediately rather than waiting
     up to 24 h for the old backoff timer to expire."""
-    if api_name not in _api_credit_exhausted or not _in_backoff(api_name):
+    # Read the stamp into a local first: this runs on multiple lookup threads, and a
+    # check-then-subscript (`in` … then `[api_name]`) could KeyError if another thread
+    # pops the key in between.  `.get()` + `.pop(…, None)` make it race-safe.
+    exhausted_period = _api_credit_exhausted.get(api_name)
+    if exhausted_period is None or not _in_backoff(api_name):
         return
     current_period = _billing_period_start(reset_day)
-    if _api_credit_exhausted[api_name] != current_period:
+    if exhausted_period != current_period:
         _api_backoff.pop(api_name, None)
         _api_credit_exhausted.pop(api_name, None)
         _log(f"[{api_name}] new billing period — credit backoff cleared, resuming")
@@ -2010,6 +2099,11 @@ def _restore_persisted_backoff(backoff_name, usage_file, reset_day):
         until = _read_usage(usage_file, reset_day).get("backoff_until", 0)
     if until and float(until) > time.time():
         _api_backoff[backoff_name] = float(until)
+        # Also restore the billing-period stamp.  _api_credit_exhausted is in-memory only
+        # and lost on restart; without it _check_period_reset bails on its first guard and
+        # won't early-clear this backoff at the next period rollover — the key would then
+        # needlessly wait out the full persisted window instead of resuming at reset.
+        _api_credit_exhausted[backoff_name] = _billing_period_start(reset_day)
 
 
 def _set_quota_backoff(backoff_name, usage_file, reset_day, log_tag, reason):
@@ -2081,6 +2175,7 @@ def _query_airlabs(callsign, plane_lat, plane_lon, *, api_key, cache_key, backof
                 dlon = resp.get("arr_lng")
                 _remember_airport(origin, olat, olon)
                 _remember_airport(dest,   dlat, dlon)
+                _over_quota_empty = False
                 if not (origin or dest):
                     _log(f"[{log_tag}] {callsign}: no data [call #{count}]")
                     # AirLabs soft-limits with a 200-empty (not a 402).  Once we've
@@ -2090,17 +2185,27 @@ def _query_airlabs(callsign, plane_lat, plane_lon, *, api_key, cache_key, backof
                     if count >= monthly_limit:
                         _set_quota_backoff(backoff_name, usage_file, reset_day, log_tag,
                                            f"{callsign}: over quota ({count}/{monthly_limit}) and no data")
+                        # Over quota → AirLabs never actually consulted the backend, so
+                        # this empty is meaningless.  Do NOT cache it: a cached empty
+                        # would later trip the §3b secondary-key gate (_al1_cache_was_empty)
+                        # into assuming the shared backend has no data, skipping the
+                        # still-quota'd second key and leaking the lookup to the costlier
+                        # AeroAPI.  (A genuine WITHIN-quota empty is still cached below so
+                        # the shared-backend key 2 isn't queried for data that truly
+                        # doesn't exist.)
+                        _over_quota_empty = True
                 # Non-local complete routes get ROUTE_MISS_TTL — almost certainly
                 # wrong for a local-airport tracker and must not persist.  Local
                 # or partial results get ROUTE_TTL_DEFAULT.
-                _ttl = (
-                    ROUTE_MISS_TTL if _is_nonlocal(origin, dest)
-                    else ROUTE_TTL_DEFAULT if (origin or dest)
-                    else ROUTE_MISS_TTL
-                )
-                _cache_db_set_route(cache_key, 'route', origin, dest,
-                                    olat, olon, dlat, dlon,
-                                    int(time.time()) + _ttl, source=backoff_name)
+                if not _over_quota_empty:
+                    _ttl = (
+                        ROUTE_MISS_TTL if _is_nonlocal(origin, dest)
+                        else ROUTE_TTL_DEFAULT if (origin or dest)
+                        else ROUTE_MISS_TTL
+                    )
+                    _cache_db_set_route(cache_key, 'route', origin, dest,
+                                        olat, olon, dlat, dlon,
+                                        int(time.time()) + _ttl, source=backoff_name)
             else:
                 # Unexpected status (e.g. 404, 500) — count the call (AirLabs may
                 # bill any request) and negatively cache to stop per-poll retries.
@@ -2115,7 +2220,7 @@ def _query_airlabs(callsign, plane_lat, plane_lon, *, api_key, cache_key, backof
         if time.time() - _last_backoff_log.get(_bl_key, 0) > _FREE_API_CHECK_DEDUP_SECS:
             _until = datetime.fromtimestamp(_api_backoff.get(backoff_name, 0), _PACIFIC).strftime("%Y-%m-%d %H:%M")
             _log(f"[{log_tag}] {callsign}: in backoff until {_until} — skipping")
-            _last_backoff_log[_bl_key] = time.time()
+            _bounded_put(_last_backoff_log, _bl_key, time.time())
     return origin, dest, olat, olon, dlat, dlon, src, count
 
 
@@ -2177,6 +2282,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # display name and aircraft type through the free-API fill-in path.
     _ov_plane   = ""
     _ov_display = ""
+    ov_origin   = ""
+    ov_dest     = ""
     _override_partial = False  # True → skip paid APIs but still try free APIs
 
     # ── 0. Override rules — bypass ALL API lookups for known callsigns ─────────
@@ -2194,13 +2301,25 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         ov_dest     = (_ov.get("destination") or "").strip().upper()
         _ov_plane   = (_ov.get("plane")       or "").strip()
         _ov_display = (_ov.get("display")     or "").strip()
-        _log(
-            f"[override] {callsign} matched '{_ov['pattern']}'"
-            f" → {ov_origin or '?'}->{ov_dest or '?'}"
-            + (f"  display='{_ov_display}'" if _ov_display else "")
-            + (f"  type='{_ov_plane}'" if _ov_plane else "")
-            + (f"  ({_ov['note']})" if _ov.get("note") else "")
-        )
+        # Log the match only on first sighting or when the rule/result changes — not every
+        # poll — so a lingering override flight doesn't repeat identical [override] lines
+        # every ~15 s.  No-cache/test lookups always log (full diagnostic).  The [overhead]
+        # alt= tracking line still prints every poll either way.
+        _ov_sig = (_ov.get("pattern"), ov_origin, ov_dest, _ov_display, _ov_plane, _ov.get("note"))
+        if getattr(_cache_bypass, "on", False):
+            _ov_first = True
+        else:
+            _ov_first = _last_override_log.get(callsign) != _ov_sig
+            if _ov_first:
+                _bounded_put(_last_override_log, callsign, _ov_sig)
+        if _ov_first:
+            _log(
+                f"[override] {callsign} matched '{_ov['pattern']}'"
+                f" → {ov_origin or '?'}->{ov_dest or '?'}"
+                + (f"  display='{_ov_display}'" if _ov_display else "")
+                + (f"  type='{_ov_plane}'" if _ov_plane else "")
+                + (f"  ({_ov['note']})" if _ov.get("note") else "")
+            )
         if ov_origin and ov_dest:
             # Both endpoints known — no API calls needed.
             return ov_origin, ov_dest, "override", _ov_plane, _ov_display
@@ -2209,7 +2328,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         destination = ov_dest
         source      = "override" if (ov_origin or ov_dest) else ""
         _override_partial = bool(ov_origin or ov_dest)
-        _log(f"[override] {callsign}: partial override — polling free APIs to fill missing endpoint(s)")
+        if _ov_first:
+            _log(f"[override] {callsign}: partial override — polling free APIs to fill missing endpoint(s)")
 
     # ── 0.5. Resolved-route cache (scheduled airlines only) ───────────────────
     # When we successfully resolve both endpoints for a scheduled airline
@@ -3231,6 +3351,74 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                 _log(f"[adsbdb] {callsign}: paid APIs overrode adsbdb — was {_db_route}, now {_paid_route}")
         _record_free_api_check(callsign, _db_route, _paid_route, _matched)
 
+    # ── _select() is the route authority (Phase-3 flip, now permanent) ──────────
+    # The 4-day shadow soak proved _select()'s route matches the live inline pick on
+    # every fresh resolution (1,437/0); the harness + a label-shadow pass confirmed the
+    # source labels too, and the cleaner attribution (a complete source credited alone,
+    # not combined with a redundant partial) was chosen deliberately.  A second live soak
+    # (~660 resolutions, 0 disagreements) cleared the [flip-check] backstop, which has now
+    # been retired.  _select() DRIVES the result: gather candidates, pick, reconstruct the
+    # cached-aware label, commit.  The inline chain above still runs ONLY to (a) short-circuit
+    # paid calls and (b) seed override-partial — it no longer decides the final route.
+    if not _override_partial:
+        _cands = []
+        if _fr24_origin or _fr24_dest:
+            _cands.append(_Cand(_fr24_origin, _fr24_dest, None, None, None, None, "fr24", _fr24_src == "fr24"))
+        if al_origin or al_dest:
+            _cands.append(_Cand(al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon, "airlabs", _al_count > 0))
+        if al2_origin or al2_dest:
+            _cands.append(_Cand(al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2", _al2_count > 0))
+        if fa_origin or fa_dest:
+            # AeroAPI's per-call coord locals (fa_olat…) aren't function-scoped, so look the
+            # endpoint coords back up from the harvested airport table (populated by AeroAPI's
+            # own _remember_airport, live or cached).  Without real coords here the resolved-
+            # cache write guard would skip AeroAPI-resolved ARRIVALS (non-local origin -> home
+            # airport), silently re-billing the paid chain every poll.
+            _fa_o = _airport_coords(fa_origin) or (None, None)
+            _fa_d = _airport_coords(fa_dest) or (None, None)
+            _cands.append(_Cand(fa_origin, fa_dest, _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi", False))
+        if _fr24_com_origin or _fr24_com_dest:
+            _cands.append(_Cand(_fr24_com_origin, _fr24_com_dest, None, None, None, None, "fr24", _fr24_com_src == "fr24"))
+        if (adsbdb_origin and _sky_origin and adsbdb_origin.upper() == _sky_origin.upper()
+                and adsbdb_dest and _sky_dest and adsbdb_dest.upper() == _sky_dest.upper()):
+            _cands.append(_Cand(adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
+                                adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky", False))
+        if adsbdb_origin or adsbdb_dest:
+            _cands.append(_Cand(adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
+                                adsbdb_dlat, adsbdb_dlon, "adsbdb", _adsbdb_src == "adsbdb"))
+        if _sky_origin or _sky_dest:
+            _cands.append(_Cand(_sky_origin, _sky_dest, None, None, None, None, "opensky", _sky_src == "opensky"))
+        _best = _select(_cands, plane_lat, plane_lon)
+
+        # Reconstruct the cached-aware source label from _select's bare source name,
+        # reusing the picker's bare->live mapping and handling the '+' merge combos.
+        def _select_lbl1(p):
+            if p == "airlabs":  return _al_src
+            if p == "airlabs2": return _al2_src
+            if p == "aeroapi":  return "aeroapi:cached" if _cached_fa else "aeroapi"
+            if p == "fr24":     return _fr24_com_src if (_fr24_com_origin or _fr24_com_dest) else _fr24_src
+            if p == "adsbdb":   return _adsbdb_src
+            if p == "opensky":  return _sky_src
+            return p
+        def _select_label(s):
+            if not s:
+                return s
+            if s == "adsbdb+opensky":
+                return ("adsbdb+opensky:cached"
+                        if _adsbdb_src.endswith(":cached") and _sky_src.endswith(":cached")
+                        else "adsbdb+opensky")
+            if "+" in s:
+                _a, _b = s.split("+", 1)
+                return f"{_select_lbl1(_a)}+{_select_lbl1(_b)}"
+            return _select_lbl1(s)
+
+        origin, destination = (_best.origin, _best.dest) if _best else ("", "")
+        if _best:
+            source = _select_label(_best.source)
+            _coord_olat, _coord_olon = _best.olat, _best.olon
+            _coord_dlat, _coord_dlon = _best.dlat, _best.dlon
+            _coord_origin_iata = _best.origin
+
     # ── Resolved-route cache write ─────────────────────────────────────────────
     # If both endpoints are now known for a scheduled airline, cache the final
     # result so future sightings of the same daily flight skip the full API
@@ -3265,37 +3453,24 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             and not _has_local_endpoint(origin, destination)):
         _log(f"[resolved] {callsign}: skipping resolved-cache write — "
              f"non-local route {_route_display(origin, destination)} must not persist 7 days")
+    elif (origin and destination and callsign
+            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+            and _LOCAL_AIRPORTS
+            and origin.upper() in _LOCAL_AIRPORTS):
+        # Diagnostic (Issue B): a scheduled, complete, LOCAL-ORIGIN departure should
+        # always persist — condition 5 passes on locality and condition 6 passes unless
+        # a coord-iata mismatch (caught by the first elif).  The resolved-write logic is
+        # provably correct in tests for every modeled input, yet a few flights (AAL2040,
+        # SCX3001) carried stale entries live.  If this ever fires it pinpoints the
+        # real-world state we could not reproduce in mocks; logs the exact guard inputs.
+        _log(f"[resolved] {callsign}: NOT persisted (unexpected) — "
+             f"{_route_display(origin, destination)} src={source} "
+             f"coord_olat={_coord_olat is not None} coord_iata={_coord_origin_iata!r}")
 
-    # ── Phase 2 shadow: does the unified _select() agree with the live inline logic? ──
-    # Build the candidate set the sources produced and let _select() choose; log a one-line
-    # diff whenever its pick differs from the live commit/picker result.  Read-only — it
-    # does NOT affect the returned route.  Removed once parity is confirmed (tests + live).
-    if _SHADOW_SELECT and not _override_partial:
-        _sh = []
-        if _fr24_origin or _fr24_dest:
-            _sh.append(_Cand(_fr24_origin, _fr24_dest, None, None, None, None, "fr24", _fr24_src == "fr24"))
-        if al_origin or al_dest:
-            _sh.append(_Cand(al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon, "airlabs", _al_count > 0))
-        if al2_origin or al2_dest:
-            _sh.append(_Cand(al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2", _al2_count > 0))
-        if fa_origin or fa_dest:
-            _sh.append(_Cand(fa_origin, fa_dest, None, None, None, None, "aeroapi", False))
-        if _fr24_com_origin or _fr24_com_dest:
-            _sh.append(_Cand(_fr24_com_origin, _fr24_com_dest, None, None, None, None, "fr24", _fr24_com_src == "fr24"))
-        if (adsbdb_origin and _sky_origin and adsbdb_origin.upper() == _sky_origin.upper()
-                and adsbdb_dest and _sky_dest and adsbdb_dest.upper() == _sky_dest.upper()):
-            _sh.append(_Cand(adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
-                             adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky", False))
-        if adsbdb_origin or adsbdb_dest:
-            _sh.append(_Cand(adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
-                             adsbdb_dlat, adsbdb_dlon, "adsbdb", _adsbdb_src == "adsbdb"))
-        if _sky_origin or _sky_dest:
-            _sh.append(_Cand(_sky_origin, _sky_dest, None, None, None, None, "opensky", _sky_src == "opensky"))
-        _sh_best = _select(_sh, plane_lat, plane_lon)
-        _sh_od = (_sh_best.origin, _sh_best.dest) if _sh_best else ("", "")
-        if _sh_od != (origin, destination):
-            _log(f"[shadow] {callsign}: _select={_sh_od[0] or '?'}->{_sh_od[1] or '?'} "
-                 f"vs live={origin or '?'}->{destination or '?'}  MISMATCH")
+    # (The Phase-2 read-only shadow and the Phase-3 [flip-check] backstop that compared
+    # _select() to the inline logic have both been retired now that _select() is the proven
+    # sole authority above.  The inline per-source commits remain only for paid-call
+    # short-circuiting and override-partial completion.)
 
     if _trace is not None:
         # diagnostic only: each source's raw result for the test-flight step grid
@@ -3739,11 +3914,20 @@ class Overhead:
             if self._processing:
                 return
             self._processing = True
-        Thread(target=self._grab_data, daemon=True).start()
+        try:
+            Thread(target=self._grab_data, daemon=True).start()
+        except Exception:
+            # If the thread can't start (rare resource exhaustion), don't leave
+            # _processing stuck True forever — that would wedge all future polls.
+            with self._lock:
+                self._processing = False
+            raise
 
     def _grab_data(self):
         with self._lock:
             self._new_data = False
+
+        _purge_expired_cache()   # time-gated (~6 h); reclaims expired cache rows off the SD card
 
         data = []
         success = False
@@ -3826,7 +4010,7 @@ class Overhead:
                 # an identical line every ~15 s.  Tracking lines ([overhead] alt=) still print.
                 _route_sig = (route_src, origin, destination, type_src, plane, display_name, reg)
                 if _last_route_log.get(callsign) != _route_sig:
-                    _last_route_log[callsign] = _route_sig
+                    _bounded_put(_last_route_log, callsign, _route_sig)
                     _log(f"[route:{_display_src(route_src)}] [type:{_display_src(type_src)}]{display_suffix} {_airline_display(callsign)} {_route_display(origin, destination)} '{plane}'{reg_suffix}")
                 if callsign != _test_cs:
                     _record_flight_stat(callsign, plane, origin, destination, reg, route_src)

@@ -43,8 +43,7 @@ HAT_PWM_ENABLED = True # True if you've added the solder bridge to your HAT
 JOURNEY_CODE_SELECTED = "XXX"  # 3-letter IATA code of your nearest airport
 JOURNEY_BLANK_FILLER  = " ? "  # Shown when origin/destination is unknown
 
-# Time and date format — applies to the LED display and the web UI
-TIME_FORMAT = "24h"   # "24h" = 14:30  |  "12h" = 2:30 PM
+# Date format — applies to the LED display and the web UI
 DATE_FORMAT = "MDY"   # "MDY" = 5/14/2026 (US)  |  "DMY" = 14/5/2026 (UK/EU)  |  "YMD" = 2026-05-14 (ISO)
 
 # ── Optional loading LED ──────────────────────────────────────────────────────
@@ -57,6 +56,84 @@ LOADING_LED_GPIO_PIN = 25   # BCM pin number
 # Shows a rainfall graph on the display. Requires a local taps-aff weather
 # service — not the OpenWeather API. Leave False unless you've set that up.
 RAINFALL_ENABLED = False
+
+# ── Scoreboard display ────────────────────────────────────────────────────────
+# When any configured team has a game today the idle display is replaced with
+# a live scoreboard. Flights always take priority. When your team scores, a
+# full-screen celebration scrolls for SCOREBOARD_GOAL_CELEBRATION_SECONDS.
+# If multiple sports are live simultaneously, the first in SCOREBOARD_PRIORITY
+# wins the display.
+#
+# Set SCOREBOARD_ENABLED = True to activate. Disabled by default — if you don't
+# follow North American sports leagues there's no reason to turn this on.
+#
+# APIs used (all free, no keys required):
+#   NHL — official NHL Stats API  https://api-web.nhle.com/v1/scoreboard/now
+#   MLB — official MLB Stats API  https://statsapi.mlb.com/api/v1/teams?sportId=1
+#   NFL / NBA / MLS — ESPN unofficial API (team IDs below)
+
+SCOREBOARD_ENABLED = False   # master switch — set True to activate
+
+# How long to keep showing the final score after the game ends (minutes)
+SCOREBOARD_POST_GAME_MINUTES = 30
+
+# Duration of the score celebration animation (seconds; flights suppressed)
+SCOREBOARD_GOAL_CELEBRATION_SECONDS = 30
+
+# Duration of the WIN celebration ("{team} WINS!") shown when a game goes final (seconds)
+SCOREBOARD_WIN_CELEBRATION_SECONDS = 180
+
+# Priority order — when multiple sports are live, the first entry wins
+SCOREBOARD_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "MLS"]
+
+# ── NHL ───────────────────────────────────────────────────────────────────────
+# Team IDs: use the link below and look for the numeric "id" field next to your team.
+# https://api-web.nhle.com/v1/standings/now
+# Example: 54 = Vegas Golden Knights, 10 = Toronto Maple Leafs, 6 = Boston Bruins
+SCOREBOARD_NHL_ENABLED   = True
+SCOREBOARD_NHL_TEAM_ID   = 0        # replace with your team's numeric ID
+SCOREBOARD_NHL_TEAM_NAME = "NHL"    # ≤4 chars shown on LED display
+
+# ── NFL ───────────────────────────────────────────────────────────────────────
+# ESPN team IDs: https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams
+SCOREBOARD_NFL_ENABLED   = False
+SCOREBOARD_NFL_TEAM_ID   = 0        # replace with your team's numeric ID
+SCOREBOARD_NFL_TEAM_NAME = "NFL"    # ≤4 chars shown on LED display
+
+# ── MLB ───────────────────────────────────────────────────────────────────────
+# MLB team IDs: https://statsapi.mlb.com/api/v1/teams?sportId=1
+SCOREBOARD_MLB_ENABLED   = False
+SCOREBOARD_MLB_TEAM_ID   = 0        # set your team's ID here
+SCOREBOARD_MLB_TEAM_NAME = ""
+
+# ── NBA ───────────────────────────────────────────────────────────────────────
+# ESPN team IDs: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams
+# Note: NBA celebration is disabled — scores happen too frequently.
+SCOREBOARD_NBA_ENABLED   = False
+SCOREBOARD_NBA_TEAM_ID   = 0        # set your team's ID here
+SCOREBOARD_NBA_TEAM_NAME = ""
+
+# ── MLS ───────────────────────────────────────────────────────────────────────
+# ESPN team IDs: https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/teams
+SCOREBOARD_MLS_ENABLED   = False
+SCOREBOARD_MLS_TEAM_ID   = 0        # set your team's ID here
+SCOREBOARD_MLS_TEAM_NAME = ""
+
+# ── Remote agent apps (optional desktop companions) ──────────────────────────
+# Two optional Windows desktop apps mirror the board over fire-and-forget UDP and
+# play a sound — a hockey goal horn and a plane-overhead "ding". See remote-agents/.
+# Leave the *_HOST values empty to disable (each sender becomes a complete no-op).
+# Use the desktop machine's IP (not a hostname) so the Pi never blocks on a DNS lookup.
+#
+# Goal horn → remote-agents/goal-horn/  (fires on your team's goal / win)
+SCOREBOARD_GOAL_HORN_HOST      = ""     # e.g. "192.168.1.30"; "" = off
+SCOREBOARD_GOAL_HORN_PORT      = 50505
+SCOREBOARD_GOAL_HORN_PING_SECS = 5      # heartbeat cadence (seconds)
+#
+# Plane ding → remote-agents/plane-ding/  (fires when a new aircraft goes on the matrix)
+PLANE_DING_HOST      = ""               # e.g. "192.168.1.30"; "" = off
+PLANE_DING_PORT      = 50506
+PLANE_DING_PING_SECS = 5
 
 # ── ADS-B Receiver ────────────────────────────────────────────────────────────
 # IP address of the machine running your ADS-B receiver software.
@@ -129,5 +206,12 @@ AEROAPI_RESET_DAY = 1
 # OPENSKY_CACHE_TTL    = 3600    # OpenSky route result cache (default 1 hour)
 # ROUTE_TTL_SCHEDULED  = 604800  # Resolved commercial route cache (default 7 days)
 # ROUTE_TTL_DEFAULT    = 3600    # Resolved GA/other route cache (default 1 hour)
-# ROUTE_MISS_TTL       = 3600    # No-route-found suppression (default 1 hour)
+# ROUTE_MISS_TTL       = 300     # No-route-found suppression (default 5 min)
 # ROUTE_PAID_MISS_TTL  = 7200    # Paid API miss suppression (default 2 hours)
+
+# ── Advanced: database retention ─────────────────────────────────────────────
+# A low-frequency sweep bounds the two internal accuracy-stats tables so the SQLite DB
+# can't grow forever on the SD card.  Your daily "sightings" history is kept indefinitely
+# unless you opt into a window.
+# API_CHECK_RETENTION_DAYS = 90   # prune internal accuracy stats older than N days
+# SIGHTINGS_RETENTION_DAYS = 0    # 0 = keep all sighting history; set >0 (days) to prune

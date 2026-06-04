@@ -32,10 +32,13 @@ class DateScene(object):
         super().__init__()
         self._last_date = None
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 1)
+    @Animator.KeyFrame.add(int(frames.PER_SECOND * 1))
     def date(self, count):
         if len(self._data):
             # Ensure redraw when there's new data
+            self._last_date = None
+
+        elif getattr(self, "_scoreboard_active", False):
             self._last_date = None
 
         else:
