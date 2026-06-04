@@ -1,4 +1,8 @@
-# Extra dependency for the web preview (preview.py) only — NOT needed by the real
-# display, which uses the hardware rpi-rgb-led-matrix bindings.  Install on the Pi with:
-#   env/bin/pip install -r requirements-preview.txt
+# Dependencies for the desktop preview (preview.py) — install on the machine you RUN the
+# preview on (e.g. the Windows box next to the horn/ding apps), NOT on the Pi:
+#   pip install -r requirements-preview.txt
+#
+# tkinter (the default window adapter) ships with the standard python.org Windows build.
+# For the smoother 'pygame' adapter instead:  pip install pygame   (then FT_PREVIEW_ADAPTER=pygame)
 RGBMatrixEmulator>=0.17.0
+requests>=2.28
