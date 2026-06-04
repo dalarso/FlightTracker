@@ -18,5 +18,5 @@
         "image_format": "JPEG",
         "open_immediately": false
     },
-    "log_level": "info"
+    "log_level": "warning"
 }

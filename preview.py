@@ -36,6 +36,12 @@ sys.modules["RPi"] = types.ModuleType("RPi")
 sys.modules["RPi.GPIO"] = MagicMock()
 sys.modules["RPi"].GPIO = sys.modules["RPi.GPIO"]
 
+# The emulator serves frames over a tornado server which, left alone, logs every /image
+# request (~30/s) — silence its access log so the service log stays readable.
+import logging  # noqa: E402
+for _l in ("tornado.access", "tornado.application", "tornado.general"):
+    logging.getLogger(_l).setLevel(logging.ERROR)
+
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
