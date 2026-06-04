@@ -1,8 +1,6 @@
-import calendar
 import json
 import logging
 import os
-import re
 import sqlite3
 import subprocess
 import sys
@@ -133,11 +131,11 @@ _CONFIG_SCHEMA = [
     ("WEATHER_LOCATION",                    "str",   ""),
     ("OPENWEATHER_API_KEY",                 "str",   ""),
     ("TEMPERATURE_UNITS",                   "str",   "imperial"),
-    ("MIN_ALTITUDE",                        "int",   100),
+    ("MIN_ALTITUDE",                        "int0",  100),  # 0 = no altitude floor (valid)
     ("MAX_ALTITUDE",                        "int",   15000),
-    ("BRIGHTNESS",                          "int",   80),
+    ("BRIGHTNESS",                          "int0",  80),   # 0 = panel dark (valid)
     ("GPIO_SLOWDOWN",                       "int0",  2),
-    ("NIGHT_BRIGHTNESS",                    "int",   20),
+    ("NIGHT_BRIGHTNESS",                    "int0",  20),   # 0 = display off at night (valid)
     ("JOURNEY_CODE_SELECTED",               "str",   ""),
     ("JOURNEY_BLANK_FILLER",                "str",   " ? "),
     ("DATE_FORMAT",                         "str",   "MDY"),

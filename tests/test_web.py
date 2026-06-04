@@ -257,18 +257,25 @@ class ConfigMasking(unittest.TestCase):
 
 
 class EndpointSmoke(unittest.TestCase):
-    """Network-free GET endpoints respond 200 through their (now-extracted) data layers."""
+    """GET endpoints respond through their (now-extracted) data layers — never a 500/crash."""
 
     @classmethod
     def setUpClass(cls):
         cls.client = _load_server().app.test_client()
 
-    def test_get_endpoints_return_200(self):
-        for url in ["/api/status", "/api/stats?range=today", "/api/usage",
-                    "/api/stats/search?q=SWA", "/api/free-api-accuracy",
-                    "/api/ga-accuracy", "/api/config", "/api/display"]:
+    def test_db_independent_endpoints_return_200(self):
+        # These read only flags / config / usage files, so they must always serve 200.
+        for url in ["/api/status", "/api/display", "/api/config", "/api/usage", "/api/scoreboard"]:
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_db_backed_endpoints_respond_gracefully(self):
+        # 200 when the flight DB is present (the Pi), else a *handled* 503 on a DB-less
+        # checkout — the point is that they never 500 / raise.
+        for url in ["/api/stats?range=today", "/api/stats/search?q=SWA",
+                    "/api/free-api-accuracy", "/api/ga-accuracy"]:
+            with self.subTest(url=url):
+                self.assertIn(self.client.get(url).status_code, (200, 503))
 
 
 class ConfigWriteRoundTrip(unittest.TestCase):
@@ -326,6 +333,16 @@ class ConfigWriteRoundTrip(unittest.TestCase):
         self.assertEqual(cfg["FEEDER_MONTHLY_CREDIT"], 12.5)
         self.assertEqual(cfg["ROUTE_PAID_MISS_TTL"], 9999)
 
+    def test_zero_preserved_for_meaningful_keys(self):
+        # 0 is a real setting for these int0 keys — panel dark, display off at night, no
+        # altitude floor — and must survive a save, not coerce to the default.
+        self._write(BRIGHTNESS=0, NIGHT_BRIGHTNESS=0, MIN_ALTITUDE=0, GPIO_SLOWDOWN=0)
+        cfg = self.srv.read_config()
+        self.assertEqual(cfg["BRIGHTNESS"], 0)
+        self.assertEqual(cfg["NIGHT_BRIGHTNESS"], 0)
+        self.assertEqual(cfg["MIN_ALTITUDE"], 0)
+        self.assertEqual(cfg["GPIO_SLOWDOWN"], 0)
+
     def test_tricky_string_serialises_safely(self):
         self._write(WEATHER_LOCATION="x'\"y\\z")   # quotes/backslash must survive repr()
         self.assertEqual(self.srv.read_config()["WEATHER_LOCATION"], "x'\"y\\z")
@@ -351,11 +368,16 @@ class ConfigWriteRoundTrip(unittest.TestCase):
         self._write(AIRLABS_API_KEY=self.srv._SECRET_SENTINEL)   # sentinel = unchanged
         self.assertEqual(self.srv.read_config()["AIRLABS_API_KEY"], "real-secret")
 
-    def test_known_keys_derived_from_schema(self):
-        derived = (set(self.srv._STRUCTURED_KEYS)
-                   | {e[0] for e in self.srv._CONFIG_SCHEMA if e is not None}
-                   | self.srv._LEGACY_KEYS)
-        self.assertEqual(self.srv._KNOWN_KEYS, derived)
+    def test_known_keys_covers_schema_and_legacy(self):
+        # Assert intent (not a re-derivation with the same expression): every schema key
+        # is known, the structural + legacy + a couple of representative keys are present,
+        # and no key is both a live schema key and a drop-on-save legacy key.
+        schema_keys = {e[0] for e in self.srv._CONFIG_SCHEMA if e is not None}
+        self.assertTrue(schema_keys <= self.srv._KNOWN_KEYS)
+        for k in (*self.srv._STRUCTURED_KEYS, *self.srv._LEGACY_KEYS,
+                  "AIRLABS_API_KEY", "ROUTE_PAID_MISS_TTL"):
+            self.assertIn(k, self.srv._KNOWN_KEYS)
+        self.assertFalse(schema_keys & self.srv._LEGACY_KEYS)
 
 
 if __name__ == "__main__":

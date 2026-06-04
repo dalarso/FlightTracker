@@ -2755,9 +2755,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # _all_paid_nonlocal: all paid APIs (AirLabs + AeroAPI) held non-local results;
     # give FR24 a chance to return a local route before final acceptance.
     _all_paid_nonlocal = _al_held_nonlocal and not (origin and destination)
-    # Pre-initialize FR24-commercial held-route vars at function scope — they are
-    # otherwise assigned only inside the block below, but the final-acceptance block
-    # references them.  Defends against NameError on any path that skips FR24 §5.
+    # _query_fr24_com() always returns all three vars (empties when its internal guard is
+    # false), so they're defined on every path for the gating + final-acceptance below.
     (_fr24_com_origin, _fr24_com_dest, _fr24_com_src) = _query_fr24_com(
         callsign, hex_code, registration, origin, destination,
         plane_lat, plane_lon, _adsbdb_commercial, _all_paid_nonlocal)
