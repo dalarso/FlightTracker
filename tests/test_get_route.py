@@ -1015,12 +1015,15 @@ class CacheRoundTrip(unittest.TestCase):
                    expires_at INTEGER NOT NULL DEFAULT 0,
                    PRIMARY KEY (key, cache_type))""")
         self._conn.commit()
-        self._orig_conn = overhead._cache_conn
-        overhead._cache_conn = self._conn
-        overhead._cache_bypass.on = False
+        # The cache CRUD helpers were extracted to utilities/cache.py; they read the
+        # connection from THAT module (overhead injects it via cache.bind()).  Patch it
+        # there — patching overhead._cache_conn would no longer reach the helpers.
+        self._orig_conn = overhead.cache._cache_conn
+        overhead.cache._cache_conn = self._conn
+        overhead._cache_bypass.on = False        # shared threading.local — cache sees it too
 
     def tearDown(self):
-        overhead._cache_conn = self._orig_conn
+        overhead.cache._cache_conn = self._orig_conn
         overhead._cache_bypass.on = False
         self._conn.close()
         try:

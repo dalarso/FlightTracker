@@ -28,6 +28,13 @@ from collections import namedtuple
 from utilities.geometry import _haversine_km, _route_plausible  # pure geometry, extracted
 from utilities.refdata import (_AIRPORT_CITIES, _AIRLINE_NAMES, _AIRCRAFT_TYPE_MAP,
                                _clean_iata, _route_display, _airline_display, _translate_type)
+from utilities import cache  # SQLite cache layer; live conn/lock/bypass injected via cache.bind() below
+from utilities.cache import (
+    _cache_db_get_route, _cache_db_set_route, _cache_db_delete_route,
+    _cache_db_get_aircraft, _cache_db_set_aircraft,
+    _cache_db_get_reg, _cache_db_set_reg,
+    _cache_db_check_paid_miss, _cache_db_set_paid_miss,
+)
 from threading import Thread, Lock, local
 _cache_bypass = local()  # set .on=True to make cache READS miss (test-flight no-cache mode)
 
@@ -479,64 +486,11 @@ def _init_db() -> None:
 
 
 # ── SQLite cache helpers ───────────────────────────────────────────────────────
-# All helpers use _cache_conn (separate from _db_conn) and are serialised via
-# _cache_lock.  Never raise — cache failures must never crash the poll loop.
-
-def _cache_db_get_route(key: str, cache_type: str):
-    """Return (origin, dest, olat, olon, dlat, dlon, source) for a fresh cache entry, or None."""
-    if getattr(_cache_bypass, "on", False) or _cache_conn is None:
-        return None
-    try:
-        with _cache_lock:
-            row = _cache_conn.execute(
-                """SELECT origin, dest, olat, olon, dlat, dlon, COALESCE(source, '')
-                   FROM cache WHERE key=? AND cache_type=? AND expires_at>?""",
-                (key, cache_type, int(time.time())),
-            ).fetchone()
-        return row
-    except Exception:
-        return None
-
-
-def _cache_db_set_route(key: str, cache_type: str,
-                         origin: str, dest: str,
-                         olat, olon, dlat, dlon,
-                         expires_at: int,
-                         source: str = "") -> None:
-    """Upsert a route/aeroapi cache entry, recording the originating API source."""
-    if _cache_conn is None:
-        return
-    try:
-        with _cache_lock:
-            _cache_conn.execute(
-                """INSERT OR REPLACE INTO cache
-                   (key, cache_type, origin, dest, olat, olon, dlat, dlon, expires_at, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (key, cache_type, origin or '', dest or '',
-                 olat, olon, dlat, dlon, expires_at, source or ''),
-            )
-            _cache_conn.commit()
-    except Exception as _e:
-        # A swallowed write here was the leading suspect for stale resolved entries
-        # (Issue B): if the resolved-cache INSERT throws, the route silently re-resolves
-        # every flyover.  Surface it instead of failing invisibly so a genuine DB-write
-        # problem shows up in the log rather than as a phantom cache miss.
-        _log(f"[cache] write failed for {cache_type}:{key} — {type(_e).__name__}: {_e}")
-
-
-def _cache_db_delete_route(key: str, cache_type: str) -> None:
-    """Delete a single route cache entry by key and type."""
-    if _cache_conn is None:
-        return
-    try:
-        with _cache_lock:
-            _cache_conn.execute(
-                "DELETE FROM cache WHERE key=? AND cache_type=?",
-                (key, cache_type),
-            )
-            _cache_conn.commit()
-    except Exception:
-        pass
+# The route/aircraft/registration CRUD helpers now live in utilities/cache.py (imported
+# at the top of this module); overhead injects the live _cache_conn / _cache_lock /
+# _cache_bypass into them via cache.bind() once the DB is open (see "Locks and in-memory
+# session state", below).  _purge_expired_cache stays here because it also sweeps the
+# historical stats tables on _db_conn / _stats_lock — a job that spans both connections.
 
 
 # Expired cache rows are invisible to reads (every SELECT filters `expires_at>?`), but
@@ -596,113 +550,6 @@ def _purge_expired_cache() -> None:
                 _db_conn.commit()
         except Exception as _e:
             _log(f"[stats] retention sweep failed — {type(_e).__name__}: {_e}")
-
-
-def _cache_db_get_aircraft(hex_code: str):
-    """Return (type_str, source) for a fresh aircraft cache entry, or None."""
-    if getattr(_cache_bypass, "on", False) or _cache_conn is None:
-        return None
-    try:
-        with _cache_lock:
-            row = _cache_conn.execute(
-                """SELECT value, source FROM cache
-                   WHERE key=? AND cache_type='aircraft' AND expires_at>?""",
-                (hex_code, int(time.time())),
-            ).fetchone()
-        return row
-    except Exception:
-        return None
-
-
-def _cache_db_set_aircraft(hex_code: str, type_str: str,
-                            source: str, ttl: int) -> None:
-    """Upsert an aircraft type cache entry."""
-    if _cache_conn is None:
-        return
-    try:
-        expires = int(time.time()) + ttl
-        with _cache_lock:
-            _cache_conn.execute(
-                """INSERT OR REPLACE INTO cache
-                   (key, cache_type, value, source, expires_at)
-                   VALUES (?, 'aircraft', ?, ?, ?)""",
-                (hex_code, type_str or '', source or '', expires),
-            )
-            _cache_conn.commit()
-    except Exception:
-        pass
-
-
-def _cache_db_get_reg(hex_code: str) -> str:
-    """Return registration string for this hex code, or '' if not cached / expired."""
-    if getattr(_cache_bypass, "on", False) or _cache_conn is None:
-        return ''
-    try:
-        with _cache_lock:
-            row = _cache_conn.execute(
-                "SELECT value FROM cache WHERE key=? AND cache_type='reg' AND expires_at>?",
-                (hex_code, int(time.time())),
-            ).fetchone()
-        return row[0] if row else ''
-    except Exception:
-        return ''
-
-
-REG_CACHE_TTL = 365 * 24 * 3600  # 1 year — hex codes are permanent but evict if unseen
-
-def _cache_db_set_reg(hex_code: str, reg: str) -> None:
-    """Upsert a registration entry (1-year TTL — evicts aircraft not seen in a year)."""
-    if _cache_conn is None:
-        return
-    try:
-        with _cache_lock:
-            _cache_conn.execute(
-                """INSERT OR REPLACE INTO cache
-                   (key, cache_type, value, expires_at)
-                   VALUES (?, 'reg', ?, ?)""",
-                (hex_code, reg, int(time.time()) + REG_CACHE_TTL),
-            )
-            _cache_conn.commit()
-    except Exception:
-        pass
-
-
-def _cache_db_check_paid_miss(callsign: str) -> bool:
-    """Return True if callsign has a fresh paid-API-miss entry."""
-    if _cache_conn is None or getattr(_cache_bypass, "on", False):
-        return False
-    try:
-        with _cache_lock:
-            row = _cache_conn.execute(
-                """SELECT 1 FROM cache
-                   WHERE key=? AND cache_type='paid_miss' AND expires_at>?""",
-                (callsign, int(time.time())),
-            ).fetchone()
-        return row is not None
-    except Exception:
-        return False
-
-
-def _cache_db_set_paid_miss(callsign: str) -> None:
-    """Record that both paid APIs returned empty for callsign; prune stale entries."""
-    if _cache_conn is None:
-        return
-    try:
-        expires = int(time.time()) + ROUTE_PAID_MISS_TTL
-        with _cache_lock:
-            _cache_conn.execute(
-                """INSERT OR REPLACE INTO cache
-                   (key, cache_type, expires_at)
-                   VALUES (?, 'paid_miss', ?)""",
-                (callsign, expires),
-            )
-            _cache_conn.execute(
-                "DELETE FROM cache WHERE cache_type='paid_miss' AND expires_at<?",
-                (int(time.time()),),
-            )
-            _cache_conn.commit()
-    except Exception:
-        pass
 
 
 def _load_stats_seen_today() -> None:
@@ -1267,6 +1114,13 @@ def _select(cands, plane_lat, plane_lon):
 
 # ── Locks and in-memory session state ─────────────────────────────────────────
 _cache_lock  = Lock()   # guards _cache_conn + _opensky_token
+
+# Hand the cache module its shared state now that the DB (_init_db, above) and the lock,
+# bypass flag and ROUTE_PAID_MISS_TTL all exist.  After this the re-imported _cache_db_*
+# helpers operate on the live connection.  (Dependency injection rather than a back-import
+# of overhead — see the module docstring in utilities/cache.py for why.)
+cache.bind(_cache_conn, _cache_lock, _cache_bypass, _log, ROUTE_PAID_MISS_TTL)
+
 _usage_lock  = Lock()   # guards _airlabs_increment / _aeroapi_increment read-then-write
 # Cache key scheme used in the 'route' cache_type:
 #   callsign           — adsbdb result  (e.g. "SWA123")
