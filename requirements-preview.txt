@@ -1,0 +1,4 @@
+# Extra dependency for the web preview (preview.py) only — NOT needed by the real
+# display, which uses the hardware rpi-rgb-led-matrix bindings.  Install on the Pi with:
+#   env/bin/pip install -r requirements-preview.txt
+RGBMatrixEmulator>=0.17.0
