@@ -1929,6 +1929,85 @@ def _query_fr24_ga(callsign, hex_code, registration, origin, destination,
     return _fr24_origin, _fr24_dest, _fr24_src
 
 
+def _query_fr24_com(callsign, hex_code, registration, origin, destination,
+                    plane_lat, plane_lon, adsbdb_commercial, all_paid_nonlocal):
+    """Fetch a commercial route from FlightRadar24 (free; last resort after the paid APIs).
+
+    Pure fetch: cache read (keyed by callsign), FlightRadarAPI get_flights(registration=...),
+    aircraft-type side-effect into the type cache, cache write, then the geometry-parity
+    reject (same as the GA path).  Returns (origin, dest, src); src is 'fr24:cached' on a
+    cache hit, else 'fr24'.  Skips the lookup unless the route is still incomplete (or all
+    paid APIs held non-local), the callsign is commercial, FR24 is available, and a tail
+    number is known.  The override / fill-blanks commit stays with the caller.
+    """
+    _fr24_com_origin = _fr24_com_dest = ""
+    _fr24_com_src = "fr24"
+    # Free — not gated by _apis_disabled or _skip_paid; only the per-API flag applies.
+    if ((not (origin and destination) or all_paid_nonlocal)
+            and adsbdb_commercial
+            and _FR24_AVAILABLE
+            and registration
+            and callsign
+            and not os.path.exists(FR24_DISABLED_FLAG)):
+        _cached_fr24_com = _cache_db_get_route(f"fr24:{callsign}", 'route')
+        if _cached_fr24_com:
+            _fr24_com_origin = _cached_fr24_com[0] or ""
+            _fr24_com_dest   = _cached_fr24_com[1] or ""
+            _fr24_com_src    = "fr24:cached"
+        else:
+            _fr24_com_origin = _fr24_com_dest = ""
+            _fr24_com_src    = "fr24"
+            try:
+                _fr24_api = _get_fr24_api()
+                if _fr24_api is not None:
+                    with _fr24_lock:   # serialize concurrent get_flights() calls
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            _fr24_com_flights = _fr24_api.get_flights(registration=registration) or []
+                    _fr24_com_active = [f for f in _fr24_com_flights if _fr24_alt_int(f) > 0]
+                    _fr24_com_f = (_fr24_com_active[0] if _fr24_com_active
+                                   else (_fr24_com_flights[0] if _fr24_com_flights else None))
+                    if _fr24_com_f:
+                        _fr24_com_origin = getattr(_fr24_com_f, 'origin_airport_iata', '') or ''
+                        _fr24_com_dest   = getattr(_fr24_com_f, 'destination_airport_iata', '') or ''
+                        # Side-effect: populate type cache for free while we have the Flight object
+                        _fr24_com_ac_code = getattr(_fr24_com_f, 'aircraft_code', '') or ''
+                        if _fr24_com_ac_code and hex_code:
+                            _ac_cached = _cache_db_get_aircraft(hex_code)
+                            if not (_ac_cached and _ac_cached[0]):
+                                _cache_db_set_aircraft(hex_code, _translate_type(_fr24_com_ac_code),
+                                                       "fr24", AIRCRAFT_CACHE_TTL)
+                    if not (_fr24_com_origin or _fr24_com_dest):
+                        _log(f"[fr24] {callsign}: no route data")
+            except Exception as e:
+                _log(f"[fr24] {callsign}: request error — {e}")
+            # Cache the result unconditionally — even when _fr24_api is None or an
+            # exception fired, writing the (empty) miss entry prevents every subsequent
+            # poll from re-entering this block and attempting the API call again.
+            _fr24_com_is_nonlocal_cache = _is_nonlocal(_fr24_com_origin, _fr24_com_dest)
+            _fr24_com_ttl = (
+                ROUTE_MISS_TTL if _fr24_com_is_nonlocal_cache
+                else ROUTE_TTL_DEFAULT if (_fr24_com_origin or _fr24_com_dest)
+                else ROUTE_MISS_TTL
+            )
+            _cache_db_set_route(f"fr24:{callsign}", 'route',
+                                _fr24_com_origin, _fr24_com_dest,
+                                None, None, None, None,
+                                int(time.time()) + _fr24_com_ttl,
+                                source="fr24")
+
+        # Geometry parity (same as §1): reject a stale/wrong-leg FR24 route before it
+        # can be committed.  Unknown airports fall through to benefit-of-the-doubt.
+        if (_fr24_com_origin or _fr24_com_dest) and not _fr24_route_plausible(
+                plane_lat, plane_lon, _fr24_com_origin, _fr24_com_dest):
+            _cache_db_set_route(f"fr24:{callsign}", 'route', '', '', None, None, None, None,
+                                int(time.time()) + ROUTE_MISS_TTL, source="fr24")
+            _log(f"[fr24] {_airline_display(callsign)}: "
+                 f"{_route_display(_fr24_com_origin, _fr24_com_dest)} rejected — implausible route")
+            _fr24_com_origin = _fr24_com_dest = ""
+    return _fr24_com_origin, _fr24_com_dest, _fr24_com_src
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -2679,95 +2758,34 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # Pre-initialize FR24-commercial held-route vars at function scope — they are
     # otherwise assigned only inside the block below, but the final-acceptance block
     # references them.  Defends against NameError on any path that skips FR24 §5.
-    _fr24_com_origin = _fr24_com_dest = ""
-    # Free — not gated by _apis_disabled or _skip_paid; only the per-API flag applies.
-    if ((not (origin and destination) or _all_paid_nonlocal)
-            and _adsbdb_commercial
-            and _FR24_AVAILABLE
-            and registration
-            and callsign
-            and not os.path.exists(FR24_DISABLED_FLAG)):
-        _cached_fr24_com = _cache_db_get_route(f"fr24:{callsign}", 'route')
-        if _cached_fr24_com:
-            _fr24_com_origin = _cached_fr24_com[0] or ""
-            _fr24_com_dest   = _cached_fr24_com[1] or ""
-            _fr24_com_src    = "fr24:cached"
-        else:
-            _fr24_com_origin = _fr24_com_dest = ""
-            _fr24_com_src    = "fr24"
-            try:
-                _fr24_api = _get_fr24_api()
-                if _fr24_api is not None:
-                    with _fr24_lock:   # serialize concurrent get_flights() calls
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            _fr24_com_flights = _fr24_api.get_flights(registration=registration) or []
-                    _fr24_com_active = [f for f in _fr24_com_flights if _fr24_alt_int(f) > 0]
-                    _fr24_com_f = (_fr24_com_active[0] if _fr24_com_active
-                                   else (_fr24_com_flights[0] if _fr24_com_flights else None))
-                    if _fr24_com_f:
-                        _fr24_com_origin = getattr(_fr24_com_f, 'origin_airport_iata', '') or ''
-                        _fr24_com_dest   = getattr(_fr24_com_f, 'destination_airport_iata', '') or ''
-                        # Side-effect: populate type cache for free while we have the Flight object
-                        _fr24_com_ac_code = getattr(_fr24_com_f, 'aircraft_code', '') or ''
-                        if _fr24_com_ac_code and hex_code:
-                            _ac_cached = _cache_db_get_aircraft(hex_code)
-                            if not (_ac_cached and _ac_cached[0]):
-                                _cache_db_set_aircraft(hex_code, _translate_type(_fr24_com_ac_code),
-                                                       "fr24", AIRCRAFT_CACHE_TTL)
-                    if not (_fr24_com_origin or _fr24_com_dest):
-                        _log(f"[fr24] {callsign}: no route data")
-            except Exception as e:
-                _log(f"[fr24] {callsign}: request error — {e}")
-            # Cache the result unconditionally — even when _fr24_api is None or an
-            # exception fired, writing the (empty) miss entry prevents every subsequent
-            # poll from re-entering this block and attempting the API call again.
-            _fr24_com_is_nonlocal_cache = _is_nonlocal(_fr24_com_origin, _fr24_com_dest)
-            _fr24_com_ttl = (
-                ROUTE_MISS_TTL if _fr24_com_is_nonlocal_cache
-                else ROUTE_TTL_DEFAULT if (_fr24_com_origin or _fr24_com_dest)
-                else ROUTE_MISS_TTL
-            )
-            _cache_db_set_route(f"fr24:{callsign}", 'route',
-                                _fr24_com_origin, _fr24_com_dest,
-                                None, None, None, None,
-                                int(time.time()) + _fr24_com_ttl,
-                                source="fr24")
+    (_fr24_com_origin, _fr24_com_dest, _fr24_com_src) = _query_fr24_com(
+        callsign, hex_code, registration, origin, destination,
+        plane_lat, plane_lon, _adsbdb_commercial, _all_paid_nonlocal)
 
-        # Geometry parity (same as §1): reject a stale/wrong-leg FR24 route before it
-        # can be committed.  Unknown airports fall through to benefit-of-the-doubt.
-        if (_fr24_com_origin or _fr24_com_dest) and not _fr24_route_plausible(
-                plane_lat, plane_lon, _fr24_com_origin, _fr24_com_dest):
-            _cache_db_set_route(f"fr24:{callsign}", 'route', '', '', None, None, None, None,
-                                int(time.time()) + ROUTE_MISS_TTL, source="fr24")
+    if _fr24_com_origin or _fr24_com_dest:
+        _fr24_com_is_nonlocal = _is_nonlocal(_fr24_com_origin, _fr24_com_dest)
+        if _all_paid_nonlocal and not _fr24_com_is_nonlocal:
+            # All paid APIs were non-local; FR24 returned a local route — use it.
             _log(f"[fr24] {_airline_display(callsign)}: "
-                 f"{_route_display(_fr24_com_origin, _fr24_com_dest)} rejected — implausible route")
-            _fr24_com_origin = _fr24_com_dest = ""
-
-        if _fr24_com_origin or _fr24_com_dest:
-            _fr24_com_is_nonlocal = _is_nonlocal(_fr24_com_origin, _fr24_com_dest)
-            if _all_paid_nonlocal and not _fr24_com_is_nonlocal:
-                # All paid APIs were non-local; FR24 returned a local route — use it.
+                 f"{_route_display(_fr24_com_origin, _fr24_com_dest)} local — overriding non-local paid results")
+            origin      = _fr24_com_origin
+            destination = _fr24_com_dest
+            source      = _fr24_com_src
+        elif not _fr24_com_is_nonlocal:
+            # Normal fill-blanks path (not all-paid-nonlocal context).
+            if _fr24_com_src != "fr24:cached":
                 _log(f"[fr24] {_airline_display(callsign)}: "
-                     f"{_route_display(_fr24_com_origin, _fr24_com_dest)} local — overriding non-local paid results")
-                origin      = _fr24_com_origin
+                     f"{_route_display(_fr24_com_origin, _fr24_com_dest)} accepted (commercial)")
+            if not origin:
+                origin = _fr24_com_origin
+            if not destination:
                 destination = _fr24_com_dest
-                source      = _fr24_com_src
-            elif not _fr24_com_is_nonlocal:
-                # Normal fill-blanks path (not all-paid-nonlocal context).
-                if _fr24_com_src != "fr24:cached":
-                    _log(f"[fr24] {_airline_display(callsign)}: "
-                         f"{_route_display(_fr24_com_origin, _fr24_com_dest)} accepted (commercial)")
-                if not origin:
-                    origin = _fr24_com_origin
-                if not destination:
-                    destination = _fr24_com_dest
-                source = source or _fr24_com_src
-            else:
-                # FR24 also non-local — hold for final acceptance.
-                if _fr24_com_src != "fr24:cached":
-                    _log(f"[fr24] {_airline_display(callsign)}: "
-                         f"{_route_display(_fr24_com_origin, _fr24_com_dest)} non-local — held for final acceptance")
+            source = source or _fr24_com_src
+        else:
+            # FR24 also non-local — hold for final acceptance.
+            if _fr24_com_src != "fr24:cached":
+                _log(f"[fr24] {_airline_display(callsign)}: "
+                     f"{_route_display(_fr24_com_origin, _fr24_com_dest)} non-local — held for final acceptance")
 
     # ── Last-resort selection: walk the full hierarchy for any usable route ────
     # Local routes already committed inline and short-circuited.  If we're still
