@@ -33,6 +33,7 @@ def _log(msg):
 
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0   # always revalidate static CSS/JS (no stale assets after an update)
 
 # ── LAN hardening (no password by design — single-user trusted LAN) ───────────
 # CSRF: a cross-site page can't set a custom request header without a CORS preflight
