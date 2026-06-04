@@ -60,11 +60,16 @@ BASE_DIR = Path(__file__).parent.parent
 # whether server.py is launched from its own directory or from the project root.
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
+_WEB_DIR = Path(__file__).parent
+if str(_WEB_DIR) not in sys.path:
+    sys.path.insert(0, str(_WEB_DIR))   # so sibling modules (stats_data, …) import cleanly
 
 from functools import partial as _partial
-from utilities.nhl  import fetch_game      as _sb_fetch_nhl
-from utilities.espn import fetch_espn_game as _sb_fetch_espn
-from utilities.mlb  import fetch_mlb_game  as _sb_fetch_mlb
+import stats_data
+from stats_data import _db_stats, _parse_log_sightings, _db_recent, _db_search
+from usage_data import _billing_period_start, _billing_period_end, _read_usage_file
+import scoreboard_data
+from scoreboard_data import _fetch_scoreboard_data, _load_persisted_game_ended_at, _persist_game_ended_at, _clear_persisted_game_ended_at
 CONFIG_PATH      = BASE_DIR / "config.py"
 PAUSE_FLAG       = Path("/tmp/ft_paused")
 NIGHT_FLAG       = Path("/tmp/ft_night")
@@ -92,59 +97,11 @@ AEROAPI_USAGE_FILE  = BASE_DIR / "aeroapi_usage.json"
 OVERRIDES_FILE     = BASE_DIR / "ft_overrides.json"
 DB_FILE            = BASE_DIR / "ft_flights.db"
 
+# Wire the extracted stats / history data layer with the DB path + stdout logger.
+stats_data.bind(DB_FILE, _log)
+
 AIRLABS_MONTHLY_LIMIT = 1000    # free tier cap
 
-# Airline prefix → full name (mirrors _AIRLINE_NAMES in overhead.py)
-AIRLINE_NAMES: dict[str, str] = {
-    "AAL": "American Airlines",   "DAL": "Delta Air Lines",
-    "UAL": "United Airlines",     "SWA": "Southwest Airlines",
-    "ASA": "Alaska Airlines",     "JBU": "JetBlue Airways",
-    "NKS": "Spirit Airlines",     "FFT": "Frontier Airlines",
-    "SCX": "Sun Country Airlines","AAY": "Allegiant Air",
-    "HAL": "Hawaiian Airlines",   "VRD": "Virgin America",
-    "MXY": "Breeze Airways",      "VXP": "Avelo Airlines",
-    "ROU": "Air Canada Rouge",
-    "EJA": "NetJets",              "LXJ": "Flexjet",             "JRE": "flyExclusive",
-    "TIV": "Thrive Aviation",      "CXK": "ATP Flight School",
-    "JSX": "JSX",                 "TWY": "Solarius Aviation",
-    "JAN": "Janet Airlines",
-    "FDX": "FedEx Express",       "UPS": "UPS Airlines",
-    "GTI": "Atlas Air",           "ABX": "ABX Air",
-    "ASN": "Amazon Air",          "PAC": "Polar Air Cargo",
-    "CKS": "Kalitta Air",         "WGN": "Western Global Airlines",
-    "NCR": "Northern Air Cargo",  "SOU": "Southern Air",
-    "DHK": "DHL Aviation",        "AGX": "Amerijet International",
-    "OAE": "Omni Air International",
-    "OCN": "Discover Airlines",
-    "ACA": "Air Canada",          "WJA": "WestJet",
-    "POE": "Porter Airlines",     "FLE": "Flair Airlines",
-    "SWG": "Sunwing Airlines",
-    "AMX": "Aeroméxico",          "VOI": "Volaris",
-    "VIV": "VivaAerobus",
-    "BAW": "British Airways",     "VIR": "Virgin Atlantic",
-    "AFR": "Air France",          "DLH": "Lufthansa",
-    "KLM": "KLM",                 "UAE": "Emirates",
-    "QTR": "Qatar Airways",       "SIA": "Singapore Airlines",
-    "EIN": "Aer Lingus",          "IBE": "Iberia",
-    "CFG": "Condor",              "EDW": "Edelweiss Air",
-    "THY": "Turkish Airlines",    "ETD": "Etihad Airways",
-    "SWR": "Swiss Int'l",         "AUA": "Austrian Airlines",
-    "NAX": "Norwegian",           "EZY": "easyJet",
-    "RYR": "Ryanair",             "TAP": "TAP Air Portugal",
-    "FIN": "Finnair",             "BEL": "Brussels Airlines",
-    "KAL": "Korean Air",          "QFA": "Qantas",
-    "ANA": "All Nippon Airways",  "JAL": "Japan Airlines",
-    "CPA": "Cathay Pacific",      "EVA": "EVA Air",
-    "CCA": "Air China",           "CSN": "China Southern",
-    "ANZ": "Air New Zealand",
-    "CMP": "Copa Airlines",       "AVA": "Avianca",
-    "SKW": "SkyWest Airlines",    "ENY": "Envoy Air",
-    "RPA": "Republic Airways",    "QXE": "Horizon Air",
-    "ASH": "Mesa Airlines",       "PDT": "Piedmont Airlines",
-    "JIA": "PSA Airlines",        "UCA": "CommutAir",
-    "CPZ": "Comair",              "MTN": "Mountain Air Cargo",
-    "FLG": "Frontier (charter)",
-}
 AEROAPI_COST_PER_CALL = 0.005   # $0.005 per call
 FEEDER_MONTHLY_CREDIT = 10.00   # FlightAware feeder credit
 AIRLABS_RESET_DAY     = 9       # AirLabs billing period resets on the 9th
@@ -222,6 +179,9 @@ try:
     _PACIFIC = ZoneInfo(read_config().get("TIMEZONE", "America/Los_Angeles"))
 except Exception:
     pass
+
+# Inject read_config into the extracted scoreboard data layer (team preferences).
+scoreboard_data.bind(read_config)
 
 
 def write_config(data):
@@ -417,7 +377,6 @@ def post_config():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 
 @app.route("/api/display/night", methods=["POST"])
@@ -645,327 +604,6 @@ def combined_status():
         "night": NIGHT_FLAG.exists(),
         "apis_disabled": APIS_DISABLED_FLAG.exists(),
     })
-
-
-def _db_stats(date_from: str, date_to: str, today: str | None = None) -> dict | None:
-    """
-    Compute aggregated stats from ft_flights.db for [date_from, date_to] (inclusive).
-    If `today` is provided, also computes today-specific totals for the "Today" card.
-    Returns None if the DB is unavailable or any query fails.
-    """
-    if not DB_FILE.exists():
-        return None
-    conn = None
-    try:
-        conn = sqlite3.connect(str(DB_FILE))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-
-        top_rows = conn.execute(
-            "SELECT airline, COUNT(*) cnt FROM sightings "
-            "WHERE date >= ? AND date <= ? GROUP BY airline ORDER BY cnt DESC LIMIT 25",
-            (date_from, date_to),
-        ).fetchall()
-
-        tail_rows = conn.execute(
-            "SELECT registration, COUNT(*) cnt, "
-            "MAX(airline) as airline, MAX(aircraft) as aircraft "
-            "FROM sightings "
-            "WHERE date >= ? AND date <= ? AND registration != '' "
-            "GROUP BY registration ORDER BY cnt DESC LIMIT 25",
-            (date_from, date_to),
-        ).fetchall()
-
-        route_rows = conn.execute(
-            "SELECT origin || '→' || destination route, COUNT(*) cnt "
-            "FROM sightings "
-            "WHERE date >= ? AND date <= ? AND origin != '' AND destination != '' "
-            "GROUP BY origin, destination ORDER BY cnt DESC LIMIT 50",
-            (date_from, date_to),
-        ).fetchall()
-
-        type_rows = conn.execute(
-            "SELECT aircraft, COUNT(*) cnt FROM sightings "
-            "WHERE date >= ? AND date <= ? AND aircraft != '' "
-            "GROUP BY aircraft ORDER BY cnt DESC LIMIT 25",
-            (date_from, date_to),
-        ).fetchall()
-
-        bucket_rows = conn.execute(
-            """
-            SELECT
-              CASE
-                WHEN route_source = 'none'     THEN 'none'
-                WHEN route_source = 'override'  THEN 'override'
-                WHEN (route_source LIKE '%airlabs%' OR route_source LIKE '%aeroapi%')
-                     AND route_source NOT LIKE '%+%'  THEN 'paid'
-                WHEN (route_source LIKE '%airlabs%' OR route_source LIKE '%aeroapi%')
-                     AND route_source     LIKE '%+%'  THEN 'mixed'
-                ELSE 'free'
-              END bucket,
-              COUNT(*) cnt
-            FROM sightings
-            WHERE date >= ? AND date <= ? AND route_source != ''
-            GROUP BY bucket
-            """,
-            (date_from, date_to),
-        ).fetchall()
-
-        day_rows = conn.execute(
-            "SELECT date, COUNT(*) cnt FROM sightings "
-            "WHERE date >= ? AND date <= ? GROUP BY date",
-            (date_from, date_to),
-        ).fetchall()
-
-        ac_rows = conn.execute(
-            "SELECT api_name, SUM(count) total FROM api_calls "
-            "WHERE date >= ? AND date <= ? GROUP BY api_name",
-            (date_from, date_to),
-        ).fetchall()
-
-        day_ac_rows = conn.execute(
-            "SELECT date, api_name, count FROM api_calls "
-            "WHERE date >= ? AND date <= ?",
-            (date_from, date_to),
-        ).fetchall()
-
-        today_total = None
-        today_top   = None
-        today_ac    = None
-        if today:
-            today_total = conn.execute(
-                "SELECT COUNT(*) FROM sightings WHERE date = ?", (today,)
-            ).fetchone()[0]
-            today_top = conn.execute(
-                "SELECT airline, COUNT(*) cnt FROM sightings "
-                "WHERE date = ? GROUP BY airline ORDER BY cnt DESC LIMIT 5",
-                (today,),
-            ).fetchall()
-            today_ac_rows = conn.execute(
-                "SELECT api_name, SUM(count) total FROM api_calls WHERE date = ? GROUP BY api_name",
-                (today,),
-            ).fetchall()
-            today_ac = {r["api_name"]: r["total"] for r in today_ac_rows}
-
-    except Exception as exc:
-        _log(f"[web] DB stats error: {exc}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-    buckets       = {r["bucket"]: r["cnt"] for r in bucket_rows}
-    total_sourced = sum(buckets.values())
-    source_pct    = {}
-    if total_sourced:
-        for b in ("free", "paid", "mixed", "none", "override"):
-            v = buckets.get(b, 0)
-            if v:
-                source_pct[b] = round(v / total_sourced * 100, 1)
-
-    day_counts  = {r["date"]: r["cnt"] for r in day_rows}
-    range_total = sum(day_counts.values())
-
-    day_api_calls: dict[str, dict] = {}
-    for r in day_ac_rows:
-        day_api_calls.setdefault(r["date"], {})[r["api_name"]] = r["count"]
-
-    return {
-        "today_total":     today_total,
-        "today_top":       [
-            {"prefix": r["airline"], "count": r["cnt"], "name": AIRLINE_NAMES.get(r["airline"], "")}
-            for r in (today_top or [])
-        ],
-        "today_api_calls": today_ac or {},
-        "range_total":     range_total,
-        "range_top":       [
-            {"prefix": r["airline"], "count": r["cnt"], "name": AIRLINE_NAMES.get(r["airline"], "")}
-            for r in top_rows
-        ],
-        "range_api_calls": {r["api_name"]: r["total"] for r in ac_rows},
-        "day_api_calls":   day_api_calls,
-        "rollup": {
-            "flights":    range_total,
-            "airlines":   [
-                {"prefix": r["airline"], "count": r["cnt"], "name": AIRLINE_NAMES.get(r["airline"], "")}
-                for r in top_rows
-            ],
-            "tails":      [
-                {
-                    "reg":   r["registration"],
-                    "count": r["cnt"],
-                    "name":  ", ".join(filter(None, [
-                        AIRLINE_NAMES.get(r["airline"] or "", ""),
-                        r["aircraft"] or "",
-                    ])),
-                }
-                for r in tail_rows
-            ],
-            "routes":     [{"route": r["route"],       "count": r["cnt"]} for r in route_rows],
-            "types":      [{"type": r["aircraft"],     "count": r["cnt"]} for r in type_rows],
-            "source_pct": source_pct,
-        },
-        "day_counts": day_counts,
-    }
-
-
-# ── Log-parsing regex (mirrors backfill_db.py) ────────────────────────────────
-_LOG_ROUTE_RE = re.compile(
-    r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"
-    r"\s+\[route:([^\]]*)\]"
-    r"\s+\[type:[^\]]*\]"
-    r"\s+([A-Z][A-Z0-9]{2,9})"
-    r"(?:\s+\([^)]*\))?"
-    r"\s+([A-Z?]{3})->([A-Z?]{3})"
-)
-_LOG_AIRCRAFT_RE = re.compile(r"'([^']*)'\s*([A-Z][A-Z0-9-]{3,})?\s*$")
-
-
-def _parse_log_sightings(log_path: Path) -> list:
-    """
-    Parse plane.log and return sightings list (newest-first).
-    Used as fallback when ft_flights.db is unavailable.
-    """
-    sightings = []
-    try:
-        with open(log_path, errors="replace") as fh:
-            for raw in fh:
-                line = raw.rstrip()
-                if "[TEST:" in line:
-                    continue
-                m = _LOG_ROUTE_RE.match(line)
-                if not m:
-                    continue
-                seen_at, route_src, callsign, origin, dest = m.groups()
-                am = _LOG_AIRCRAFT_RE.search(line, m.end())
-                aircraft     = am.group(1) if am else ""
-                registration = (am.group(2) or "") if am else ""
-                if origin == "?": origin = ""
-                if dest   == "?": dest   = ""
-                prefix = callsign[:3].upper() if len(callsign) >= 3 else ""
-                sightings.append({
-                    "seen_at":      seen_at,
-                    "date":         seen_at[:10],
-                    "time":         seen_at[11:16],
-                    "callsign":     callsign,
-                    "registration": registration,
-                    "origin":       origin,
-                    "destination":  dest,
-                    "aircraft":     aircraft,
-                    "route_source": route_src,
-                    "airline":      AIRLINE_NAMES.get(prefix, ""),
-                })
-    except Exception:
-        pass
-    return list(reversed(sightings))
-
-
-def _db_recent(date_from: str, date_to: str, limit: int = 50) -> list:
-    """Return the most recent sightings in [date_from, date_to], newest first, up to limit."""
-    if not DB_FILE.exists():
-        return []
-    conn = None
-    try:
-        conn = sqlite3.connect(str(DB_FILE))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        rows = conn.execute(
-            """
-            SELECT seen_at, date, callsign, registration, origin, destination,
-                   aircraft, route_source, airline
-            FROM   sightings
-            WHERE  date >= ? AND date <= ?
-            ORDER  BY seen_at DESC
-            LIMIT  ?
-            """,
-            (date_from, date_to, limit),
-        ).fetchall()
-        return [
-            {
-                "seen_at":      r["seen_at"],
-                "date":         r["date"],
-                "time":         r["seen_at"][11:16] if r["seen_at"] else "",
-                "callsign":     r["callsign"],
-                "registration": r["registration"],
-                "origin":       r["origin"],
-                "destination":  r["destination"],
-                "aircraft":     r["aircraft"],
-                "route_source": r["route_source"],
-                "airline":      AIRLINE_NAMES.get(r["airline"], ""),
-            }
-            for r in rows
-        ]
-    except Exception as exc:
-        _log(f"[web] DB recent error: {exc}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-def _db_search(q: str, limit: int = 100, offset: int = 0) -> tuple[list, int] | None:
-    """
-    Search sightings in ft_flights.db (case-insensitive substring match on
-    callsign, registration, origin, or destination).
-    Returns (rows_newest_first, total_match_count) or None if the DB is unavailable.
-    Supports pagination via limit/offset; limit is capped at 200 per page.
-    total_match_count reflects the real number of matches so the UI can show
-    "showing 100 of 1,450" accurately.
-    """
-    if not DB_FILE.exists():
-        return None
-    conn = None
-    limit  = min(max(int(limit), 1), 200)
-    offset = max(int(offset), 0)
-    try:
-        conn = sqlite3.connect(str(DB_FILE))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        like = f"%{q}%"
-        params = (like, like, like, like)
-        where  = ("callsign LIKE ? OR registration LIKE ? "
-                  "OR origin LIKE ? OR destination LIKE ?")
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM sightings WHERE {where}", params
-        ).fetchone()[0]
-        rows = conn.execute(
-            f"""
-            SELECT seen_at, date, callsign, registration, origin, destination,
-                   aircraft, route_source, airline
-            FROM sightings
-            WHERE {where}
-            ORDER BY seen_at DESC
-            LIMIT {limit} OFFSET {offset}
-            """,
-            params,
-        ).fetchall()
-        return (
-            [
-                {
-                    "seen_at":      r["seen_at"],
-                    "date":         r["date"],
-                    "time":         r["seen_at"][11:16] if r["seen_at"] else "",
-                    "callsign":     r["callsign"],
-                    "registration": r["registration"],
-                    "origin":       r["origin"],
-                    "destination":  r["destination"],
-                    "aircraft":     r["aircraft"],
-                    "route_source": r["route_source"],
-                    "airline":      AIRLINE_NAMES.get(r["airline"], ""),
-                }
-                for r in rows
-            ],
-            total,
-        )
-    except Exception as exc:
-        _log(f"[web] DB search error: {exc}")
-        return None
-    finally:
-        if conn:
-            conn.close()
 
 
 @app.route("/api/stats", methods=["GET"])
@@ -1340,147 +978,6 @@ _scoreboard_cache      = {"game": None, "team_name": "VGK", "sport_key": "NHL", 
 _scoreboard_cache_lock = threading.Lock()
 _SCOREBOARD_CACHE_TTL  = 30   # seconds
 
-# File that persists game_ended_at across web-service restarts (keyed by game_id
-# so yesterday's game doesn't suppress today's).
-_GAME_ENDED_AT_FILE = Path("/tmp/ft_game_ended_at.json")
-
-
-def _load_persisted_game_ended_at(game_id) -> float | None:
-    """Return the persisted ended_at timestamp for game_id, or None if missing/stale."""
-    try:
-        data = json.loads(_GAME_ENDED_AT_FILE.read_text())
-        if data.get("game_id") == game_id:
-            return float(data["ended_at"])
-    except Exception:
-        pass
-    return None
-
-
-def _persist_game_ended_at(game_id, ended_at: float) -> None:
-    """Write game_ended_at to disk so it survives web-service restarts."""
-    try:
-        tmp = Path(str(_GAME_ENDED_AT_FILE) + ".tmp")
-        tmp.write_text(json.dumps({"game_id": game_id, "ended_at": ended_at}))
-        tmp.replace(_GAME_ENDED_AT_FILE)
-    except Exception:
-        pass
-
-
-def _clear_persisted_game_ended_at() -> None:
-    """Remove the persisted ended_at file (game is no longer final)."""
-    _GAME_ENDED_AT_FILE.unlink(missing_ok=True)
-
-
-def _fetch_scoreboard_data():
-    """
-    Fetch today's highest-priority active game across all configured sports.
-    Returns (game, team_name, sport_key, enabled).
-      game       — dict or None
-      team_name  — abbreviation for the team with the active game
-      sport_key  — e.g. "NHL", "NFL", "MLB", "NBA", "MLS"
-      enabled    — True if at least one sport is configured and master switch is on
-    """
-    cfg = {}
-    try:
-        cfg = read_config()
-    except Exception:
-        pass
-
-    # Master switch — default True when key is absent so configs written before
-    # this feature was added keep working until the user saves via the web UI.
-    if not cfg.get("SCOREBOARD_ENABLED", True):
-        return None, "VGK", "NHL", False
-
-    tz_name = cfg.get("TIMEZONE", "America/Los_Angeles")
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = None
-
-    # Backward-compat: old SCOREBOARD_ENABLED / SCOREBOARD_TEAM_ID map to NHL
-    def _b(key, fallback_key=None, default=None):
-        v = cfg.get(key)
-        if v is None and fallback_key:
-            v = cfg.get(fallback_key)
-        return v if v is not None else default
-
-    priority = cfg.get("SCOREBOARD_PRIORITY", ["NHL", "NFL", "MLB", "NBA", "MLS"])
-
-    _SPORT_DEFS = {
-        "NHL": {
-            "enabled":   bool(_b("SCOREBOARD_NHL_ENABLED", "SCOREBOARD_ENABLED",   True)),
-            "team_id":   int(_b("SCOREBOARD_NHL_TEAM_ID",  "SCOREBOARD_TEAM_ID",   0)),
-            "team_name": str(_b("SCOREBOARD_NHL_TEAM_NAME","SCOREBOARD_TEAM_NAME", "")),
-            "fetch_fn":  lambda tid: _sb_fetch_nhl(tid, tz),
-        },
-        "NFL": {
-            "enabled":   bool(cfg.get("SCOREBOARD_NFL_ENABLED", False)),
-            "team_id":   int(cfg.get("SCOREBOARD_NFL_TEAM_ID",  0)),
-            "team_name": str(cfg.get("SCOREBOARD_NFL_TEAM_NAME", "")),
-            "fetch_fn":  lambda tid: _sb_fetch_espn("football/nfl", tid, tz),
-        },
-        "MLB": {
-            "enabled":   bool(cfg.get("SCOREBOARD_MLB_ENABLED", False)),
-            "team_id":   int(cfg.get("SCOREBOARD_MLB_TEAM_ID",  0)),
-            "team_name": str(cfg.get("SCOREBOARD_MLB_TEAM_NAME", "")),
-            "fetch_fn":  lambda tid: _sb_fetch_mlb(tid, tz),
-        },
-        "NBA": {
-            "enabled":   bool(cfg.get("SCOREBOARD_NBA_ENABLED", False)),
-            "team_id":   int(cfg.get("SCOREBOARD_NBA_TEAM_ID",  0)),
-            "team_name": str(cfg.get("SCOREBOARD_NBA_TEAM_NAME", "")),
-            "fetch_fn":  lambda tid: _sb_fetch_espn("basketball/nba", tid, tz),
-        },
-        "MLS": {
-            "enabled":   bool(cfg.get("SCOREBOARD_MLS_ENABLED", False)),
-            "team_id":   int(cfg.get("SCOREBOARD_MLS_TEAM_ID",  0)),
-            "team_name": str(cfg.get("SCOREBOARD_MLS_TEAM_NAME", "")),
-            "fetch_fn":  lambda tid: _sb_fetch_espn("soccer/usa.1", tid, tz),
-        },
-    }
-
-    any_enabled = any(
-        _SPORT_DEFS[k]["enabled"] and _SPORT_DEFS[k]["team_id"]
-        for k in priority if k in _SPORT_DEFS
-    )
-
-    # Check sports in priority order; return first active (LIVE/CRIT) game,
-    # then fall back to first FINAL game, then the first game found at all.
-    best_live      = None
-    best_live_name = "VGK"
-    best_live_key  = "NHL"
-    best_final      = None
-    best_final_name = "VGK"
-    best_final_key  = "NHL"
-
-    for league in priority:
-        spec = _SPORT_DEFS.get(league)
-        if not spec or not spec["enabled"] or not spec["team_id"]:
-            continue
-        try:
-            game = spec["fetch_fn"](spec["team_id"])
-        except Exception:
-            game = None
-        if game is None:
-            continue
-        state = game.get("state", "FUT")
-        if state in ("LIVE", "CRIT") and best_live is None:
-            best_live      = game
-            best_live_name = spec["team_name"]
-            best_live_key  = league
-        if state in ("FINAL", "OFF") and best_final is None:
-            best_final      = game
-            best_final_name = spec["team_name"]
-            best_final_key  = league
-
-    if best_live:
-        return best_live, best_live_name, best_live_key, any_enabled
-    if best_final:
-        return best_final, best_final_name, best_final_key, any_enabled
-
-    # No active game — return None so the cache signals no scoreboard
-    return None, "VGK", "NHL", any_enabled
-
 
 @app.route("/api/scoreboard", methods=["GET"])
 def api_scoreboard():
@@ -1565,7 +1062,6 @@ def api_scoreboard():
     })
 
 
-
 @app.route("/api/service", methods=["GET"])
 def service_status():
     try:
@@ -1611,47 +1107,6 @@ def service_start():
         return jsonify({"error": (e.stderr or b"").decode()}), 500
     except OSError as e:
         return jsonify({"error": str(e)}), 503
-
-
-def _billing_period_start(reset_day):
-    """Return the current billing period start as YYYY-MM-DD."""
-    today = datetime.now(_PACIFIC)
-    if today.day >= reset_day:
-        # Clamp to actual days in this month (e.g. reset_day=31 in February)
-        this_month_days = calendar.monthrange(today.year, today.month)[1]
-        return today.replace(day=min(reset_day, this_month_days)).strftime("%Y-%m-%d")
-    first_of_month = today.replace(day=1)
-    last_month = first_of_month - timedelta(days=1)
-    # Clamp reset_day to actual days in last month (defensive for reset_day > 28)
-    actual_day = min(reset_day, calendar.monthrange(last_month.year, last_month.month)[1])
-    return last_month.replace(day=actual_day).strftime("%Y-%m-%d")
-
-
-def _billing_period_end(reset_day):
-    """Return the last day of the current billing period as YYYY-MM-DD."""
-    today = datetime.now(_PACIFIC)
-    # Determine year/month of the next reset date
-    if today.day >= reset_day:
-        y = today.year + 1 if today.month == 12 else today.year
-        m = 1 if today.month == 12 else today.month + 1
-    else:
-        y, m = today.year, today.month
-    # Clamp reset_day to actual days in that month (defensive for reset_day > 28)
-    actual_day = min(reset_day, calendar.monthrange(y, m)[1])
-    next_reset = today.replace(year=y, month=m, day=actual_day)
-    return (next_reset - timedelta(days=1)).strftime("%Y-%m-%d")
-
-
-def _read_usage_file(path, reset_day):
-    """Read a usage JSON file, resetting if the billing period has rolled over."""
-    period = _billing_period_start(reset_day)
-    try:
-        data = json.loads(Path(path).read_text())
-        if data.get("period_start") == period:
-            return data
-    except Exception:
-        pass
-    return {"period_start": period, "value": 0.0}
 
 
 @app.route("/api/usage", methods=["GET"])
