@@ -27,6 +27,7 @@ import requests
 from collections import namedtuple
 from utilities.geometry import _haversine_km, _route_plausible  # pure geometry, extracted
 from utilities.refdata import (_AIRPORT_CITIES, _AIRLINE_NAMES, _AIRCRAFT_TYPE_MAP,
+                               _SCHEDULED_PREFIXES,
                                _clean_iata, _route_display, _airline_display, _translate_type)
 from utilities import cache  # SQLite cache layer; live conn/lock/bypass injected via cache.bind() below
 from utilities.cache import (
@@ -219,7 +220,10 @@ def _rotate_log_if_needed():
 
 # Persistent files — stored in project dir so they survive reboots
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-_DATA_DIR    = os.path.join(_PROJECT_DIR, "..")
+# Data files (SQLite DB, usage/override JSON) live next to the project by default.  An env
+# override lets the desktop preview redirect them to a throwaway dir so it stays side-effect-
+# free and runs from read-only locations (e.g. C:\Program Files\...).  The Pi sets nothing.
+_DATA_DIR    = os.environ.get("FT_DATA_DIR") or os.path.join(_PROJECT_DIR, "..")
 AIRLABS_USAGE_FILE  = os.path.join(_DATA_DIR, "airlabs_usage.json")
 AIRLABS2_USAGE_FILE = os.path.join(_DATA_DIR, "airlabs2_usage.json")
 AEROAPI_USAGE_FILE = os.path.join(_DATA_DIR, "aeroapi_usage.json")
@@ -316,7 +320,7 @@ def _skip_paid_apis(callsign: str) -> bool:
 # ── Flight statistics ──────────────────────────────────────────────────────────
 DB_FILE      = os.path.join(_DATA_DIR, "ft_flights.db")
 _stats_lock  = Lock()
-_stats_seen_today: set = set()   # (date, callsign) already counted — survives restart via JSON
+_stats_seen_today: set = set()   # (date, callsign) already counted — survives restart via the SQLite sightings table
 _stats_last_date: str  = ""
 _db_conn:    sqlite3.Connection | None = None
 _cache_conn: sqlite3.Connection | None = None
@@ -589,33 +593,49 @@ def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str,
     key    = (today, callsign)
     prefix = callsign[:3].upper() if len(callsign) >= 3 else "???"
     try:
+        # Day rollover — prune stale in-memory entries and log yesterday's summary.
+        # The two aggregate SELECTs run OUTSIDE _stats_lock so they don't stall every
+        # stat writer while scanning a full day of rows: under the lock we only flip the
+        # shared in-memory state (clear the set, advance the date) and snapshot the day
+        # that just ended; the read-only summary query then runs unlocked on the now-
+        # immutable previous day (concurrent writers only INSERT today's rows, and
+        # sqlite3 serialises statements on the shared connection internally).
+        _rolled_prev_date = ""
         with _stats_lock:
-            # Day rollover — prune stale in-memory entries and log yesterday's summary.
             if today != _stats_last_date:
                 _stats_seen_today.clear()
-                if _stats_last_date and _db_conn is not None:
-                    try:
-                        _prev_total = _db_conn.execute(
-                            "SELECT COUNT(*) FROM sightings WHERE date=?",
-                            (_stats_last_date,),
-                        ).fetchone()[0]
-                        _prev_rows = _db_conn.execute(
-                            "SELECT airline, COUNT(*) cnt FROM sightings "
-                            "WHERE date=? GROUP BY airline ORDER BY cnt DESC LIMIT 5",
-                            (_stats_last_date,),
-                        ).fetchall()
-                        _top_str = ", ".join(f"{r[0]}×{r[1]}" for r in _prev_rows)
-                        _log(f"[stats] {_stats_last_date}: {_prev_total} flights — top: {_top_str}")
-                    except Exception:
-                        pass
-                _stats_last_date = today
+                _rolled_prev_date = _stats_last_date   # "" on the very first call (no summary)
+                _stats_last_date  = today
+        if _rolled_prev_date and _db_conn is not None:
+            try:
+                _prev_total = _db_conn.execute(
+                    "SELECT COUNT(*) FROM sightings WHERE date=?",
+                    (_rolled_prev_date,),
+                ).fetchone()[0]
+                _prev_rows = _db_conn.execute(
+                    "SELECT airline, COUNT(*) cnt FROM sightings "
+                    "WHERE date=? GROUP BY airline ORDER BY cnt DESC LIMIT 5",
+                    (_rolled_prev_date,),
+                ).fetchall()
+                _top_str = ", ".join(f"{r[0]}×{r[1]}" for r in _prev_rows)
+                _log(f"[stats] {_rolled_prev_date}: {_prev_total} flights — top: {_top_str}")
+            except Exception:
+                pass
 
+        with _stats_lock:
             # Deduplicate in memory (fast path — avoids a DB read for repeat polls).
             if key in _stats_seen_today:
                 # Don't double-count, but still fill in fields that were empty on
                 # the original insert (registration often arrives on a later poll
                 # once airplanes.live has populated the cache).
-                if _db_conn is not None and (registration or plane_type):
+                # Write-amplification guard: a lingering aircraft re-enters this branch
+                # every poll (~15 s).  Only issue the UPDATE+commit when the enrich inputs
+                # (registration, plane_type, route_src) actually changed from what we last
+                # wrote for this (date, callsign) — otherwise the row would be rewritten to
+                # identical values, hammering the SD card for no benefit.
+                _enrich_sig = (registration, plane_type, route_src)
+                if (_db_conn is not None and (registration or plane_type)
+                        and _last_enrich_written.get(key) != _enrich_sig):
                     try:
                         _db_conn.execute(
                             """UPDATE sightings SET
@@ -629,6 +649,7 @@ def _record_flight_stat(callsign: str, plane_type: str, origin: str, dest: str,
                              today, callsign),
                         )
                         _db_conn.commit()
+                        _bounded_put(_last_enrich_written, key, _enrich_sig)
                     except Exception as exc:
                         _log(f"[overhead] DB enrich failed for {callsign}: {exc}")
                 return
@@ -776,37 +797,9 @@ def _record_ga_free_api_check(registration: str, callsign: str, free_api: str,
 # Negative-cache (miss) entries use ROUTE_MISS_TTL for real-time APIs (OpenSky,
 # AirLabs, AeroAPI) so they retry quickly as new data arrives.  adsbdb is a
 # static historical DB and uses ADSBDB_CACHE_TTL for both hits and misses.
-_SCHEDULED_PREFIXES = frozenset([
-    # US majors
-    "AAL", "DAL", "UAL", "SWA", "ASA", "JBU", "NKS", "FFT", "SCX", "AAY",
-    "HAL", "VRD",
-    # US ULCCs / leisure / charter
-    "MXY", "VXP", "JSX", "TWY",
-    # Canadian regional / leisure
-    "ROU",
-    # US cargo (scheduled routes — 7-day TTL appropriate)
-    "FDX", "UPS", "GTI", "ABX", "ASN", "PAC", "CKS", "WGN", "NCR", "SOU",
-    "DHK", "AGX",
-    # US charters / military contract
-    "OCN", "OAE",
-    # Canadian
-    "ACA", "WJA", "POE", "FLE", "SWG",
-    # Mexican
-    "AMX", "VOI", "VIV",
-    # European
-    "BAW", "VIR", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
-    "CFG", "EDW", "THY", "ETD", "SWR", "AUA", "NAX", "EZY", "RYR", "TAP",
-    "FIN", "BEL",
-    # Asian / Pacific
-    "KAL", "ANA", "JAL", "CPA", "EVA", "CCA", "CSN", "ANZ",
-    # Latin American
-    "CMP", "AVA",
-    # Oceania
-    "QFA",
-    # Regional/commuter
-    "SKW", "ENY", "RPA", "QXE", "ASH", "PDT", "JIA", "UCA", "CPZ", "MTN",
-    "FLG",
-])
+# The scheduled-airline prefix set (which operators get ROUTE_TTL_SCHEDULED) now lives in
+# utilities/refdata.py — the single source of truth shared with backfill_resolved_cache.py.
+# It is imported at the top of this module as _SCHEDULED_PREFIXES.
 
 # Cache TTLs — all overridable via config.py; defaults below.
 try:
@@ -847,7 +840,7 @@ AIRCRAFT_MISS_TTL  = 300    # negative cache: don't hammer all 3 type APIs every
 # Must also run AFTER the TTL constants above, since _migrate_legacy_caches()
 # references them during the one-time ft_cache.json import on first boot.
 _init_db()
-# Restore today's seen-callsigns from the sightings table (falls back to ft_stats.json).
+# Restore today's seen-callsigns from the SQLite sightings table (the sole stats store).
 _load_stats_seen_today()
 
 
@@ -976,6 +969,12 @@ _AIRPORT_SEED = {
     "CUN": (21.0365, -86.8771),  "GDL": (20.5218, -103.3112), "MEX": (19.4363, -99.0721),
 }
 _airport_coords_mem = dict(_AIRPORT_SEED)  # IATA -> (lat, lon); grows at runtime
+# Dedicated lock guarding ONLY the _airport_coords_mem dict — it is read and written from
+# concurrent lookup-executor threads (_remember_airport harvests, _airport_coords memoises
+# on read).  MUST NOT be _cache_lock: _remember_airport persists via _cache_db_set_route
+# which itself takes _cache_lock, so sharing the lock would self-deadlock.  Scope is kept
+# tiny (just the dict access) and always released before any _cache_db_* call.
+_airport_mem_lock: Lock = Lock()
 
 # Config-driven home-airport seed: give each LOCAL_AIRPORTS code from config.py an
 # approximate coordinate (the receiver's home location, LOCATION_HOME) so a route
@@ -1007,9 +1006,12 @@ def _remember_airport(iata, lat, lon):
         return
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0) or (lat == 0.0 and lon == 0.0):
         return
-    if _airport_coords_mem.get(iata) == (lat, lon):
-        return  # already known and unchanged — skip the DB write
-    _airport_coords_mem[iata] = (lat, lon)
+    # Lock ONLY the dict read-modify-write; release before the _cache_db_set_route call
+    # below (that helper takes _cache_lock — nesting it here would self-deadlock).
+    with _airport_mem_lock:
+        if _airport_coords_mem.get(iata) == (lat, lon):
+            return  # already known and unchanged — skip the DB write
+        _airport_coords_mem[iata] = (lat, lon)
     # Persist with a long TTL (airport coords are static) so it survives restarts.
     _cache_db_set_route(f"apt:{iata}", 'airport', iata, '', lat, lon, None, None,
                         int(time.time()) + 365 * 86400, source="harvest")
@@ -1020,13 +1022,17 @@ def _airport_coords(iata):
     if not iata:
         return None
     iata = iata.strip().upper()
-    coords = _airport_coords_mem.get(iata)
+    with _airport_mem_lock:
+        coords = _airport_coords_mem.get(iata)
     if coords:
         return coords
+    # DB read happens OUTSIDE _airport_mem_lock (it takes _cache_lock internally); only the
+    # memo-on-read write is re-locked.
     row = _cache_db_get_route(f"apt:{iata}", 'airport')
     if row and row[2] is not None and row[3] is not None:
         coords = (row[2], row[3])
-        _airport_coords_mem[iata] = coords
+        with _airport_mem_lock:
+            _airport_coords_mem[iata] = coords
         return coords
     return None
 
@@ -1039,6 +1045,8 @@ def _fr24_route_plausible(plane_lat, plane_lon, o_iata, d_iata):
     Returns True when either airport's coords are unknown — benefit of the doubt,
     matching _route_plausible's own missing-coordinate behavior (no regression).
     """
+    if o_iata and d_iata and o_iata.upper() == d_iata.upper():
+        return False  # genuine same-airport route (same CODE) — garbage, reject
     o = _airport_coords(o_iata)
     d = _airport_coords(d_iata)
     if not o or not d:
@@ -1055,7 +1063,7 @@ def _fr24_route_plausible(plane_lat, plane_lon, o_iata, d_iata):
 # [flip-check] shadow backstop was retired once it had logged zero disagreements.  The inline
 # per-source commits remain ONLY to short-circuit paid API calls and to complete override-
 # partials (a path _select() intentionally does not handle) — they no longer pick the route.
-_Cand = namedtuple("_Cand", "origin dest olat olon dlat dlon source is_live")
+_Cand = namedtuple("_Cand", "origin dest olat olon dlat dlon source")
 
 
 def _route_tier(origin, dest):
@@ -1071,6 +1079,8 @@ def _cand_plausible(cand, plane_lat, plane_lon):
     """Geometry check for a candidate: use its OWN coords when present (most precise),
     else resolve its IATA codes through the harvested airport-coords table.  Returns True
     when coords are unknown — benefit of the doubt, matching each source's own behavior."""
+    if cand.origin and cand.dest and cand.origin.upper() == cand.dest.upper():
+        return False  # genuine same-airport route (same CODE) — garbage, reject
     if cand.olat is not None and cand.dlat is not None:
         return _route_plausible(plane_lat, plane_lon,
                                 cand.olat, cand.olon, cand.dlat, cand.dlon)
@@ -1181,6 +1191,12 @@ _last_route_log: dict[str, tuple] = {}
 # lines, so a lingering override flight (e.g. JANET77 orbiting) logs the match once and
 # then only the [overhead] alt= tracking line repeats until the rule (or its result) changes.
 _last_override_log: dict[str, tuple] = {}
+# (date, callsign) -> (registration, plane_type, route_src) last WRITTEN by the dedup-enrich
+# UPDATE in _record_flight_stat.  Lets an already-counted, lingering flight skip its
+# per-poll (~15 s) UPDATE+commit when none of the enrich fields changed — avoiding SD-card
+# write amplification for the whole time the aircraft is overhead (behaviour-preserving:
+# the DB ends up with the same values, just written once instead of every poll).
+_last_enrich_written: dict[tuple, tuple] = {}
 
 def _in_backoff(api_name: str) -> bool:
     """True if we should skip this API because it recently told us to back off."""
@@ -1225,16 +1241,32 @@ def _check_period_reset(api_name: str, reset_day: int) -> None:
 _overrides_lock:   Lock = Lock()
 _overrides_cache:  list = []
 _overrides_version: int = -1   # -1 = not yet loaded from DB
+# get_route runs on every flight every poll, so probing overrides_meta on each call put a
+# tiny SELECT under _overrides_lock+_cache_lock on the hot path.  Time-gate the probe: re-
+# check the version at most every _OVERRIDES_RECHECK_SECS, serving the in-memory snapshot in
+# between.  A saved override edit is therefore picked up within a few seconds (acceptable for
+# a manual config change), while steady-state polling skips the DB hit entirely.
+_OVERRIDES_RECHECK_SECS = 3.0
+_overrides_last_check: float = 0.0   # time.monotonic() of the last overrides_meta probe
 
 
 def _load_overrides() -> list:
     """Return the current override rules, reloading from DB when the version counter changes.
     Thread-safe: callers may be any of the ThreadPoolExecutor worker threads.
     Returns a snapshot copy so callers can iterate without holding either lock.
+    The overrides_meta version probe is time-gated (_OVERRIDES_RECHECK_SECS) so steady-state
+    polling serves the cached snapshot without touching the DB; a save is picked up within
+    a few seconds.
     """
-    global _overrides_cache, _overrides_version
+    global _overrides_cache, _overrides_version, _overrides_last_check
     with _overrides_lock:
-        if _cache_conn is not None:
+        _now_mono = time.monotonic()
+        # Probe the version at most once per interval — but always on the very first call
+        # (_overrides_version == -1) so the initial load isn't deferred.
+        if (_cache_conn is not None
+                and (_overrides_version < 0
+                     or (_now_mono - _overrides_last_check) >= _OVERRIDES_RECHECK_SECS)):
+            _overrides_last_check = _now_mono
             try:
                 with _cache_lock:
                     row = _cache_conn.execute(
@@ -2550,6 +2582,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             if _cached_plausible:
                 _fa_cached_origin = _cached_fa[0] or ""
                 _fa_cached_dest   = _cached_fa[1] or ""
+                # Surface the cached AeroAPI route to _select as a candidate (via
+                # fa_origin/fa_dest) for LOCAL routes too.  Previously only the non-local
+                # branch below bridged these, so a cached AeroAPI *local* route never became
+                # a candidate — _select then resolved the flight to "none" (or to a wrong
+                # non-local source).  _select's local-first tiering now picks it correctly.
+                fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
                 if (_al_held_nonlocal
                         and _fa_cached_origin and _fa_cached_dest
                         and _has_local_endpoint(_fa_cached_origin, _fa_cached_dest)):
@@ -2938,11 +2976,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if not _override_partial:
         _cands = []
         if _fr24_origin or _fr24_dest:
-            _cands.append(_Cand(_fr24_origin, _fr24_dest, None, None, None, None, "fr24", _fr24_src == "fr24"))
+            _cands.append(_Cand(_fr24_origin, _fr24_dest, None, None, None, None, "fr24"))
         if al_origin or al_dest:
-            _cands.append(_Cand(al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon, "airlabs", _al_count > 0))
+            _cands.append(_Cand(al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon, "airlabs"))
         if al2_origin or al2_dest:
-            _cands.append(_Cand(al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2", _al2_count > 0))
+            _cands.append(_Cand(al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2"))
         if fa_origin or fa_dest:
             # AeroAPI's per-call coord locals (fa_olat…) aren't function-scoped, so look the
             # endpoint coords back up from the harvested airport table (populated by AeroAPI's
@@ -2951,18 +2989,18 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             # airport), silently re-billing the paid chain every poll.
             _fa_o = _airport_coords(fa_origin) or (None, None)
             _fa_d = _airport_coords(fa_dest) or (None, None)
-            _cands.append(_Cand(fa_origin, fa_dest, _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi", False))
+            _cands.append(_Cand(fa_origin, fa_dest, _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi"))
         if _fr24_com_origin or _fr24_com_dest:
-            _cands.append(_Cand(_fr24_com_origin, _fr24_com_dest, None, None, None, None, "fr24", _fr24_com_src == "fr24"))
+            _cands.append(_Cand(_fr24_com_origin, _fr24_com_dest, None, None, None, None, "fr24"))
         if (adsbdb_origin and _sky_origin and adsbdb_origin.upper() == _sky_origin.upper()
                 and adsbdb_dest and _sky_dest and adsbdb_dest.upper() == _sky_dest.upper()):
             _cands.append(_Cand(adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
-                                adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky", False))
+                                adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky"))
         if adsbdb_origin or adsbdb_dest:
             _cands.append(_Cand(adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
-                                adsbdb_dlat, adsbdb_dlon, "adsbdb", _adsbdb_src == "adsbdb"))
+                                adsbdb_dlat, adsbdb_dlon, "adsbdb"))
         if _sky_origin or _sky_dest:
-            _cands.append(_Cand(_sky_origin, _sky_dest, None, None, None, None, "opensky", _sky_src == "opensky"))
+            _cands.append(_Cand(_sky_origin, _sky_dest, None, None, None, None, "opensky"))
         _best = _select(_cands, plane_lat, plane_lon)
 
         # Reconstruct the cached-aware source label from _select's bare source name,
@@ -3600,6 +3638,7 @@ class Overhead:
                     "vertical_speed": flight.vertical_speed,
                     "altitude": flight.altitude,
                     "callsign": callsign,
+                    "hex": flight.hex_code,        # ICAO 24-bit hex — lets the display dedup blank-callsign planes on (callsign, hex)
                 })
 
             success = True

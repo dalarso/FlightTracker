@@ -154,3 +154,6 @@ cython_debug/
 
 # stray editor/backup files
 *.bak
+
+# RGBMatrixEmulator preview scratch (never commit)
+emulator_config.json

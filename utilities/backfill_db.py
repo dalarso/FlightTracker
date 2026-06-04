@@ -12,7 +12,6 @@ Usage (on the Pi):
 The script auto-locates ft_flights.db relative to this file's parent directory.
 """
 
-import json
 import re
 import shutil
 import sqlite3
@@ -26,7 +25,6 @@ _SCRIPT_DIR  = Path(__file__).resolve().parent
 _PROJECT_DIR = _SCRIPT_DIR.parent
 DB_FILE      = _PROJECT_DIR / "ft_flights.db"
 DEFAULT_LOG  = Path.home() / "plane.log"
-DEFAULT_STATS = _PROJECT_DIR / "ft_stats.json"
 
 # ── Log-line regexes ──────────────────────────────────────────────────────────
 # Matches the core overhead log line:
@@ -187,69 +185,13 @@ def backfill(log_path: Path, db_path: Path, verbose: bool = False) -> None:
     print(f"  DB                     : {db_path}")
 
 
-def backfill_api_calls(stats_path: Path, db_path: Path, verbose: bool = False) -> None:
-    """
-    Read ft_stats.json and populate the api_calls table in ft_flights.db.
-    Uses INSERT OR REPLACE so re-runs are idempotent.
-    """
-    if not stats_path.exists():
-        print(f"SKIP: stats file not found: {stats_path}", file=sys.stderr)
-        return
-
-    try:
-        with open(stats_path) as fh:
-            stats = json.load(fh)
-    except Exception as exc:
-        print(f"ERROR: could not read {stats_path}: {exc}", file=sys.stderr)
-        return
-
-    conn = _open_db(db_path)
-    inserted = 0
-    skipped  = 0
-
-    for date, rec in stats.items():
-        # Skip keys that aren't date strings (YYYY-MM-DD)
-        if len(date) != 10 or date[4] != "-":
-            continue
-        api_calls = rec.get("api_calls", {})
-        for api_name, count in api_calls.items():
-            if not isinstance(count, (int, float)) or count < 0:
-                continue
-            count = int(count)
-            try:
-                cur = conn.execute(
-                    """
-                    INSERT OR REPLACE INTO api_calls (date, api_name, count)
-                    VALUES (?, ?, ?)
-                    """,
-                    (date, api_name, count),
-                )
-                if cur.rowcount:
-                    inserted += 1
-                    if verbose:
-                        print(f"  + {date} {api_name}: {count}")
-                else:
-                    skipped += 1
-            except Exception as exc:
-                if verbose:
-                    print(f"  ! {date} {api_name}: {exc}")
-
-    conn.commit()
-    conn.close()
-
-    print(f"API calls backfill complete: {inserted} rows inserted, {skipped} skipped")
-    print(f"  Stats file: {stats_path}")
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Backfill ft_flights.db from plane.log + ft_stats.json")
-    parser.add_argument("--log",     default=str(DEFAULT_LOG),   help="Path to plane.log")
-    parser.add_argument("--stats",   default=str(DEFAULT_STATS), help="Path to ft_stats.json")
-    parser.add_argument("--db",      default=str(DB_FILE),       help="Path to ft_flights.db")
-    parser.add_argument("--verbose", action="store_true",         help="Print each inserted row")
+    parser = argparse.ArgumentParser(description="Backfill ft_flights.db sightings from plane.log")
+    parser.add_argument("--log",     default=str(DEFAULT_LOG), help="Path to plane.log")
+    parser.add_argument("--db",      default=str(DB_FILE),     help="Path to ft_flights.db")
+    parser.add_argument("--verbose", action="store_true",       help="Print each inserted row")
     args = parser.parse_args()
 
     db_path = Path(args.db)
     _backup_db(db_path)   # timestamped safety copy before any writes
     backfill(Path(args.log), db_path, verbose=args.verbose)
-    backfill_api_calls(Path(args.stats), db_path, verbose=args.verbose)

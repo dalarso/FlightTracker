@@ -19,7 +19,6 @@
   <button id="hamburger" onclick="toggleHamburger()" aria-label="Menu" title="Menu">☰</button>
   <nav>
     <button class="active" onclick="showTab('config',this)">⚙ Config</button>
-    <button onclick="showTab('display',this)">📺 Display</button>
     <button onclick="showTab('map',this)">🗺 Zone Map</button>
     <button onclick="showTab('apis',this)">📡 APIs</button>
     <button onclick="showTab('stats',this)">📈 Stats</button>
@@ -386,21 +385,6 @@
       <div style="color:var(--muted);line-height:1.7;font-size:12px">Drag corner handles<br>to resize the zone.<br><br>
         <button class="btn btn-primary" style="width:100%;font-size:12px" onclick="saveFromMap()">Save Zone</button>
         <button class="btn" style="width:100%;font-size:12px;margin-top:6px" onclick="discardMapChanges()">Discard Changes</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- DISPLAY TAB -->
-<div class="tab-content" id="display-tab">
-  <div class="matrix-wrapper">
-    <div class="matrix-bezel">
-      <div class="matrix-screen" id="matrix-screen">
-        <div class="m-off"><span class="m-off-text">LOADING</span></div>
-      </div>
-      <div class="matrix-footer">
-        <span class="matrix-label">64 × 32 LED Matrix</span>
-        <span class="matrix-meta" id="matrix-meta">—</span>
       </div>
     </div>
   </div>

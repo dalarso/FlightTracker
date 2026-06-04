@@ -11,7 +11,6 @@ the local date rolls over).
 
 import datetime
 import sys
-import threading
 import requests
 from zoneinfo import ZoneInfo
 
@@ -19,17 +18,18 @@ from zoneinfo import ZoneInfo
 VGK_TEAM_ID       = 54
 _SCOREBOARD_URL   = "https://api-web.nhle.com/v1/scoreboard/now"
 
-# Thread-local sessions — each thread gets its own Session so we keep TCP
-# connection reuse (cuts per-poll latency from ~150 ms to ~20 ms) while
-# being safe for Flask's threaded=True mode.
-_tls = threading.local()
+# Single module-level Session shared across all callers.  Each poll runs on a
+# fresh daemon thread (sportscore._poll_slot_async), so a thread-local Session
+# would be re-created every poll and never actually reuse a TCP connection —
+# defeating keep-alive.  A requests.Session is safe for concurrent simple GETs,
+# so one shared Session lets the underlying connection pool persist across polls
+# (cuts per-poll latency from ~150 ms to ~20 ms via TCP/TLS reuse).
+_session = requests.Session()
 
 
 def _get_session() -> requests.Session:
-    """Return a per-thread requests.Session (created on first call per thread)."""
-    if not hasattr(_tls, "session"):
-        _tls.session = requests.Session()
-    return _tls.session
+    """Return the shared module-level requests.Session."""
+    return _session
 
 _PERIOD_NAMES = {1: "1st", 2: "2nd", 3: "3rd"}
 

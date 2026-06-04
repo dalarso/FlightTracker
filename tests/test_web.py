@@ -337,13 +337,23 @@ class ConfigWriteRoundTrip(unittest.TestCase):
 
     def test_zero_preserved_for_meaningful_keys(self):
         # 0 is a real setting for these int0 keys — panel dark, display off at night, no
-        # altitude floor — and must survive a save, not coerce to the default.
-        self._write(BRIGHTNESS=0, NIGHT_BRIGHTNESS=0, MIN_ALTITUDE=0, GPIO_SLOWDOWN=0)
+        # altitude floor, hide game immediately, disable goal celebration — and must
+        # survive a save, not coerce to the default.
+        self._write(BRIGHTNESS=0, NIGHT_BRIGHTNESS=0, MIN_ALTITUDE=0, GPIO_SLOWDOWN=0,
+                    SCOREBOARD_POST_GAME_MINUTES=0, SCOREBOARD_GOAL_CELEBRATION_SECONDS=0)
         cfg = self.srv.read_config()
         self.assertEqual(cfg["BRIGHTNESS"], 0)
         self.assertEqual(cfg["NIGHT_BRIGHTNESS"], 0)
         self.assertEqual(cfg["MIN_ALTITUDE"], 0)
         self.assertEqual(cfg["GPIO_SLOWDOWN"], 0)
+        self.assertEqual(cfg["SCOREBOARD_POST_GAME_MINUTES"], 0)            # int0: 0 survives
+        self.assertEqual(cfg["SCOREBOARD_GOAL_CELEBRATION_SECONDS"], 0)     # int0: 0 survives
+
+    def test_zero_feeder_credit_preserved(self):
+        # A real 0.0 feeder credit (e.g. a non-feeding user) must round-trip to 0.0, not
+        # silently coerce to the 10.0 default — the float0 kind preserves a meaningful 0.0.
+        self._write(FEEDER_MONTHLY_CREDIT=0.0)
+        self.assertEqual(self.srv.read_config()["FEEDER_MONTHLY_CREDIT"], 0.0)
 
     def test_tricky_string_serialises_safely(self):
         self._write(WEATHER_LOCATION="x'\"y\\z")   # quotes/backslash must survive repr()

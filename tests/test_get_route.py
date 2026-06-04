@@ -481,6 +481,25 @@ SCENARIOS = [
         "expect": ("DEN", "ORD", "aeroapi:cached"),  # picker now preserves the :cached marker
     },
     {
+        # HIGH-fix: a cached AeroAPI *LOCAL* route must reach _select too.  The local-cached
+        # branches previously set origin/dest but NOT fa_origin/fa_dest, so no AeroAPI
+        # candidate was built and the route resolved to "none".
+        "name": "review-fix: AeroAPI cached LOCAL route served (not dropped to none)",
+        "callsign": "AAL_FACL", "airlabs1": None, "aeroapi": None,
+        "cache": {("AAL_FACL", "aeroapi"): ("LAS", "JFK", None, None, None, None, "aeroapi")},
+        "expect": ("LAS", "JFK", "aeroapi:cached"),
+    },
+    {
+        # HIGH-fix: a cached AeroAPI LOCAL route outranks a live AirLabs NON-local route via
+        # local-first tiering — previously the AeroAPI candidate was absent and the wrong
+        # non-local AirLabs route won.
+        "name": "review-fix: cached AeroAPI LOCAL beats live AirLabs non-local",
+        "callsign": "AAL_FACL2",
+        "airlabs1": {"origin": "DEN", "dest": "ORD"},
+        "cache": {("AAL_FACL2", "aeroapi"): ("LAS", "JFK", None, None, None, None, "aeroapi")},
+        "expect": ("LAS", "JFK", "aeroapi:cached"),
+    },
+    {
         # Picker label honesty: a CACHED OpenSky route served as last-resort must show
         # 'opensky:cached', not a bare 'opensky' that looks live (the NV98->? confusion).
         "name": "label-fix: picker serves a cached OpenSky route as opensky:cached",
@@ -952,8 +971,8 @@ class SelectFunction(unittest.TestCase):
     def tearDown(self):
         self._lp.stop()
 
-    def _c(self, origin, dest, source, olat=None, olon=None, dlat=None, dlon=None, is_live=True):
-        return overhead._Cand(origin, dest, olat, olon, dlat, dlon, source, is_live)
+    def _c(self, origin, dest, source, olat=None, olon=None, dlat=None, dlon=None):
+        return overhead._Cand(origin, dest, olat, olon, dlat, dlon, source)
 
     def test_local_complete_beats_nonlocal_complete(self):
         best = overhead._select([
@@ -1084,9 +1103,16 @@ class RoutePlausibleGeometry(unittest.TestCase):
     def test_missing_coords_assumed_plausible(self):
         self.assertTrue(overhead._route_plausible(None, None, *self.LAS, *self.JFK))
 
-    def test_same_airport_rejected(self):
-        # origin == dest -> zero-length route -> no valid flight path
-        self.assertFalse(overhead._route_plausible(*self.LAS, *self.LAS, *self.LAS))
+    def test_same_coords_geometry_unverifiable(self):
+        # Two airports resolving to the SAME coordinate (e.g. distinct local airports that
+        # share a seed coord) -> route_km == 0 -> geometry can't validate, so it is NOT
+        # rejected at the geometry layer.  The genuine same-airport case is caught by code.
+        self.assertTrue(overhead._route_plausible(*self.LAS, *self.LAS, *self.LAS))
+
+    def test_same_code_route_rejected(self):
+        # A genuine same-airport route (origin == dest by CODE) is garbage and IS rejected —
+        # by the code-level guard (_fr24_route_plausible / _cand_plausible), not geometry.
+        self.assertFalse(overhead._fr24_route_plausible(*self.LAS, "LAS", "LAS"))
 
     def test_short_hop_assumed_plausible(self):
         # ~0.3 km apart -> below the short-hop floor where geometry isn't reliable

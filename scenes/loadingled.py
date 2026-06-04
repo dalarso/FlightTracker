@@ -2,6 +2,7 @@ from utilities.animator import Animator
 from setup import frames
 from time import sleep
 import RPi.GPIO as GPIO
+import atexit
 import sys
 
 # Attempt to load config data
@@ -11,6 +12,20 @@ try:
 except (ModuleNotFoundError, NameError, ImportError):
     # If there's no config data
     LOADING_LED_GPIO_PIN = 25
+
+# Ensures GPIO.cleanup() for the loading-LED pin is registered with atexit at
+# most once, regardless of how many times gpio_setup() retries or how many
+# scenes are constructed. Without this, the pin is left asserted on shutdown
+# and a restarted service trips "channel already in use" on re-setup.
+_cleanup_registered = False
+
+
+def _register_gpio_cleanup():
+    global _cleanup_registered
+    if not _cleanup_registered:
+        atexit.register(lambda: GPIO.cleanup(LOADING_LED_GPIO_PIN))
+        _cleanup_registered = True
+
 
 class LoadingLEDScene(object):
     def __init__(self):
@@ -27,6 +42,9 @@ class LoadingLEDScene(object):
             GPIO.setup(LOADING_LED_GPIO_PIN, GPIO.OUT)
             GPIO.output(LOADING_LED_GPIO_PIN, GPIO.HIGH)
             self.gpio_setup_complete = True
+            # Setup succeeded — make sure the pin is released on shutdown so a
+            # restarted service doesn't hit "channel already in use".
+            _register_gpio_cleanup()
         except Exception:
             print("Error initializing GPIO", file=sys.stderr)
             self.gpio_setup_complete = False

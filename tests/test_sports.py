@@ -261,6 +261,14 @@ class MlbFetch(unittest.TestCase):
     def test_team_not_found_returns_none(self):
         self.assertIsNone(self._run(_mlb_payload(_mlb_game(team_id=119)), team_id=999))
 
+    def test_string_team_id_in_api_matches_int_config(self):
+        # The MLB API may return team ids as strings ("119"); config passes an int.
+        # The match (and home/away resolution) must compare as strings, not fail.
+        g = self._run(_mlb_payload(_mlb_game(team_id="119", home=True)), team_id=119)
+        self.assertIsNotNone(g)
+        self.assertTrue(g["team_home"])
+        self.assertEqual((g["team_score"], g["opp_score"]), (5, 3))
+
     def test_no_dates_returns_none(self):
         self.assertIsNone(self._run({"dates": []}))
 

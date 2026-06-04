@@ -4,6 +4,9 @@ certifi==2025.7.9
 charset-normalizer==3.4.2
 idna==3.10
 requests==2.32.4
+# FlightRadar24 unofficial API — GA (N-number) + commercial route fallback in overhead.py
+# (imported behind try/except; absent → those route sources silently disabled).
+FlightRadarAPI>=1.3.34
 RPi.GPIO==0.7.1
 typing_extensions==4.14.1
 urllib3==2.5.0

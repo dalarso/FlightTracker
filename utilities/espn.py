@@ -15,20 +15,22 @@ day (local date), so we never accidentally show yesterday's or tomorrow's game.
 
 import datetime
 import sys
-import threading
 import requests
 from zoneinfo import ZoneInfo
 
 _BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 
-_tls = threading.local()
+# Single module-level Session shared across all callers.  Each poll runs on a
+# fresh daemon thread (sportscore._poll_slot_async), so a thread-local Session
+# would be re-created every poll and never reuse a TCP connection — defeating
+# keep-alive.  A requests.Session is safe for concurrent simple GETs, so one
+# shared Session lets the connection pool persist across polls.
+_session = requests.Session()
 
 
 def _get_session() -> requests.Session:
-    """Return a per-thread requests.Session (created on first call per thread)."""
-    if not hasattr(_tls, "session"):
-        _tls.session = requests.Session()
-    return _tls.session
+    """Return the shared module-level requests.Session."""
+    return _session
 
 
 # ── ESPN status name → normalised game state ───────────────────────────────────

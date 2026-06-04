@@ -73,18 +73,6 @@ class BackfillDb(unittest.TestCase):
         conn.close()
         self.assertEqual(row, ("LAS", "JFK", "B737"))          # blanks filled, existing origin kept
 
-    def test_backfill_api_calls_skips_non_date_keys(self):
-        stats = self._dir / "stats.json"
-        stats.write_text(json.dumps({
-            "2026-06-03": {"api_calls": {"airlabs": 5, "aeroapi": 2}},
-            "garbage":    {"api_calls": {"x": 1}},             # non-date key → skipped
-        }))
-        backfill_db.backfill_api_calls(stats, self._db)
-        conn = sqlite3.connect(self._db)
-        got = dict(conn.execute("SELECT api_name, count FROM api_calls").fetchall())
-        conn.close()
-        self.assertEqual(got, {"airlabs": 5, "aeroapi": 2})
-
 
 class BackfillResolvedCache(unittest.TestCase):
     def setUp(self):

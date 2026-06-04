@@ -22,8 +22,15 @@ from rgbmatrix import graphics
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
 
+def _flight_key(f):
+    # Key flights by (callsign, hex) so two distinct aircraft sharing a blank
+    # callsign (common for GA) don't collapse to one. Fall back to callsign
+    # alone if older data dicts have no "hex".
+    return (f.get("callsign"), f.get("hex")) if "hex" in f else (f.get("callsign"),)
+
+
 def callsigns_match(flights_a, flights_b):
-    return {f.get("callsign") for f in flights_a} == {f.get("callsign") for f in flights_b}
+    return {_flight_key(f) for f in flights_a} == {_flight_key(f) for f in flights_b}
 
 
 try:
@@ -120,9 +127,14 @@ class Display(
         # Animator or Scenes
         self.delay = frames.PERIOD
 
-        # Track pause/night state so we can force redraws on transitions
-        self._was_paused = os.path.exists(PAUSE_FLAG)
-        self._was_night = os.path.exists(NIGHT_FLAG)
+        # Track pause/night state so we can force redraws on transitions.
+        # The flag files are polled once per second by refresh_flags() and
+        # cached here; sync() (per-frame) reads the cached booleans instead of
+        # stat-ing the filesystem every frame.
+        self._paused = os.path.exists(PAUSE_FLAG)
+        self._night = os.path.exists(NIGHT_FLAG)
+        self._was_paused = self._paused
+        self._was_night = self._night
 
     def draw_square(self, x0, y0, x1, y1, colour):
         for x in range(x0, x1):
@@ -148,16 +160,20 @@ class Display(
             # callsigns, regardless or order
             data_is_different = not callsigns_match(self._data, new_data)
 
+            # True when we're currently showing flights and the incoming set is
+            # empty — i.e. a flights→idle transition back to clock/date/day/weather.
+            transitioning_to_idle = len(self._data) > 0 and len(new_data) == 0
+
             if data_is_different:
                 # Capture what's already on screen BEFORE swapping in the new set,
                 # so the ding fires only for genuinely new aircraft (not planes leaving).
-                _prev_callsigns = {f.get("callsign") for f in self._data}
+                _prev_keys = {_flight_key(f) for f in self._data}
                 self._data_index = 0
                 self._data_all_looped = False
                 self._data = new_data
                 # Fire-and-forget LAN ding: a new plane just went up on the matrix.
                 try:
-                    _new = [f for f in new_data if f.get("callsign") not in _prev_callsigns]
+                    _new = [f for f in new_data if _flight_key(f) not in _prev_keys]
                     if _new:
                         planeding.send_ding(_new[0], len(new_data))
                 except Exception:
@@ -171,6 +187,12 @@ class Display(
 
             if reset_required:
                 self.reset_scene()
+                if transitioning_to_idle:
+                    # Going flights→idle: reset_scene() alone leaves the idle
+                    # scenes (clock/date/day/weather) holding stale state, so
+                    # they won't repaint until a value changes (up to a second
+                    # for the clock, longer for date/day). Force them to redraw.
+                    self._reset_idle_scenes()
 
     def _reset_idle_scenes(self):
         """Force clock/date/day/weather/sport-score to redraw on their next tick."""
@@ -183,10 +205,17 @@ class Display(
         # SportScoreScene tracking — forces score to redraw on next tick
         self._reset_sport_draws()
 
+    @Animator.KeyFrame.add(int(frames.PER_SECOND))
+    def refresh_flags(self, count):
+        # Poll the pause/night flag files once per second (not every frame) and
+        # cache the result; sync() reads these cached booleans.
+        self._paused = os.path.exists(PAUSE_FLAG)
+        self._night  = os.path.exists(NIGHT_FLAG)
+
     @Animator.KeyFrame.add(1)
     def sync(self, count):
-        paused = os.path.exists(PAUSE_FLAG)
-        night  = os.path.exists(NIGHT_FLAG)
+        paused = self._paused
+        night  = self._night
 
         if paused:
             # Blank the canvas every frame so nothing bleeds through

@@ -106,7 +106,7 @@ AIRLABS_RESET_DAY     = 9       # AirLabs billing period resets on the 9th
 AEROAPI_RESET_DAY     = 1       # FlightAware credit resets on the 1st
 
 # ── Config schema: the single source of truth for every key the web UI manages ──
-# Each entry is (NAME, kind, default) with kind in {str,int,int0,bool,float,list}, or
+# Each entry is (NAME, kind, default) with kind in {str,int,int0,bool,float,float0,list}, or
 # (NAME, fn) where fn(existing) -> a Python-source value string for the few keys with
 # custom fallbacks.  `None` emits a blank line.  write_config() generates config.py
 # straight from this list and _KNOWN_KEYS is *derived* from it — so adding a key is a
@@ -118,10 +118,11 @@ def _cfg_literal(existing, name, kind, default):
     """Render one managed value as a Python-source literal (matches the legacy template)."""
     v = existing.get(name)
     if kind == "str":   return repr(str(v or default))
-    if kind == "int":   return str(int(v or default))
-    if kind == "int0":  return str(int(v if v is not None else default))   # 0 is meaningful
+    if kind == "int":   return str(int(v) if str(v).strip() not in ("", "None") else default)
+    if kind == "int0":  return str(int(v) if str(v).strip() not in ("", "None") else default)   # 0 is meaningful
     if kind == "bool":  return str(bool(existing.get(name, default)))
     if kind == "float": return str(float(v or default))
+    if kind == "float0": return str(float(v if v is not None and str(v).strip() != "" else default))  # 0.0 is meaningful
     if kind == "list":  return repr(v or default)
     raise ValueError(f"unknown config kind {kind!r} for {name}")
 
@@ -157,8 +158,8 @@ _CONFIG_SCHEMA = [
     ("LOADING_LED_GPIO_PIN",                "int",   25),
     ("RAINFALL_ENABLED",                    "bool",  False),
     ("SCOREBOARD_ENABLED",                  "bool",  False),
-    ("SCOREBOARD_POST_GAME_MINUTES",        "int",   30),
-    ("SCOREBOARD_GOAL_CELEBRATION_SECONDS", "int",   30),
+    ("SCOREBOARD_POST_GAME_MINUTES",        "int0",  30),  # 0 = hide immediately (valid)
+    ("SCOREBOARD_GOAL_CELEBRATION_SECONDS", "int0",  30),  # 0 = disable celebration (valid)
     ("SCOREBOARD_PRIORITY",                 "list",  ["NHL", "NFL", "MLB", "NBA", "MLS"]),
     ("SCOREBOARD_NHL_ENABLED",  lambda e: str(bool(e.get("SCOREBOARD_NHL_ENABLED", e.get("SCOREBOARD_ENABLED", True))))),
     ("SCOREBOARD_NHL_TEAM_ID",  lambda e: str(int(e.get("SCOREBOARD_NHL_TEAM_ID") or e.get("SCOREBOARD_TEAM_ID") or 0))),
@@ -175,7 +176,7 @@ _CONFIG_SCHEMA = [
     ("SCOREBOARD_MLS_ENABLED",              "bool",  False),
     ("SCOREBOARD_MLS_TEAM_ID",              "int",   0),
     ("SCOREBOARD_MLS_TEAM_NAME",            "str",   ""),
-    ("FEEDER_MONTHLY_CREDIT",               "float", 10.00),
+    ("FEEDER_MONTHLY_CREDIT",               "float0", 10.00),  # 0.0 = no feeder credit (valid)
     ("AIRLABS_MONTHLY_LIMIT",               "int",   1000),
     ("AIRLABS_RESET_DAY",                   "int",   9),
     ("AIRLABS2_MONTHLY_LIMIT",              "int",   1000),
@@ -693,7 +694,7 @@ def flight_stats():
         history.append({
             "date":    d,
             "total":   db["day_counts"].get(d, 0),
-            "airlabs": day_ac.get("airlabs", 0),
+            "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
             "aeroapi": day_ac.get("aeroapi", 0),
         })
 

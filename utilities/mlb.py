@@ -13,20 +13,22 @@ Team IDs: look up at
 
 import datetime
 import sys
-import threading
 import requests
 from zoneinfo import ZoneInfo
 
 _SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule"
 
-_tls = threading.local()
+# Single module-level Session shared across all callers.  Each poll runs on a
+# fresh daemon thread (sportscore._poll_slot_async), so a thread-local Session
+# would be re-created every poll and never reuse a TCP connection — defeating
+# keep-alive.  A requests.Session is safe for concurrent simple GETs, so one
+# shared Session lets the connection pool persist across polls.
+_session = requests.Session()
 
 
 def _get_session() -> requests.Session:
-    """Return a per-thread requests.Session (created on first call per thread)."""
-    if not hasattr(_tls, "session"):
-        _tls.session = requests.Session()
-    return _tls.session
+    """Return the shared module-level requests.Session."""
+    return _session
 
 
 def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
@@ -73,10 +75,12 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
             home_id  = home.get("team", {}).get("id")
             away_id  = away.get("team", {}).get("id")
 
-            if home_id != team_id and away_id != team_id:
+            # Compare as strings: config team_id is an int but the API may return
+            # the id as an int or a string ("119"); ESPN already compares as str.
+            if str(team_id) not in (str(home_id), str(away_id)):
                 continue
 
-            team_home = home_id == team_id
+            team_home = str(home_id) == str(team_id)
             team_data = home if team_home else away
             opp_data  = away if team_home else home
 

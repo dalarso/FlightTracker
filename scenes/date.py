@@ -45,12 +45,15 @@ class DateScene(object):
             # If there's no data to display
             # then draw the date
             now = datetime.now(_TZ)
+            # Portable date formatting: strftime's strip-leading-zero flag (the dash form) is
+            # glibc/BSD-only and raises ValueError on Windows, so build from int fields instead.
+            # Identical output (ints render with no leading zero) and works on every platform.
             if DATE_FORMAT == "DMY":
-                current_date = now.strftime("%-d/%-m/%Y")
+                current_date = f"{now.day}/{now.month}/{now.year}"
             elif DATE_FORMAT == "YMD":
                 current_date = now.strftime("%Y-%m-%d")
             else:
-                current_date = now.strftime("%-m/%-d/%Y")
+                current_date = f"{now.month}/{now.day}/{now.year}"
 
             # Only draw if date needs updated
             if self._last_date != current_date:

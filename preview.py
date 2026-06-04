@@ -18,8 +18,11 @@ then run:  python preview.py        (set FT_PI if the Pi isn't at the default be
 
 Env:
     FT_PI               base URL of the Pi web UI   (default http://192.168.1.50:5000)
-    FT_PREVIEW_ADAPTER  emulator display adapter     (default 'tkinter'; 'pygame', or
-                        'browser' for a local web view / headless capture)
+    FT_PREVIEW_ADAPTER  window adapter (default: auto — 'pygame' if it's installed, for the
+                        glowing 'real' LED look in a native window; else 'tkinter' with
+                        'circle' dots.  'browser' serves a web/headless view on :8888.)
+    FT_PIXEL_STYLE      'real' (glowing LED dots; pygame/browser only), 'circle', or
+                        'square'   (default: 'real' on pygame/browser, 'circle' on tkinter)
 """
 import json
 import os
@@ -34,7 +37,19 @@ from unittest.mock import MagicMock
 import requests
 
 PI = os.environ.get("FT_PI", "http://192.168.1.50:5000").rstrip("/")
-ADAPTER = os.environ.get("FT_PREVIEW_ADAPTER", "tkinter")
+
+
+def _auto_adapter():
+    """Pick the best window backend available without importing it (no startup banner):
+    prefer 'pygame' — a native window with the glowing 'real' LED style — when it's
+    installed, else 'tkinter' (native window, 'circle' dots).  Regular pygame has no
+    Python-3.14 Windows wheel, but pygame-ce is a drop-in that does: `pip install pygame-ce`
+    and the preview upgrades itself to the 'real' look automatically."""
+    import importlib.util
+    return "pygame" if importlib.util.find_spec("pygame") is not None else "tkinter"
+
+
+ADAPTER = (os.environ.get("FT_PREVIEW_ADAPTER") or _auto_adapter()).lower()
 _HERE = Path(__file__).resolve().parent
 
 
@@ -50,10 +65,14 @@ def _get(path, default=None, timeout=6):
 # scenes resolves to THIS (and never clobbers a real config.py if one's alongside).
 def _materialise_config():
     cfg = _get("/api/config", default={}) or {}
-    # Secrets are masked by the API and unused here (all data comes from the Pi) — blank
-    # them so nothing tries to use the "********" sentinel as a real key.
+    # Secrets are masked by the API and unused here (all data comes from the Pi) — blank them
+    # so nothing uses the "********" sentinel as a real key.  ALSO blank the LAN ding/horn
+    # hosts: the preview runs the REAL Display, so if these are set it fires its own plane-ding
+    # and goal-horn UDP packets to the desktop apps — duplicating the ones the Pi already sends
+    # (the double-ding).  Empty host = those emitters are no-ops (planeding.py / sportscore.py).
     for k in ("OPENWEATHER_API_KEY", "OPENSKY_CLIENT_SECRET", "FLIGHTAWARE_API_KEY",
-              "AIRLABS_API_KEY", "AIRLABS_API_KEY_2"):
+              "AIRLABS_API_KEY", "AIRLABS_API_KEY_2",
+              "PLANE_DING_HOST", "SCOREBOARD_GOAL_HORN_HOST"):
         cfg[k] = ""
     workdir = Path(tempfile.mkdtemp(prefix="ft_preview_"))
     lines = []
@@ -69,10 +88,25 @@ _WORKDIR = _materialise_config()
 sys.path.insert(0, str(_WORKDIR))     # generated config.py wins
 sys.path.insert(0, str(_HERE))        # the display/scenes/utilities stack
 
+# overhead.py opens a SQLite DB (+ usage/override JSON) next to the module at import time.
+# The preview never uses it (flights come from /api/flights), so redirect those writes to the
+# throwaway workdir: keeps the preview side-effect-free AND lets it run from a read-only path
+# like C:\Program Files\... (otherwise it'd try, and fail, to write the DB there).
+os.environ["FT_DATA_DIR"] = str(_WORKDIR)
+
 # ── 2. Emulator config (generated; adapter via env) + swap the LED bindings ───────
+# pixel_style "real" (glowing LED dots) is supported ONLY by the pygame & browser adapters.
+# tkinter/terminal/sixel support square/circle only — and worse, the emulator *crashes* (a bug
+# in its own unsupported-style warning path: PixelStyle.lower()) instead of degrading, if it's
+# handed a style the adapter can't do.  So pick a style the chosen adapter supports.
+_REAL_OK = {"pygame", "browser"}
+_pixel_style = (os.environ.get("FT_PIXEL_STYLE")
+                or ("real" if ADAPTER in _REAL_OK else "circle")).lower()
+if _pixel_style == "real" and ADAPTER not in _REAL_OK:
+    _pixel_style = "circle"          # tkinter can't render 'real' — never feed it through
 _px = 14
 (_WORKDIR / "emulator_config.json").write_text(json.dumps({
-    "pixel_size": _px, "pixel_style": "real", "pixel_glow": 6,
+    "pixel_size": _px, "pixel_style": _pixel_style, "pixel_glow": 6,
     "display_adapter": ADAPTER, "allow_adapter_fallback": True,
     "suppress_font_warnings": True, "emulator_title": "FlightTracker — live preview",
     "browser": {"port": 8888, "target_fps": 30, "quality": 80, "image_format": "JPEG"},
@@ -90,6 +124,15 @@ sys.modules["RPi"].GPIO = sys.modules["RPi.GPIO"]
 import logging                         # noqa: E402
 for _l in ("tornado.access", "tornado.application", "tornado.general"):
     logging.getLogger(_l).setLevel(logging.ERROR)
+
+# The pygame window adapter tries to set a PNG window icon, which fails on a pygame build
+# without SDL_image ("not a Windows BMP file").  The icon is cosmetic — skip it.
+if ADAPTER == "pygame":
+    try:
+        from RGBMatrixEmulator.adapters import pygame_adapter as _pa
+        _pa.PygameAdapter._PygameAdapter__set_emulator_icon = lambda self: None
+    except Exception:
+        pass
 
 
 # ── 3. Flights: PreviewOverhead pulls /api/flights ────────────────────────────────
@@ -168,6 +211,18 @@ for _name, _key in (("_fetch_nhl", "NHL"), ("_fetch_mlb", "MLB"),
         setattr(_sb, _name, _sport_fetcher(_key))
 
 
+# ── View-only guarantee: never emit LAN side-effects ──────────────────────────────
+# This preview SHOWS the display and nothing else — it's for watching scenes when you're not
+# at the matrix.  The generated config already blanks the ding/horn hosts (so no sockets open),
+# but hard-stub every LAN emitter as well, so the Mac/Windows apps can NEVER fire a plane-ding
+# or goal-horn at the desktop listeners.  Those effects must follow the PHYSICAL panel only.
+from utilities import planeding as _planeding   # noqa: E402
+_planeding.send_ding  = lambda *a, **k: None
+_planeding.send_state = lambda *a, **k: None
+_sb._send_horn  = lambda *a, **k: None
+_sb._send_state = lambda *a, **k: None
+
+
 from display import Display              # noqa: E402  (all rgbmatrix imports → emulator)
 
 
@@ -193,5 +248,5 @@ threading.Thread(target=_status_poller, daemon=True).start()
 
 
 if __name__ == "__main__":
-    print(f"[preview] pulling from {PI} · adapter={ADAPTER}", flush=True)
+    print(f"[preview] pulling from {PI} · adapter={ADAPTER} · style={_pixel_style}", flush=True)
     Display().run()

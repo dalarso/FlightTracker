@@ -2,7 +2,15 @@
 # preview on (e.g. the Windows box next to the horn/ding apps), NOT on the Pi:
 #   pip install -r requirements-preview.txt
 #
-# tkinter (the default window adapter) ships with the standard python.org Windows build.
-# For the smoother 'pygame' adapter instead:  pip install pygame   (then FT_PREVIEW_ADAPTER=pygame)
+# Window adapter: tkinter ships with the standard python.org Windows build (the default).
+# 'pygame' gives a smoother window with the glowing 'real' LED style, but has no Python-3.14
+# Windows wheel yet — use Python 3.12 there for pygame, or the 'browser' adapter (no install).
 RGBMatrixEmulator>=0.17.0
 requests>=2.28
+# Windows ships no system IANA time-zone database, so Python's zoneinfo
+# (ZoneInfo("America/Los_Angeles") in overhead.py) needs this pip copy.  Unused on Linux/macOS.
+tzdata>=2024.1 ; sys_platform == "win32"
+# Native window with the glowing 'real' LED look (matches the Mac).  Regular pygame has no
+# Python-3.14 Windows wheel; pygame-ce is a drop-in (imports as 'pygame') that does.  With it
+# installed, preview.py auto-selects the 'pygame' adapter.  Omit it and you get tkinter/circle.
+pygame-ce>=2.5.7 ; sys_platform == "win32"

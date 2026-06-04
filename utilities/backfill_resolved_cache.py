@@ -34,38 +34,15 @@ DB_FILE      = _PROJECT_DIR / "ft_flights.db"
 # ── Constants (must match overhead.py) ────────────────────────────────────────
 ROUTE_TTL_SCHEDULED = 604800  # 7 days
 
-# All prefixes that get the 7-day TTL — must stay in sync with overhead.py
-_SCHEDULED_PREFIXES: frozenset[str] = frozenset([
-    # US majors
-    "AAL", "DAL", "UAL", "SWA", "ASA", "JBU", "NKS", "FFT", "SCX", "AAY",
-    "HAL", "VRD",
-    # US ULCCs / leisure / charter
-    "MXY", "VXP", "JSX", "TWY",
-    # Canadian regional / leisure
-    "ROU",
-    # US cargo (scheduled routes — 7-day TTL appropriate)
-    "FDX", "UPS", "GTI", "ABX", "ASN", "PAC", "CKS", "WGN", "NCR", "SOU",
-    "DHK", "AGX",
-    # US charters / military contract
-    "OCN", "OAE",
-    # Canadian
-    "ACA", "WJA", "POE", "FLE", "SWG",
-    # Mexican
-    "AMX", "VOI", "VIV",
-    # European
-    "BAW", "VIR", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
-    "CFG", "EDW", "THY", "ETD", "SWR", "AUA", "NAX", "EZY", "RYR", "TAP",
-    "FIN", "BEL",
-    # Asian / Pacific
-    "KAL", "ANA", "JAL", "CPA", "EVA", "CCA", "CSN", "ANZ",
-    # Latin American
-    "CMP", "AVA",
-    # Oceania
-    "QFA",
-    # Regional/commuter
-    "SKW", "ENY", "RPA", "QXE", "ASH", "PDT", "JIA", "UCA", "CPZ", "MTN",
-    "FLG",
-])
+# The scheduled-airline prefix set is the single source of truth in utilities/refdata.py
+# (pure data, no import-time side effects — it does NOT open the DB or read config.py the
+# way overhead.py does), shared between the live resolver and this maintenance script so
+# the two can never drift.  Imported and re-exported here so backfill_rc._SCHEDULED_PREFIXES
+# stays available to callers/tests.  Ensure the project root is importable as a package root
+# even when this script is run standalone from the utilities/ dir.
+if str(_PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_DIR))
+from utilities.refdata import _SCHEDULED_PREFIXES  # noqa: E402  (re-exported below)
 
 
 def _is_scheduled(callsign: str) -> bool:

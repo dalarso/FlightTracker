@@ -15,6 +15,7 @@ _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 def _billing_period_start(reset_day):
     """Return the current billing period start as YYYY-MM-DD."""
+    reset_day = max(1, int(reset_day))   # RESET_DAY=0 (or <1) is invalid; treat as the 1st
     today = datetime.now(_PACIFIC)
     if today.day >= reset_day:
         # Clamp to actual days in this month (e.g. reset_day=31 in February)
@@ -29,6 +30,7 @@ def _billing_period_start(reset_day):
 
 def _billing_period_end(reset_day):
     """Return the last day of the current billing period as YYYY-MM-DD."""
+    reset_day = max(1, int(reset_day))   # RESET_DAY=0 (or <1) is invalid; treat as the 1st
     today = datetime.now(_PACIFIC)
     # Determine year/month of the next reset date
     if today.day >= reset_day:

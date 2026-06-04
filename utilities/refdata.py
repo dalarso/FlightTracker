@@ -108,6 +108,45 @@ _AIRPORT_CITIES: dict[str, str] = {
 }
 
 
+# ── Scheduled-airline ICAO prefixes (7-day route-cache TTL tier) ──────────────
+# Operators whose callsigns follow stable filed schedules — their routes are safe to
+# cache for 7 days.  Lives here (pure data, no side effects) so both overhead.py and the
+# standalone backfill_resolved_cache.py maintenance script import the SINGLE source of
+# truth instead of each carrying its own copy.  refdata must never import overhead, so
+# this stays free of any circular-import risk.
+_SCHEDULED_PREFIXES: frozenset[str] = frozenset([
+    # US majors
+    "AAL", "DAL", "UAL", "SWA", "ASA", "JBU", "NKS", "FFT", "SCX", "AAY",
+    "HAL", "VRD",
+    # US ULCCs / leisure / charter
+    "MXY", "VXP", "JSX", "TWY",
+    # Canadian regional / leisure
+    "ROU",
+    # US cargo (scheduled routes — 7-day TTL appropriate)
+    "FDX", "UPS", "GTI", "ABX", "ASN", "PAC", "CKS", "WGN", "NCR", "SOU",
+    "DHK", "AGX",
+    # US charters / military contract
+    "OCN", "OAE",
+    # Canadian
+    "ACA", "WJA", "POE", "FLE", "SWG",
+    # Mexican
+    "AMX", "VOI", "VIV",
+    # European
+    "BAW", "VIR", "AFR", "DLH", "KLM", "UAE", "QTR", "SIA", "EIN", "IBE",
+    "CFG", "EDW", "THY", "ETD", "SWR", "AUA", "NAX", "EZY", "RYR", "TAP",
+    "FIN", "BEL",
+    # Asian / Pacific
+    "KAL", "ANA", "JAL", "CPA", "EVA", "CCA", "CSN", "ANZ",
+    # Latin American
+    "CMP", "AVA",
+    # Oceania
+    "QFA",
+    # Regional/commuter
+    "SKW", "ENY", "RPA", "QXE", "ASH", "PDT", "JIA", "UCA", "CPZ", "MTN",
+    "FLG",
+])
+
+
 # ── Airline display names (ICAO 3-letter prefix → human-readable name) ────────
 _AIRLINE_NAMES: dict[str, str] = {
     # US majors

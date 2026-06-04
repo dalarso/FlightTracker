@@ -20,8 +20,6 @@ let config = {};
 let altUnit = 'ft';
 let displayOn = true;
 let map, zoneRect, homeMarker, cornerMarkers = [];
-let _weatherData = null;
-let _weatherFetchedAt = 0;
 let evtSource = null;
 
 // ── Tabs ───────────────────────────────────────────────────────
@@ -56,7 +54,6 @@ function showTab(name, btn) {
   btn.classList.add('active');
   if (name === 'map')     initMap();
   if (name === 'log')     initLog();     else stopLog();
-  if (name === 'display') initMatrixPreview(); else stopMatrixPreview();
   if (name === 'apis')    initAPIsTab(); else stopAPIsTab();
   if (name === 'stats')   loadStatsTab();
   if (name === 'rules')   initRulesTab();
@@ -65,12 +62,11 @@ function showTab(name, btn) {
 // Pause the heavy polling timers when the tab/screen is hidden (saves phone battery and
 // Pi load for a 24/7-open dashboard); resume the active tab's poller when it returns.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stopMatrixPreview(); stopAPIsTab(); }
+  if (document.hidden) { stopAPIsTab(); }
   else {
     const active = document.querySelector('.tab-content.active');
     const tab = active ? active.id.replace('-tab', '') : '';
-    if (tab === 'display') initMatrixPreview();
-    else if (tab === 'apis') initAPIsTab();
+    if (tab === 'apis') initAPIsTab();
   }
 });
 
@@ -493,8 +489,6 @@ async function saveConfig(restart) {
     if (data.ok) {
       const { restart: _, ...savedConfig } = payload;
       config = savedConfig;
-      // Immediately re-render the matrix preview so format changes (time/date) are visible at once
-      updateMatrixPreview();
       const msg = restart ? '✓ Saved — restarting display…' : '✓ Saved';
       status.textContent = msg; status.className = 'save-status ok';
       showToast(msg, 'ok');
@@ -679,184 +673,6 @@ function stopLog() {
   if (evtSource) { evtSource.close(); evtSource = null; }
   document.getElementById('log-status').textContent = '● OFFLINE';
   document.getElementById('log-status').className = 'chip grey';
-}
-
-// ── Matrix Preview ─────────────────────────────────────────────
-let matrixTimer = null;
-// Goal celebration tracking
-let _lastTeamScore        = null;
-let _goalCelebrationUntil = 0;
-let _sbTeamName           = 'VGK';
-let _sbSportKey           = 'NHL';
-// Sport-specific celebration verb (NHL/MLS → GOAL!, NFL → SCORE!, MLB → SCORES!, NBA → SCORE!)
-const _CELEB_VERB = { NHL: 'GOAL!', MLS: 'GOAL!', NFL: 'SCORE!', MLB: 'SCORES!', NBA: 'SCORE!' };
-// Post-game timeout tracking is now server-side — see game_ended_at in /api/scoreboard response.
-
-function initMatrixPreview() {
-  if (matrixTimer) return;
-  updateMatrixPreview();
-  matrixTimer = setInterval(updateMatrixPreview, 10000);
-}
-
-function stopMatrixPreview() {
-  clearInterval(matrixTimer);
-  matrixTimer = null;
-}
-
-async function updateMatrixPreview() {
-  try {
-    const [status, flightData, sbData] = await Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/flights').then(r => r.json()),
-      fetch('/api/scoreboard').then(r => r.json()).catch(() => ({ game: null, team_name: 'VGK', enabled: true })),
-      fetchWeather(),
-    ]);
-    // Track team name + sport for goal celebration display
-    if (sbData.team_name) _sbTeamName = sbData.team_name;
-    if (sbData.sport_key) _sbSportKey = sbData.sport_key;
-    const g = sbData.game;
-    // Detect goals
-    if (g && (g.state === 'LIVE' || g.state === 'CRIT') && sbData.enabled !== false) {
-      const teamScore = g.team_score ?? 0;
-      if (_lastTeamScore !== null && teamScore > _lastTeamScore) {
-        const celebSecs = config.SCOREBOARD_GOAL_CELEBRATION_SECONDS ?? 30;
-        _goalCelebrationUntil = Date.now() / 1000 + celebSecs;
-      }
-      _lastTeamScore = teamScore;
-    } else if (!g || g.state === 'FINAL' || g.state === 'OFF' || g.state === 'FUT' || g.state === 'PRE') {
-      _lastTeamScore = null;  // reset between games
-    }
-    renderMatrix(status, flightData, sbData);
-    const ts = flightData.ts
-      ? new Date(flightData.ts * 1000).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false, timeZone: config.TIMEZONE || 'America/Los_Angeles'})
-      : '—';
-    document.getElementById('matrix-meta').textContent = `Last poll: ${ts}${flightData.stale ? ' (stale)' : ''}`;
-  } catch(e) {
-    document.getElementById('matrix-screen').innerHTML = '<div class="m-off"><span class="m-off-text">ERROR</span></div>';
-  }
-}
-
-function _scoreboardStatusLabel(game) {
-  // Only called for LIVE / CRIT / FINAL / OFF — FUT/PRE are filtered before renderMatrix.
-  const state = game.state;
-  if (state === 'LIVE' || state === 'CRIT') {
-    // Period label only — no clock (matches LED display: 30 s poll isn't accurate enough).
-    return game.period_label || '';
-  }
-  // FINAL / OFF
-  const pt = game.period_type || 'REG';
-  return pt === 'REG' ? 'FINAL' : `FINAL ${pt}`;
-}
-
-function renderMatrix(status, flightData, sbData) {
-  const screen = document.getElementById('matrix-screen');
-  const flights = (!flightData.stale && Array.isArray(flightData.flights)) ? flightData.flights : [];
-
-  screen.className = 'matrix-screen' + (status.night && status.running && !status.paused ? ' night' : '');
-
-  if (!status.running) {
-    screen.innerHTML = '<div class="m-off"><span class="m-off-text m-service-off">SERVICE OFF</span></div>';
-    return;
-  }
-  if (status.paused) {
-    screen.innerHTML = '<div class="m-off"><span class="m-off-text">&#9632;&#9632;&#9632;</span></div>';
-    return;
-  }
-
-  // ── Goal celebration — suppress everything ────────────────────────────────
-  if (Date.now() / 1000 < _goalCelebrationUntil) {
-    const _celebVerb = _CELEB_VERB[_sbSportKey] || 'GOAL!';
-    screen.innerHTML = `<div class="m-goal"><span class="m-goal-text">${escHtml(_sbTeamName)} ${_celebVerb}</span></div>`;
-    return;
-  }
-
-  if (flights.length === 0) {
-    // ── Scoreboard takes over the idle display ────────────────────────────
-    // server `enabled` already reflects whether any configured sport is on
-    const sbEnabled = (sbData.enabled !== false);
-    const game = sbData.game;
-    const teamName = sbData.team_name || config.SCOREBOARD_NHL_TEAM_NAME || 'VGK';
-    const isLive    = game && (game.state === 'LIVE' || game.state === 'CRIT');
-    const isFinal   = game && (game.state === 'FINAL' || game.state === 'OFF');
-    // Post-game: hide after SCOREBOARD_POST_GAME_MINUTES (default 30).
-    // Use the server-provided game_ended_at so the countdown survives page refreshes.
-    const postGameSecs    = (config.SCOREBOARD_POST_GAME_MINUTES ?? 30) * 60;
-    const serverEndedAt   = sbData.game_ended_at ?? null;
-    const postGameExpired = isFinal && serverEndedAt !== null &&
-                            (Date.now() / 1000 - serverEndedAt > postGameSecs);
-    // Only show scoreboard once game is live or finished, and within post-game window
-    if (game && sbEnabled && (isLive || isFinal) && !postGameExpired) {
-      const teamScore = game.team_score ?? 0;
-      const oppScore  = game.opp_score ?? 0;
-      const won       = isFinal && teamScore > oppScore;
-      const statusLbl = _scoreboardStatusLabel(game);
-      screen.innerHTML = `
-        <div class="m-hockey">
-          <div class="m-hk-teams">
-            <span class="m-hk-team">${escHtml(teamName)}</span>
-            <span class="m-hk-opp">${escHtml(game.opp_abbr)}</span>
-          </div>
-          <div class="m-hk-score-row">
-            <span class="m-hk-score-team${won ? ' win' : ''}">${teamScore}</span>
-            <span class="m-hk-sep">-</span>
-            <span class="m-hk-score-opp">${oppScore}</span>
-          </div>
-          <div class="m-hk-status">${escHtml(statusLbl)}</div>
-        </div>`;
-      return;
-    }
-
-    // ── Default idle: clock / date / weather ──────────────────────────────
-    const now      = new Date();
-    const tz       = config.TIMEZONE || 'America/Los_Angeles';
-    const _dateFmt = config.DATE_FORMAT || 'MDY';
-    const timeStr  = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz });
-    const dayName  = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: tz });
-    const _d       = now.toLocaleDateString('en-US', { day: 'numeric',  timeZone: tz });
-    const _m       = now.toLocaleDateString('en-US', { month: 'numeric', timeZone: tz });
-    const _y       = now.toLocaleDateString('en-US', { year: 'numeric', timeZone: tz });
-    const _m2      = now.toLocaleDateString('en-US', { month: '2-digit', timeZone: tz });
-    const _d2      = now.toLocaleDateString('en-US', { day: '2-digit',  timeZone: tz });
-    const dateStr  = _dateFmt === 'DMY' ? `${_d}/${_m}/${_y}` :
-                     _dateFmt === 'YMD' ? `${_y}-${_m2}-${_d2}` :
-                     `${_m}/${_d}/${_y}`;
-    const wData    = _weatherData;
-    const tempHtml = (wData && wData.temp != null)
-      ? `<div class="m-temp" style="color:${_tempColor(wData.temp)};text-shadow:0 0 8px ${_tempColor(wData.temp)}88">${wData.temp}${escHtml(wData.unit)}</div>`
-      : '';
-    screen.innerHTML = `
-      <div class="m-idle">
-        <div class="m-top-row">
-          <div class="m-clock">${timeStr}</div>
-          ${tempHtml}
-        </div>
-        <div class="m-day">${escHtml(dayName)}</div>
-        <div class="m-date">${escHtml(dateStr)}</div>
-      </div>`;
-    return;
-  }
-  const f = flights[0];
-  const total = flights.length;
-  const displayLabel = f.display_name || f.plane || '';
-  const dur = Math.max(8, Math.ceil(displayLabel.length * 0.7));
-  const _sel = (config.JOURNEY_CODE_SELECTED || '').toUpperCase();
-  const _codeStyle = (code) => _sel && code && code.toUpperCase() === _sel
-    ? 'font-weight:900;letter-spacing:.04em'
-    : '';
-  if (f.test) screen.classList.add('test-mode');
-  screen.innerHTML = `
-    <div class="m-journey">
-      <span class="m-code" style="${_codeStyle(f.origin)}">${escHtml(f.origin) || '&nbsp;?&nbsp;'}</span>
-      <span class="m-arrow">&#9654;</span>
-      <span class="m-code" style="${_codeStyle(f.destination)}">${escHtml(f.destination) || '&nbsp;?&nbsp;'}</span>
-    </div>
-    <div class="m-bar">
-      <span class="m-callsign">${_callsignHtml(f.callsign)}</span>
-      <span class="m-flight-index">${total > 1 ? '1/' + total : ''}</span>
-    </div>
-    <div class="m-plane">
-      <span class="m-plane-text" style="animation-duration:${dur}s">${escHtml(displayLabel) || '&#8212;'}</span>
-    </div>`;
 }
 
 function scrollLog() { const o = document.getElementById('log-output'); o.scrollTop = o.scrollHeight; }
@@ -1708,64 +1524,6 @@ function renderStack(stack) {
         <div class="stack-badge">${keyBadge}</div>
       </div>`;
   }).join('');
-}
-
-// ── Callsign two-tone helper ───────────────────────────────────
-// Mirrors FlightDetailsScene: alpha chars → BLUE (#370eed), numeric → BLUE_LIGHT (#6eb6ff)
-function _callsignHtml(cs) {
-  if (!cs) return '';
-  return [...cs].map(ch => {
-    if (/[0-9]/.test(ch)) {
-      return `<span style="color:#6eb6ff;text-shadow:0 0 5px rgba(110,182,255,.5)">${escHtml(ch)}</span>`;
-    }
-    return `<span style="color:#370eed;text-shadow:0 0 5px rgba(55,14,237,.55)">${escHtml(ch)}</span>`;
-  }).join('');
-}
-
-// ── Weather helpers ────────────────────────────────────────────
-async function fetchWeather() {
-  // Refresh no more often than the server-side cache TTL (60 s)
-  if (Date.now() - _weatherFetchedAt < 55000) return;
-  try {
-    const r = await fetch('/api/weather');
-    if (r.ok) {
-      _weatherData = await r.json();
-      _weatherFetchedAt = Date.now();
-    }
-  } catch (_) {}
-}
-
-function _tempColor(temp) {
-  // Mirrors TEMPERATURE_COLOURS / TEMPERATURE_COLOURS_METRIC in scenes/weather.py
-  const stopsF = [  // °F thresholds (imperial)
-    [0,   [255, 255, 255]],  // WHITE
-    [40,  [110, 182, 255]],  // BLUE_LIGHT
-    [60,  [112,   0, 145]],  // PINK_DARK
-    [80,  [255, 255,   0]],  // YELLOW
-    [100, [227, 110,   0]],  // ORANGE
-  ];
-  const stopsC = [  // °C thresholds (metric)
-    [-18, [255, 255, 255]],  // WHITE
-    [  4, [110, 182, 255]],  // BLUE_LIGHT
-    [ 16, [112,   0, 145]],  // PINK_DARK
-    [ 27, [255, 255,   0]],  // YELLOW
-    [ 38, [227, 110,   0]],  // ORANGE
-  ];
-  const stops = (config.TEMPERATURE_UNITS || 'imperial') === 'metric' ? stopsC : stopsF;
-  if (temp == null) return '#ffffff';
-  let loT = stops[0][0], hiT = stops[1][0];
-  let loC = stops[0][1], hiC = stops[1][1];
-  for (let i = 1; i < stops.length - 1; i++) {
-    if (temp > stops[i][0]) { loT = stops[i][0]; hiT = stops[i+1][0]; loC = stops[i][1]; hiC = stops[i+1][1]; }
-  }
-  let ratio;
-  if (temp >= hiT) ratio = 1;
-  else if (temp > loT) ratio = (temp - loT) / (hiT - loT);
-  else ratio = 0;
-  const r = Math.round(loC[0] + (hiC[0] - loC[0]) * ratio);
-  const g = Math.round(loC[1] + (hiC[1] - loC[1]) * ratio);
-  const b = Math.round(loC[2] + (hiC[2] - loC[2]) * ratio);
-  return `rgb(${r},${g},${b})`;
 }
 
 function _formatTime(hhmm) {

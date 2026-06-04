@@ -580,7 +580,12 @@ class SportScoreScene(object):
             if state in ("LIVE", "CRIT"):
                 slot["was_live"]      = True
                 slot["game_ended_at"] = None
-            elif state in ("FUT", "PRE"):
+            elif state in ("FUT", "PRE") and not slot["was_live"]:
+                # Genuine pre-game (never seen LIVE) — safe to (re)arm baseline.
+                # GUARD `not was_live`: ESPN maps a mid-game STATUS_RAIN_DELAY to
+                # "PRE", so a game we already watched go LIVE can briefly re-report
+                # PRE during a delay.  Without this guard that would wipe was_live /
+                # win_shown and suppress the post-resumption WIN celebration.
                 slot["was_live"]      = False   # fresh game, not started yet
                 slot["win_shown"]     = False
                 slot["game_ended_at"] = None

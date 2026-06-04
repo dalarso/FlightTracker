@@ -109,7 +109,15 @@ def grab_weather(location, ttl_hash=None):
     while retries:
         try:
             request = urllib.request.Request(WEATHER_API_URL + location)
-            raw_data = urllib.request.urlopen(request, timeout=3).read()
+            response = urllib.request.urlopen(request, timeout=3)
+            try:
+                raw_data = response.read()
+            finally:
+                # Ensure the connection is released even on a mid-read error.
+                # Guarded so a bare .read()-only stub (see tests) stays compatible.
+                _close = getattr(response, "close", None)
+                if _close is not None:
+                    _close()
             content = json.loads(raw_data.decode("utf-8"))
             break
         except Exception as e:
@@ -194,7 +202,15 @@ def grab_current_temperature_openweather(location, apikey, units):
                 + "&units="
                 + units
             )
-            raw_data = urllib.request.urlopen(request, timeout=3).read()
+            response = urllib.request.urlopen(request, timeout=3)
+            try:
+                raw_data = response.read()
+            finally:
+                # Ensure the connection is released even on a mid-read error.
+                # Guarded so a bare .read()-only stub (see tests) stays compatible.
+                _close = getattr(response, "close", None)
+                if _close is not None:
+                    _close()
             content = json.loads(raw_data.decode("utf-8"))
             current_temp = content["main"]["temp"]
             break
@@ -382,24 +398,32 @@ class WeatherScene(object):
         # Rainfall is fetched on the background thread (_weather_refresh_loop);
         # here we only render the latest published value.
 
+        # The background thread (_weather_refresh_loop) replaces
+        # self.upcoming_rain_and_temp with a brand-new list object every
+        # RAINFALL_REFRESH_SECONDS — it never mutates it in place. So a cheap
+        # identity check detects a genuine data change without the per-tick
+        # 24-element deep `!=` compare. We stash the exact object we rendered
+        # (not a copy) so the next tick's `is` correctly reads "unchanged".
+        current_rain_and_temp = self.upcoming_rain_and_temp
+
         # Test for drawing rainfall if data is available
-        if self._last_upcoming_rain_and_temp != self.upcoming_rain_and_temp:
+        if self._last_upcoming_rain_and_temp is not current_rain_and_temp:
             if self._last_upcoming_rain_and_temp is not None:
                 # Undraw previous graph
                 self.draw_rainfall_and_temperature(
                     self._last_upcoming_rain_and_temp, colours.BLACK
                 )
 
-        if self.upcoming_rain_and_temp:
+        if current_rain_and_temp:
             # Draw new graph
             flash_enabled = (
                 True if RAINFALL_OVERSPILL_FLASH_ENABLED and (count % 2) else False
             )
 
             self.draw_rainfall_and_temperature(
-                self.upcoming_rain_and_temp, flash_enabled=flash_enabled
+                current_rain_and_temp, flash_enabled=flash_enabled
             )
-            self._last_upcoming_rain_and_temp = self.upcoming_rain_and_temp.copy()
+            self._last_upcoming_rain_and_temp = current_rain_and_temp
 
     @Animator.KeyFrame.add(int(frames.PER_SECOND * 1))
     def temperature(self, count):

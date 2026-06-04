@@ -44,10 +44,13 @@ def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lo
         return True  # Can't validate — assume plausible
 
     route_km = _haversine_km(orig_lat, orig_lon, dest_lat, dest_lon)
-    if route_km == 0:
-        return False  # Same-airport route — reject; no valid flight path exists
     if route_km < ROUTE_SHORT_HOP_KM:
-        return True  # Short hop — geometry check not reliable at this scale
+        # Short hop — geometry not reliable at this scale.  This INCLUDES route_km == 0,
+        # which happens when two *distinct* airports resolve to the same coordinate (e.g.
+        # several local airports sharing one seed coord) — a valid route geometry can't
+        # validate, NOT a reject.  A genuine same-airport route (origin == dest by CODE) is
+        # rejected by the caller's string check (_cand_plausible / _fr24_route_plausible).
+        return True
 
     d_orig = _haversine_km(plane_lat, plane_lon, orig_lat, orig_lon)
     d_dest = _haversine_km(plane_lat, plane_lon, dest_lat, dest_lon)

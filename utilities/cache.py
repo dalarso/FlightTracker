@@ -180,7 +180,12 @@ def _cache_db_check_paid_miss(callsign: str) -> bool:
 
 
 def _cache_db_set_paid_miss(callsign: str) -> None:
-    """Record that both paid APIs returned empty for callsign; prune stale entries."""
+    """Record that both paid APIs returned empty for callsign.
+
+    No inline expired-row sweep: the periodic _purge_expired_cache (overhead.py) already
+    reclaims expired rows across every cache_type, so deleting on every paid-miss write
+    just added an extra write per call for no benefit (reads ignore expired rows anyway).
+    """
     if _cache_conn is None:
         return
     try:
@@ -191,10 +196,6 @@ def _cache_db_set_paid_miss(callsign: str) -> None:
                    (key, cache_type, expires_at)
                    VALUES (?, 'paid_miss', ?)""",
                 (callsign, expires),
-            )
-            _cache_conn.execute(
-                "DELETE FROM cache WHERE cache_type='paid_miss' AND expires_at<?",
-                (int(time.time()),),
             )
             _cache_conn.commit()
     except Exception:
