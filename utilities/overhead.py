@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import requests
 from collections import namedtuple
+from utilities.geometry import _haversine_km, _route_plausible  # pure geometry, extracted
 from threading import Thread, Lock, local
 _cache_bypass = local()  # set .on=True to make cache READS miss (test-flight no-cache mode)
 
@@ -1337,16 +1338,6 @@ def _alt_ft_to_earth_radius(altitude_ft):
     return 0.0003048 * altitude_ft + EARTH_RADIUS_KM
 
 
-def _haversine_km(lat1, lon1, lat2, lon2):
-    """Great-circle distance in km between two lat/lon points."""
-    dlat = _DEG2RAD * (lat2 - lat1)
-    dlon = _DEG2RAD * (lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(_DEG2RAD * lat1) * math.cos(_DEG2RAD * lat2)
-         * math.sin(dlon / 2) ** 2)
-    return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(max(0.0, min(1.0, a))))
-
-
 def _has_local_endpoint(origin: str, dest: str) -> bool:
     """Return True if either airport code is in the configured local set.
 
@@ -1389,9 +1380,7 @@ SOURCE_PRIORITY = {
 }
 
 
-# ── Geometry & backoff tuning constants ───────────────────────────────────
-ROUTE_DETOUR_RATIO_MAX  = 1.8       # reject when (plane→orig + plane→dest)/route ≥ this (PR #25)
-ROUTE_SHORT_HOP_KM      = 80        # routes shorter than this skip the geometry check
+# ── Backoff tuning constants (geometry constants live in utilities/geometry.py) ─
 OPENSKY_LOOKBACK_SECS   = 6 * 3600  # OpenSky flights-by-aircraft lookback window (6 h)
 BACKOFF_RATE_LIMIT_SECS = 3600      # 1 h backoff after a 429 rate-limit
 BACKOFF_AUTH_SECS       = 86400     # 24 h backoff after an auth error (401/403)
@@ -1399,34 +1388,6 @@ BACKOFF_AUTH_SECS       = 86400     # 24 h backoff after an auth error (401/403)
 # again — AirLabs allows usage past the nominal monthly limit and our local count can
 # drift from theirs, so we re-test rather than hard-stopping on our own tally.
 QUOTA_PROBE_BACKOFF_SECS = 24 * 3600
-
-
-def _route_plausible(plane_lat, plane_lon, orig_lat, orig_lon, dest_lat, dest_lon):
-    """
-    Return True if the aircraft's current position is geometrically consistent
-    with the given route.  Uses the detour-ratio test from PR #25:
-
-        (dist_plane→origin + dist_plane→dest) / dist_origin→dest < ROUTE_DETOUR_RATIO_MAX
-
-    A value ≥ ROUTE_DETOUR_RATIO_MAX means the aircraft is far off the great-circle path —
-    a strong signal that the API returned stale or wrong route data.
-
-    Returns True when any coordinate is missing (benefit of the doubt).
-    """
-    if not all(v is not None for v in (plane_lat, plane_lon,
-                                        orig_lat, orig_lon,
-                                        dest_lat, dest_lon)):
-        return True  # Can't validate — assume plausible
-
-    route_km = _haversine_km(orig_lat, orig_lon, dest_lat, dest_lon)
-    if route_km == 0:
-        return False  # Same-airport route — reject; no valid flight path exists
-    if route_km < ROUTE_SHORT_HOP_KM:
-        return True  # Short hop — geometry check not reliable at this scale
-
-    d_orig = _haversine_km(plane_lat, plane_lon, orig_lat, orig_lon)
-    d_dest = _haversine_km(plane_lat, plane_lon, dest_lat, dest_lon)
-    return (d_orig + d_dest) / route_km < ROUTE_DETOUR_RATIO_MAX
 
 
 # ── Airport coordinate table (gives FR24 routes the same geometry check) ───────
