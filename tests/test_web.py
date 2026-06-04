@@ -11,10 +11,12 @@ so the suite never triggers a live side effect — important because it also run
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _ROOT = Path(__file__).resolve().parent.parent
 _WEB = _ROOT / "web"
@@ -378,6 +380,163 @@ class ConfigWriteRoundTrip(unittest.TestCase):
                   "AIRLABS_API_KEY", "ROUTE_PAID_MISS_TTL"):
             self.assertIn(k, self.srv._KNOWN_KEYS)
         self.assertFalse(schema_keys & self.srv._LEGACY_KEYS)
+
+
+_CSRF = {"X-Requested-With": "FlightTracker"}
+
+
+class ApiToggle(unittest.TestCase):
+    """POST /api/apis/toggle flips per-API kill-switch flag files. All flag paths are
+    redirected to a temp dir so the live display's flags are never touched."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._orig_flags = self.srv._API_FLAGS
+        self._orig_combined = self.srv.APIS_DISABLED_FLAG
+        self.srv._API_FLAGS = {k: self._dir / f"ft_{k}_disabled" for k in self._orig_flags}
+        self.srv.APIS_DISABLED_FLAG = self._dir / "ft_apis_disabled"
+
+    def tearDown(self):
+        self.srv._API_FLAGS = self._orig_flags
+        self.srv.APIS_DISABLED_FLAG = self._orig_combined
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def test_toggle_known_api_off_then_on(self):
+        flag = self.srv._API_FLAGS["adsbdb"]
+        r = self.client.post("/api/apis/toggle", headers=_CSRF, json={"api": "adsbdb"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(flag.exists())                  # first toggle → disabled (flag created)
+        self.assertFalse(r.get_json()["enabled"])
+        r = self.client.post("/api/apis/toggle", headers=_CSRF, json={"api": "adsbdb"})
+        self.assertFalse(flag.exists())                 # second toggle → enabled (flag removed)
+        self.assertTrue(r.get_json()["enabled"])
+
+    def test_unknown_api_returns_400(self):
+        r = self.client.post("/api/apis/toggle", headers=_CSRF, json={"api": "bogus"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_legacy_combined_switch(self):
+        r = self.client.post("/api/apis/toggle", headers=_CSRF, json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(self.srv.APIS_DISABLED_FLAG.exists())
+
+    def test_csrf_required(self):
+        r = self.client.post("/api/apis/toggle", json={"api": "adsbdb"})   # no header
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(self.srv._API_FLAGS["adsbdb"].exists())           # guard ran first
+
+
+class OverridesCrud(unittest.TestCase):
+    """GET/POST /api/overrides round-trips override rules through SQLite. DB_FILE is
+    redirected to a temp DB so the live ft_flights.db is never written."""
+
+    _DDL = """
+    CREATE TABLE overrides (id INTEGER PRIMARY KEY AUTOINCREMENT, position INTEGER NOT NULL DEFAULT 0,
+        pattern TEXT NOT NULL, origin TEXT NOT NULL DEFAULT '', destination TEXT NOT NULL DEFAULT '',
+        display TEXT NOT NULL DEFAULT '', plane TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '');
+    CREATE TABLE overrides_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '0');
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        conn = sqlite3.connect(self._tmp.name)
+        conn.executescript(self._DDL)
+        conn.commit()
+        conn.close()
+        self._orig = self.srv.DB_FILE
+        self.srv.DB_FILE = Path(self._tmp.name)
+
+    def tearDown(self):
+        self.srv.DB_FILE = self._orig
+        os.remove(self._tmp.name)
+
+    def test_save_then_get_roundtrip_normalises(self):
+        rules = [{"pattern": "swa", "origin": "las", "destination": "jfk",
+                  "display": "Southwest", "plane": "", "note": "n"}]
+        r = self.client.post("/api/overrides", headers=_CSRF, json=rules)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["count"], 1)
+        got = self.client.get("/api/overrides").get_json()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["pattern"], "SWA")          # pattern/codes upper-cased
+        self.assertEqual(got[0]["origin"], "LAS")
+        self.assertEqual(got[0]["display"], "Southwest")    # display preserved as-is
+
+    def test_non_list_returns_400(self):
+        r = self.client.post("/api/overrides", headers=_CSRF, json={"not": "a list"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_rule_without_pattern_returns_400(self):
+        r = self.client.post("/api/overrides", headers=_CSRF, json=[{"origin": "LAS"}])
+        self.assertEqual(r.status_code, 400)
+
+    def test_version_counter_increments(self):
+        self.client.post("/api/overrides", headers=_CSRF, json=[{"pattern": "A"}])
+        self.client.post("/api/overrides", headers=_CSRF, json=[{"pattern": "B"}])
+        conn = sqlite3.connect(self._tmp.name)
+        v = conn.execute("SELECT value FROM overrides_meta WHERE key='version'").fetchone()[0]
+        conn.close()
+        self.assertEqual(int(v), 2)   # bumped once per save so overhead reloads
+
+    def test_csrf_required(self):
+        r = self.client.post("/api/overrides", json=[{"pattern": "X"}])   # no header
+        self.assertEqual(r.status_code, 403)
+
+
+class ServiceControl(unittest.TestCase):
+    """POST /api/service/{stop,start} shells out to systemctl. subprocess.run is mocked
+    so the real service is NEVER touched — every test asserts the mock intercepted."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def test_stop_invokes_systemctl(self):
+        with mock.patch.object(self.srv.subprocess, "run") as m:
+            r = self.client.post("/api/service/stop", headers=_CSRF)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        cmd = m.call_args[0][0]
+        self.assertIn("systemctl", cmd[1])
+        self.assertEqual(cmd[2:], ["stop", "FlightTracker"])
+
+    def test_start_invokes_systemctl(self):
+        with mock.patch.object(self.srv.subprocess, "run") as m:
+            r = self.client.post("/api/service/start", headers=_CSRF)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(m.call_args[0][0][2:], ["start", "FlightTracker"])
+
+    def test_timeout_returns_504(self):
+        with mock.patch.object(self.srv.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("cmd", 15)):
+            r = self.client.post("/api/service/stop", headers=_CSRF)
+        self.assertEqual(r.status_code, 504)
+
+    def test_called_process_error_returns_500(self):
+        err = subprocess.CalledProcessError(1, "cmd", stderr=b"unit not found")
+        with mock.patch.object(self.srv.subprocess, "run", side_effect=err):
+            r = self.client.post("/api/service/start", headers=_CSRF)
+        self.assertEqual(r.status_code, 500)
+
+    def test_csrf_required_and_systemctl_not_called(self):
+        with mock.patch.object(self.srv.subprocess, "run") as m:
+            r = self.client.post("/api/service/stop")   # no header
+        self.assertEqual(r.status_code, 403)
+        m.assert_not_called()                            # guard short-circuits the handler
 
 
 if __name__ == "__main__":
