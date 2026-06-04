@@ -1734,6 +1734,201 @@ def _query_airlabs(callsign, plane_lat, plane_lon, *, api_key, cache_key, backof
     return origin, dest, olat, olon, dlat, dlon, src, count
 
 
+def _query_adsbdb(callsign, origin, destination):
+    """Fetch a route from adsbdb's static historical DB (cache-aware).
+
+    Pure fetch: cache read, HTTP + status ladder (200/404/5xx), JSON parse, airport
+    harvest, cache write.  Returns (origin, dest, olat, olon, dlat, dlon, src); src is
+    'adsbdb:cached' on a cache hit, else 'adsbdb'.  Skips the lookup entirely when the
+    route is already complete or adsbdb is disabled.  Trust/commit (GA-only, local-
+    origin, plausibility) is the caller's responsibility.
+    """
+    adsbdb_origin = adsbdb_dest = ""
+    adsbdb_olat = adsbdb_olon = adsbdb_dlat = adsbdb_dlon = None
+    _adsbdb_src = "adsbdb"
+
+    if callsign and not (origin and destination) and not os.path.exists(ADSBDB_DISABLED_FLAG):
+        _cached_adsbdb = _cache_db_get_route(callsign, 'route')
+        if _cached_adsbdb:
+            adsbdb_origin, adsbdb_dest = _cached_adsbdb[0], _cached_adsbdb[1]
+            adsbdb_olat, adsbdb_olon = _cached_adsbdb[2], _cached_adsbdb[3]
+            adsbdb_dlat, adsbdb_dlon = _cached_adsbdb[4], _cached_adsbdb[5]
+            _adsbdb_src = "adsbdb:cached"
+        else:
+            try:
+                r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
+                if r.status_code == 200:
+                    fr = (r.json().get("response") or {}).get("flightroute") or {}
+                    _fr_orig      = fr.get("origin") or {}
+                    _fr_dest      = fr.get("destination") or {}
+                    adsbdb_origin = _fr_orig.get("iata_code", "") or ""
+                    adsbdb_dest   = _fr_dest.get("iata_code", "") or ""
+                    adsbdb_olat   = _fr_orig.get("latitude")
+                    adsbdb_olon   = _fr_orig.get("longitude")
+                    adsbdb_dlat   = _fr_dest.get("latitude")
+                    adsbdb_dlon   = _fr_dest.get("longitude")
+                    _remember_airport(adsbdb_origin, adsbdb_olat, adsbdb_olon)
+                    _remember_airport(adsbdb_dest,   adsbdb_dlat, adsbdb_dlon)
+                    # Cache the result.  Use ADSBDB_CACHE_TTL (1 hr) for both
+                    # hits and misses — adsbdb is a static historical DB and a
+                    # "no route" answer won't change between polls the way a
+                    # real-time API might.  ROUTE_MISS_TTL (5 min) is only
+                    # appropriate for live data sources.
+                    _cache_db_set_route(callsign, 'route',
+                                        adsbdb_origin, adsbdb_dest,
+                                        adsbdb_olat, adsbdb_olon, adsbdb_dlat, adsbdb_dlon,
+                                        int(time.time()) + ADSBDB_CACHE_TTL,
+                                        source="adsbdb")
+                elif r.status_code == 404:
+                    # Callsign not in adsbdb's static DB — also cache for the
+                    # full hour; the DB doesn't gain new entries between polls.
+                    _cache_db_set_route(callsign, 'route',
+                                        "", "", None, None, None, None,
+                                        int(time.time()) + ADSBDB_CACHE_TTL,
+                                        source="adsbdb")
+                # 5xx / unexpected: don't cache — transient error, retry next poll
+            except Exception as e:
+                _log(f"[adsbdb] {callsign}: request error — {e}")
+
+    return (adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
+            adsbdb_dlat, adsbdb_dlon, _adsbdb_src)
+
+
+def _query_opensky(hex_code, callsign, origin, destination, now):
+    """Fetch a route from OpenSky by hex (free, unlimited; queried before AirLabs).
+
+    Pure fetch: cache read, OAuth token, HTTP + status ladder (429/401/403/200), pick the
+    most-recent flight, ICAO->IATA, cache write (no coords -- OpenSky returns none, so
+    geometry isn't possible).  Returns (origin, dest, src); src is 'opensky:cached' on a
+    cache hit, else 'opensky'.  Skips the lookup when the route is already complete, creds
+    are missing, OpenSky is in backoff, or it's disabled.  Trust/commit (local-origin only,
+    GA-only) stays with the caller.
+    """
+    _sky_origin = _sky_dest = ""
+    _sky_src = "opensky"
+    # OpenSky is free/unlimited — intentionally excluded from the _apis_disabled kill-switch.
+    if not (origin and destination) and OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET and hex_code and not _in_backoff("opensky") and not os.path.exists(OPENSKY_DISABLED_FLAG):
+        _cached_sky = _cache_db_get_route(hex_code, 'route')
+        if _cached_sky:
+            _sky_origin, _sky_dest = _cached_sky[0], _cached_sky[1]
+            _sky_src = "opensky:cached"
+        else:
+            token = _get_opensky_token()
+            if token:
+                try:
+                    r = requests.get(
+                        OPENSKY_FLIGHTS_URL,
+                        params={"icao24": hex_code.lower(), "begin": now - OPENSKY_LOOKBACK_SECS, "end": now},
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=10,
+                    )
+                    if r.status_code == 429:
+                        _set_backoff("opensky", secs=BACKOFF_RATE_LIMIT_SECS)
+                    elif r.status_code in (401, 403):
+                        _set_backoff("opensky", secs=BACKOFF_AUTH_SECS)
+                        _log(f"[opensky] auth error ({r.status_code}) — check credentials")
+                    elif r.status_code == 200:
+                        sky_data = r.json()
+                        if sky_data:
+                            fl = max(sky_data, key=lambda f: f.get("firstSeen", 0))
+                            _sky_origin = icao_to_iata(fl.get("estDepartureAirport") or "")
+                            _sky_dest   = icao_to_iata(fl.get("estArrivalAirport") or "")
+                        else:
+                            _log(f"[opensky] {callsign}: no data")
+                        # Cache hit or confirmed-empty 200 — suppresses re-queries within TTL.
+                        # Non-200 status codes (5xx etc.) are not cached; retry next poll.
+                        _sky_ttl = (ROUTE_MISS_TTL if _is_nonlocal(_sky_origin, _sky_dest)
+                                    else OPENSKY_CACHE_TTL if (_sky_origin or _sky_dest)
+                                    else ROUTE_MISS_TTL)
+                        _cache_db_set_route(hex_code, 'route',
+                                            _sky_origin, _sky_dest,
+                                            None, None, None, None,
+                                            int(time.time()) + _sky_ttl,
+                                            source="opensky")
+                except Exception as e:
+                    _log(f"[opensky] {callsign}: request error — {e}")
+    return _sky_origin, _sky_dest, _sky_src
+
+
+def _query_fr24_ga(callsign, hex_code, registration, origin, destination,
+                   plane_lat, plane_lon, is_n_number, adsbdb_commercial):
+    """Fetch a GA / N-number route from FlightRadar24 (first resort for tail numbers).
+
+    Pure fetch: cache read, FlightRadarAPI get_flights(registration=...), prefer an
+    airborne flight, harvest the aircraft type into the type cache as a side effect,
+    cache write, then a geometry-parity reject that negatively-caches an implausible
+    leg.  Returns (origin, dest, src); src is 'fr24:cached' on a cache hit, else 'fr24'.
+    Skips the lookup when the route is already complete, the callsign is commercial,
+    it's not an N-number, FR24 is unavailable, or it's disabled.  Commit/log stays
+    with the caller.
+    """
+    _fr24_origin = _fr24_dest = ""
+    _fr24_src = "fr24"
+    if (not (origin and destination)
+            and not adsbdb_commercial
+            and is_n_number
+            and _FR24_AVAILABLE
+            and not os.path.exists(FR24_DISABLED_FLAG)):
+        _cached_fr24 = _cache_db_get_route(f"fr24:{registration}", 'route')
+        if _cached_fr24:
+            _fr24_origin = _cached_fr24[0] or ""
+            _fr24_dest   = _cached_fr24[1] or ""
+            _fr24_src    = "fr24:cached"
+        else:
+            _fr24_f = None
+            _fr24_active = []
+            try:
+                _fr24_api = _get_fr24_api()
+                if _fr24_api is not None:
+                    with _fr24_lock:   # serialize concurrent get_flights() calls
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")   # suppress DeprecationWarning from shim
+                            _fr24_flights = _fr24_api.get_flights(registration=registration) or []
+                    # Prefer an airborne flight; fall back to the first result
+                    _fr24_active = [f for f in _fr24_flights if _fr24_alt_int(f) > 0]
+                    _fr24_f = _fr24_active[0] if _fr24_active else (_fr24_flights[0] if _fr24_flights else None)
+                    if _fr24_f:
+                        _fr24_origin = getattr(_fr24_f, 'origin_airport_iata', '') or ''
+                        _fr24_dest   = getattr(_fr24_f, 'destination_airport_iata', '') or ''
+                        # Side-effect: populate type cache for free while we have the Flight object
+                        _fr24_ac_code = getattr(_fr24_f, 'aircraft_code', '') or ''
+                        if _fr24_ac_code and hex_code:
+                            _ac_cached = _cache_db_get_aircraft(hex_code)
+                            if not (_ac_cached and _ac_cached[0]):
+                                _cache_db_set_aircraft(hex_code, _translate_type(_fr24_ac_code),
+                                                       "fr24", AIRCRAFT_CACHE_TTL)
+                    if not (_fr24_origin or _fr24_dest):
+                        _log(f"[fr24] {callsign} ({registration}): no route data")
+            except Exception as e:
+                _log(f"[fr24] {callsign} ({registration}): request error — {e}")
+            # Unconditional cache write outside try — prevents per-poll retries on persistent failure
+            _fr24_grounded = _fr24_f is not None and not _fr24_active  # result is grounded, no airborne alt
+            # GA routes are keyed by registration (FR24 is reliable for a specific tail),
+            # so a non-local GA route is usually CORRECT — keep it at the normal 1 h TTL
+            # rather than dropping it (prefer local, but don't strip a valid non-local
+            # route).  The read-side geometry check below still busts it if the plane
+            # later moves off the route.  Only grounded/empty results get the short TTL.
+            _fr24_ttl = (ROUTE_MISS_TTL if _fr24_grounded
+                         else ROUTE_TTL_DEFAULT if (_fr24_origin or _fr24_dest)
+                         else ROUTE_MISS_TTL)
+            _cache_db_set_route(f"fr24:{registration}", 'route',
+                                _fr24_origin, _fr24_dest,
+                                None, None, None, None,
+                                int(time.time()) + _fr24_ttl,
+                                source="fr24")
+
+        # Geometry parity: resolve the IATA codes to coords and reject a stale /
+        # wrong-leg route before it can be committed — the same test the other
+        # sources run.  Unknown airports fall through to benefit-of-the-doubt.
+        if (_fr24_origin or _fr24_dest) and not _fr24_route_plausible(
+                plane_lat, plane_lon, _fr24_origin, _fr24_dest):
+            _cache_db_set_route(f"fr24:{registration}", 'route', '', '', None, None, None, None,
+                                int(time.time()) + ROUTE_MISS_TTL, source="fr24")
+            _log(f"[fr24] {registration}: {_route_display(_fr24_origin, _fr24_dest)} rejected — implausible route")
+            _fr24_origin = _fr24_dest = ""
+    return _fr24_origin, _fr24_dest, _fr24_src
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -1939,127 +2134,22 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # so through-traffic and arrivals are trustworthy.  No API key required.
     # Commercial callsigns are excluded here; FR24 serves them at §5 (last resort).
     # adsbdb / OpenSky still run after as fallbacks if FR24 has no data.
-    _fr24_origin = _fr24_dest = ""
-    _fr24_src = "fr24"
-    if (not (origin and destination)
-            and not _adsbdb_commercial
-            and _is_n_number
-            and _FR24_AVAILABLE
-            and not os.path.exists(FR24_DISABLED_FLAG)):
-        _cached_fr24 = _cache_db_get_route(f"fr24:{registration}", 'route')
-        if _cached_fr24:
-            _fr24_origin = _cached_fr24[0] or ""
-            _fr24_dest   = _cached_fr24[1] or ""
-            _fr24_src    = "fr24:cached"
-        else:
-            _fr24_f = None
-            _fr24_active = []
-            try:
-                _fr24_api = _get_fr24_api()
-                if _fr24_api is not None:
-                    with _fr24_lock:   # serialize concurrent get_flights() calls
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")   # suppress DeprecationWarning from shim
-                            _fr24_flights = _fr24_api.get_flights(registration=registration) or []
-                    # Prefer an airborne flight; fall back to the first result
-                    _fr24_active = [f for f in _fr24_flights if _fr24_alt_int(f) > 0]
-                    _fr24_f = _fr24_active[0] if _fr24_active else (_fr24_flights[0] if _fr24_flights else None)
-                    if _fr24_f:
-                        _fr24_origin = getattr(_fr24_f, 'origin_airport_iata', '') or ''
-                        _fr24_dest   = getattr(_fr24_f, 'destination_airport_iata', '') or ''
-                        # Side-effect: populate type cache for free while we have the Flight object
-                        _fr24_ac_code = getattr(_fr24_f, 'aircraft_code', '') or ''
-                        if _fr24_ac_code and hex_code:
-                            _ac_cached = _cache_db_get_aircraft(hex_code)
-                            if not (_ac_cached and _ac_cached[0]):
-                                _cache_db_set_aircraft(hex_code, _translate_type(_fr24_ac_code),
-                                                       "fr24", AIRCRAFT_CACHE_TTL)
-                    if not (_fr24_origin or _fr24_dest):
-                        _log(f"[fr24] {callsign} ({registration}): no route data")
-            except Exception as e:
-                _log(f"[fr24] {callsign} ({registration}): request error — {e}")
-            # Unconditional cache write outside try — prevents per-poll retries on persistent failure
-            _fr24_grounded = _fr24_f is not None and not _fr24_active  # result is grounded, no airborne alt
-            # GA routes are keyed by registration (FR24 is reliable for a specific tail),
-            # so a non-local GA route is usually CORRECT — keep it at the normal 1 h TTL
-            # rather than dropping it (prefer local, but don't strip a valid non-local
-            # route).  The read-side geometry check below still busts it if the plane
-            # later moves off the route.  Only grounded/empty results get the short TTL.
-            _fr24_ttl = (ROUTE_MISS_TTL if _fr24_grounded
-                         else ROUTE_TTL_DEFAULT if (_fr24_origin or _fr24_dest)
-                         else ROUTE_MISS_TTL)
-            _cache_db_set_route(f"fr24:{registration}", 'route',
-                                _fr24_origin, _fr24_dest,
-                                None, None, None, None,
-                                int(time.time()) + _fr24_ttl,
-                                source="fr24")
+    (_fr24_origin, _fr24_dest, _fr24_src) = _query_fr24_ga(
+        callsign, hex_code, registration, origin, destination,
+        plane_lat, plane_lon, _is_n_number, _adsbdb_commercial)
 
-        # Geometry parity: resolve the IATA codes to coords and reject a stale /
-        # wrong-leg route before it can be committed — the same test the other
-        # sources run.  Unknown airports fall through to benefit-of-the-doubt.
-        if (_fr24_origin or _fr24_dest) and not _fr24_route_plausible(
-                plane_lat, plane_lon, _fr24_origin, _fr24_dest):
-            _cache_db_set_route(f"fr24:{registration}", 'route', '', '', None, None, None, None,
-                                int(time.time()) + ROUTE_MISS_TTL, source="fr24")
-            _log(f"[fr24] {registration}: {_route_display(_fr24_origin, _fr24_dest)} rejected — implausible route")
-            _fr24_origin = _fr24_dest = ""
-
-        if _fr24_origin or _fr24_dest:
-            if _fr24_src != "fr24:cached":
-                _log(f"[fr24] {registration}: {_route_display(_fr24_origin, _fr24_dest)} accepted")
-            if not origin:
-                origin = _fr24_origin
-            if not destination:
-                destination = _fr24_dest
-            source = source or _fr24_src
+    if _fr24_origin or _fr24_dest:
+        if _fr24_src != "fr24:cached":
+            _log(f"[fr24] {registration}: {_route_display(_fr24_origin, _fr24_dest)} accepted")
+        if not origin:
+            origin = _fr24_origin
+        if not destination:
+            destination = _fr24_dest
+        source = source or _fr24_src
 
     # ── 2. adsbdb (static historical DB) ──────────────────────────────────────
-    adsbdb_origin = adsbdb_dest = ""
-    adsbdb_olat = adsbdb_olon = adsbdb_dlat = adsbdb_dlon = None
-    _adsbdb_src = "adsbdb"
-
-    if callsign and not (origin and destination) and not os.path.exists(ADSBDB_DISABLED_FLAG):
-        _cached_adsbdb = _cache_db_get_route(callsign, 'route')
-        if _cached_adsbdb:
-            adsbdb_origin, adsbdb_dest = _cached_adsbdb[0], _cached_adsbdb[1]
-            adsbdb_olat, adsbdb_olon = _cached_adsbdb[2], _cached_adsbdb[3]
-            adsbdb_dlat, adsbdb_dlon = _cached_adsbdb[4], _cached_adsbdb[5]
-            _adsbdb_src = "adsbdb:cached"
-        else:
-            try:
-                r = requests.get(ADSBDB_CALLSIGN_URL.format(callsign), timeout=5)
-                if r.status_code == 200:
-                    fr = (r.json().get("response") or {}).get("flightroute") or {}
-                    _fr_orig      = fr.get("origin") or {}
-                    _fr_dest      = fr.get("destination") or {}
-                    adsbdb_origin = _fr_orig.get("iata_code", "") or ""
-                    adsbdb_dest   = _fr_dest.get("iata_code", "") or ""
-                    adsbdb_olat   = _fr_orig.get("latitude")
-                    adsbdb_olon   = _fr_orig.get("longitude")
-                    adsbdb_dlat   = _fr_dest.get("latitude")
-                    adsbdb_dlon   = _fr_dest.get("longitude")
-                    _remember_airport(adsbdb_origin, adsbdb_olat, adsbdb_olon)
-                    _remember_airport(adsbdb_dest,   adsbdb_dlat, adsbdb_dlon)
-                    # Cache the result.  Use ADSBDB_CACHE_TTL (1 hr) for both
-                    # hits and misses — adsbdb is a static historical DB and a
-                    # "no route" answer won't change between polls the way a
-                    # real-time API might.  ROUTE_MISS_TTL (5 min) is only
-                    # appropriate for live data sources.
-                    _cache_db_set_route(callsign, 'route',
-                                        adsbdb_origin, adsbdb_dest,
-                                        adsbdb_olat, adsbdb_olon, adsbdb_dlat, adsbdb_dlon,
-                                        int(time.time()) + ADSBDB_CACHE_TTL,
-                                        source="adsbdb")
-                elif r.status_code == 404:
-                    # Callsign not in adsbdb's static DB — also cache for the
-                    # full hour; the DB doesn't gain new entries between polls.
-                    _cache_db_set_route(callsign, 'route',
-                                        "", "", None, None, None, None,
-                                        int(time.time()) + ADSBDB_CACHE_TTL,
-                                        source="adsbdb")
-                # 5xx / unexpected: don't cache — transient error, retry next poll
-            except Exception as e:
-                _log(f"[adsbdb] {callsign}: request error — {e}")
+    (adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
+     adsbdb_dlat, adsbdb_dlon, _adsbdb_src) = _query_adsbdb(callsign, origin, destination)
 
     # Trust adsbdb only for GA / non-commercial flights.
     # Scheduled airlines (callsign prefix in _SCHEDULED_PREFIXES) are NOT trusted from
@@ -2103,71 +2193,29 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # If trusted, the destination is also accepted from the same result; a missing
     # dest falls through to AirLabs.  Arrival-only and through-traffic are skipped.
     #
-    _sky_origin = _sky_dest = ""
-    _sky_src = "opensky"
-    # OpenSky is free/unlimited — intentionally excluded from the _apis_disabled kill-switch.
-    if not (origin and destination) and OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET and hex_code and not _in_backoff("opensky") and not os.path.exists(OPENSKY_DISABLED_FLAG):
-        _cached_sky = _cache_db_get_route(hex_code, 'route')
-        if _cached_sky:
-            _sky_origin, _sky_dest = _cached_sky[0], _cached_sky[1]
-            _sky_src = "opensky:cached"
-        else:
-            token = _get_opensky_token()
-            if token:
-                try:
-                    r = requests.get(
-                        OPENSKY_FLIGHTS_URL,
-                        params={"icao24": hex_code.lower(), "begin": now - OPENSKY_LOOKBACK_SECS, "end": now},
-                        headers={"Authorization": f"Bearer {token}"},
-                        timeout=10,
-                    )
-                    if r.status_code == 429:
-                        _set_backoff("opensky", secs=BACKOFF_RATE_LIMIT_SECS)
-                    elif r.status_code in (401, 403):
-                        _set_backoff("opensky", secs=BACKOFF_AUTH_SECS)
-                        _log(f"[opensky] auth error ({r.status_code}) — check credentials")
-                    elif r.status_code == 200:
-                        sky_data = r.json()
-                        if sky_data:
-                            fl = max(sky_data, key=lambda f: f.get("firstSeen", 0))
-                            _sky_origin = icao_to_iata(fl.get("estDepartureAirport") or "")
-                            _sky_dest   = icao_to_iata(fl.get("estArrivalAirport") or "")
-                        else:
-                            _log(f"[opensky] {callsign}: no data")
-                        # Cache hit or confirmed-empty 200 — suppresses re-queries within TTL.
-                        # Non-200 status codes (5xx etc.) are not cached; retry next poll.
-                        _sky_ttl = (ROUTE_MISS_TTL if _is_nonlocal(_sky_origin, _sky_dest)
-                                    else OPENSKY_CACHE_TTL if (_sky_origin or _sky_dest)
-                                    else ROUTE_MISS_TTL)
-                        _cache_db_set_route(hex_code, 'route',
-                                            _sky_origin, _sky_dest,
-                                            None, None, None, None,
-                                            int(time.time()) + _sky_ttl,
-                                            source="opensky")
-                except Exception as e:
-                    _log(f"[opensky] {callsign}: request error — {e}")
+    (_sky_origin, _sky_dest, _sky_src) = _query_opensky(hex_code, callsign, origin, destination, now)
 
-        if _sky_origin or _sky_dest:
-            # Only trust when the origin is a local airport (departing local).
-            # For commercial callsigns, log what OpenSky found but don't commit —
-            # AirLabs / AeroAPI are the authority (same policy as adsbdb above).
-            _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
-            if _sky_origin_local:
-                if _sky_src != "opensky:cached":
-                    if _adsbdb_commercial:
-                        _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} found (commercial — deferring to AirLabs/AeroAPI)")
-                    else:
-                        _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
-                if not _adsbdb_commercial:
-                    # GA / non-scheduled: commit origin and destination
-                    if not origin:
-                        origin = _sky_origin
-                    if _sky_dest and not destination:
-                        destination = _sky_dest
-                    source = source or _sky_src
-                # Commercial: data is logged above but not committed — AirLabs/AeroAPI confirm
-            elif _sky_src != "opensky:cached":
-                _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
+    if _sky_origin or _sky_dest:
+        # Only trust when the origin is a local airport (departing local).
+        # For commercial callsigns, log what OpenSky found but don't commit —
+        # AirLabs / AeroAPI are the authority (same policy as adsbdb above).
+        _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
+        if _sky_origin_local:
+            if _sky_src != "opensky:cached":
+                if _adsbdb_commercial:
+                    _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} found (commercial — deferring to AirLabs/AeroAPI)")
+                else:
+                    _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
+            if not _adsbdb_commercial:
+                # GA / non-scheduled: commit origin and destination
+                if not origin:
+                    origin = _sky_origin
+                if _sky_dest and not destination:
+                    destination = _sky_dest
+                source = source or _sky_src
+            # Commercial: data is logged above but not committed — AirLabs/AeroAPI confirm
+        elif _sky_src != "opensky:cached":
+            _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
 
     # ── 2b. Free-API consensus (non-local departures / arrivals) ─────────────────
     # adsbdb keys by callsign; OpenSky keys by hex code — two independent KEYS.
