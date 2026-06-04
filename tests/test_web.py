@@ -271,5 +271,92 @@ class EndpointSmoke(unittest.TestCase):
                 self.assertEqual(self.client.get(url).status_code, 200)
 
 
+class ConfigWriteRoundTrip(unittest.TestCase):
+    """The schema-driven write_config: round-trips every key, drops legacy keys, preserves
+    unknown user keys, and never blanks a credential on a sentinel/empty save."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+
+    _REQUIRED = {
+        "ZONE_HOME": {"tl_y": 36.3, "tl_x": -115.3, "br_y": 35.9, "br_x": -114.9},
+        "LOCATION_HOME": [36.1, -115.1, 600.0],
+    }
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._cfg = self._dir / "config.py"
+        self._orig = self.srv.CONFIG_PATH
+        self.srv.CONFIG_PATH = self._cfg
+        self._bust()
+
+    def tearDown(self):
+        self.srv.CONFIG_PATH = self._orig
+        self._bust()
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def _bust(self):
+        self.srv._config_cache["data"] = None
+        self.srv._config_cache["mtime"] = None
+
+    def _write(self, **extra):
+        self._bust()
+        data = dict(self._REQUIRED)
+        data.update(extra)
+        self.srv.write_config(data)
+        self._bust()
+
+    def test_roundtrip_preserves_values_and_types(self):
+        self._write(WEATHER_LOCATION="Las Vegas", OPENWEATHER_API_KEY="owk-1",
+                    MIN_ALTITUDE=250, GPIO_SLOWDOWN=0, HAT_PWM_ENABLED=False,
+                    AIRLABS_API_KEY_2="al-2", SCOREBOARD_PRIORITY=["MLB", "NHL"],
+                    SCOREBOARD_NHL_TEAM_ID=54, FEEDER_MONTHLY_CREDIT=12.5,
+                    ROUTE_PAID_MISS_TTL=9999)
+        cfg = self.srv.read_config()
+        self.assertEqual(cfg["WEATHER_LOCATION"], "Las Vegas")
+        self.assertEqual(cfg["MIN_ALTITUDE"], 250)
+        self.assertEqual(cfg["GPIO_SLOWDOWN"], 0)            # 0 survives (int0 kind)
+        self.assertIs(cfg["HAT_PWM_ENABLED"], False)          # False survives (bool kind)
+        self.assertEqual(cfg["AIRLABS_API_KEY_2"], "al-2")    # credential not dropped
+        self.assertEqual(cfg["SCOREBOARD_PRIORITY"], ["MLB", "NHL"])
+        self.assertEqual(cfg["SCOREBOARD_NHL_TEAM_ID"], 54)
+        self.assertEqual(cfg["FEEDER_MONTHLY_CREDIT"], 12.5)
+        self.assertEqual(cfg["ROUTE_PAID_MISS_TTL"], 9999)
+
+    def test_tricky_string_serialises_safely(self):
+        self._write(WEATHER_LOCATION="x'\"y\\z")   # quotes/backslash must survive repr()
+        self.assertEqual(self.srv.read_config()["WEATHER_LOCATION"], "x'\"y\\z")
+
+    def test_legacy_key_migrated_then_dropped(self):
+        self._write(SCOREBOARD_TEAM_ID=77)         # legacy key, in _KNOWN_KEYS
+        cfg = self.srv.read_config()
+        self.assertEqual(cfg.get("SCOREBOARD_NHL_TEAM_ID"), 77)   # migrated into the NHL slot
+        self.assertNotIn("SCOREBOARD_TEAM_ID", cfg)               # not re-emitted
+
+    def test_unknown_user_key_preserved(self):
+        self._cfg.write_text('ZONE_HOME = {"tl_y": 1.0, "tl_x": 2.0, "br_y": 0.5, "br_x": 2.5}\n'
+                             'LOCATION_HOME = [1.0, 2.0, 100.0]\n'
+                             'MY_CUSTOM_KEY = "keep-me"\n')
+        self._bust()
+        self._write()                              # re-save: reads existing, preserves extras
+        self.assertEqual(self.srv.read_config().get("MY_CUSTOM_KEY"), "keep-me")
+
+    def test_sensitive_blank_keeps_existing_credential(self):
+        self._write(AIRLABS_API_KEY="real-secret")
+        self._write(AIRLABS_API_KEY="")                          # blank must not wipe it
+        self.assertEqual(self.srv.read_config()["AIRLABS_API_KEY"], "real-secret")
+        self._write(AIRLABS_API_KEY=self.srv._SECRET_SENTINEL)   # sentinel = unchanged
+        self.assertEqual(self.srv.read_config()["AIRLABS_API_KEY"], "real-secret")
+
+    def test_known_keys_derived_from_schema(self):
+        derived = (set(self.srv._STRUCTURED_KEYS)
+                   | {e[0] for e in self.srv._CONFIG_SCHEMA if e is not None}
+                   | self.srv._LEGACY_KEYS)
+        self.assertEqual(self.srv._KNOWN_KEYS, derived)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -107,40 +107,101 @@ FEEDER_MONTHLY_CREDIT = 10.00   # FlightAware feeder credit
 AIRLABS_RESET_DAY     = 9       # AirLabs billing period resets on the 9th
 AEROAPI_RESET_DAY     = 1       # FlightAware credit resets on the 1st
 
-# Keys written by write_config — used to round-trip unknown keys safely
-_KNOWN_KEYS = {
-    "ZONE_HOME", "LOCATION_HOME", "WEATHER_LOCATION", "OPENWEATHER_API_KEY",
-    "TEMPERATURE_UNITS", "MIN_ALTITUDE", "MAX_ALTITUDE", "BRIGHTNESS",
-    "GPIO_SLOWDOWN", "NIGHT_BRIGHTNESS", "TIMEZONE", "JOURNEY_CODE_SELECTED",
-    "JOURNEY_BLANK_FILLER", "HAT_PWM_ENABLED", "RECEIVER_HOST", "LOCAL_AIRPORTS",
-    "LOCAL_AIRPORT",      # deprecated single-value key — kept so it's NOT written as an "extra key"
-    "OPENSKY_CLIENT_ID", "OPENSKY_CLIENT_SECRET", "FLIGHTAWARE_API_KEY",
-    "AIRLABS_API_KEY", "AIRLABS_API_KEY_2",
-    # Display extras
-    "LOADING_LED_ENABLED", "LOADING_LED_GPIO_PIN", "RAINFALL_ENABLED",
-    # Scoreboard — master switch + shared settings
-    "SCOREBOARD_ENABLED",
-    "SCOREBOARD_POST_GAME_MINUTES", "SCOREBOARD_GOAL_CELEBRATION_SECONDS",
-    "SCOREBOARD_PRIORITY",
-    # Scoreboard — per-sport
-    "SCOREBOARD_NHL_ENABLED", "SCOREBOARD_NHL_TEAM_ID", "SCOREBOARD_NHL_TEAM_NAME",
-    "SCOREBOARD_NFL_ENABLED", "SCOREBOARD_NFL_TEAM_ID", "SCOREBOARD_NFL_TEAM_NAME",
-    "SCOREBOARD_MLB_ENABLED", "SCOREBOARD_MLB_TEAM_ID", "SCOREBOARD_MLB_TEAM_NAME",
-    "SCOREBOARD_NBA_ENABLED", "SCOREBOARD_NBA_TEAM_ID", "SCOREBOARD_NBA_TEAM_NAME",
-    "SCOREBOARD_MLS_ENABLED", "SCOREBOARD_MLS_TEAM_ID", "SCOREBOARD_MLS_TEAM_NAME",
-    # Legacy scoreboard keys — kept so they're silently dropped on next save
-    "SCOREBOARD_LEAGUE", "SCOREBOARD_TEAM_ID", "SCOREBOARD_TEAM_NAME",
-    # Billing tracking
-    "FEEDER_MONTHLY_CREDIT",
-    "RECEIVER_TYPE", "POLL_INTERVAL", "DATA_CHECK_INTERVAL",
-    "DATE_FORMAT",
-    "AIRLABS_MONTHLY_LIMIT", "AIRLABS_RESET_DAY",
-    "AIRLABS2_MONTHLY_LIMIT", "AIRLABS2_RESET_DAY",
-    "AEROAPI_RESET_DAY",
-    # Cache TTLs
-    "ADSBDB_CACHE_TTL", "OPENSKY_CACHE_TTL",
-    "ROUTE_TTL_SCHEDULED", "ROUTE_TTL_DEFAULT", "ROUTE_MISS_TTL", "ROUTE_PAID_MISS_TTL",
-}
+# ── Config schema: the single source of truth for every key the web UI manages ──
+# Each entry is (NAME, kind, default) with kind in {str,int,int0,bool,float,list}, or
+# (NAME, fn) where fn(existing) -> a Python-source value string for the few keys with
+# custom fallbacks.  `None` emits a blank line.  write_config() generates config.py
+# straight from this list and _KNOWN_KEYS is *derived* from it — so adding a key is a
+# one-line change and a key can never drift out of sync between the writer and the
+# known-keys set.  (The old failure mode: a key listed in _KNOWN_KEYS but forgotten in
+# the hand-written f-string template was silently blanked on the next save — and some of
+# those keys are API credentials.)
+def _cfg_literal(existing, name, kind, default):
+    """Render one managed value as a Python-source literal (matches the legacy template)."""
+    v = existing.get(name)
+    if kind == "str":   return repr(str(v or default))
+    if kind == "int":   return str(int(v or default))
+    if kind == "int0":  return str(int(v if v is not None else default))   # 0 is meaningful
+    if kind == "bool":  return str(bool(existing.get(name, default)))
+    if kind == "float": return str(float(v or default))
+    if kind == "list":  return repr(v or default)
+    raise ValueError(f"unknown config kind {kind!r} for {name}")
+
+
+# Scalar keys, in the order they're written to config.py (None = a blank separator line).
+_CONFIG_SCHEMA = [
+    ("WEATHER_LOCATION",                    "str",   ""),
+    ("OPENWEATHER_API_KEY",                 "str",   ""),
+    ("TEMPERATURE_UNITS",                   "str",   "imperial"),
+    ("MIN_ALTITUDE",                        "int",   100),
+    ("MAX_ALTITUDE",                        "int",   15000),
+    ("BRIGHTNESS",                          "int",   80),
+    ("GPIO_SLOWDOWN",                       "int0",  2),
+    ("NIGHT_BRIGHTNESS",                    "int",   20),
+    ("JOURNEY_CODE_SELECTED",               "str",   ""),
+    ("JOURNEY_BLANK_FILLER",                "str",   " ? "),
+    ("DATE_FORMAT",                         "str",   "MDY"),
+    ("HAT_PWM_ENABLED",                     "bool",  True),
+    None,
+    ("RECEIVER_HOST",                       "str",   "localhost"),
+    ("RECEIVER_TYPE",                       "str",   "dump1090"),
+    ("POLL_INTERVAL",                       "int",   15),
+    ("DATA_CHECK_INTERVAL",                 "int",   2),
+    None,
+    ("LOCAL_AIRPORTS", lambda e: repr(str(e.get("LOCAL_AIRPORTS") or e.get("LOCAL_AIRPORT") or ""))),
+    ("OPENSKY_CLIENT_ID",                   "str",   ""),
+    ("OPENSKY_CLIENT_SECRET",               "str",   ""),
+    ("FLIGHTAWARE_API_KEY",                 "str",   ""),
+    ("AIRLABS_API_KEY",                     "str",   ""),
+    ("AIRLABS_API_KEY_2",                   "str",   ""),
+    ("TIMEZONE",                            "str",   "America/Los_Angeles"),
+    ("LOADING_LED_ENABLED",                 "bool",  False),
+    ("LOADING_LED_GPIO_PIN",                "int",   25),
+    ("RAINFALL_ENABLED",                    "bool",  False),
+    ("SCOREBOARD_ENABLED",                  "bool",  False),
+    ("SCOREBOARD_POST_GAME_MINUTES",        "int",   30),
+    ("SCOREBOARD_GOAL_CELEBRATION_SECONDS", "int",   30),
+    ("SCOREBOARD_PRIORITY",                 "list",  ["NHL", "NFL", "MLB", "NBA", "MLS"]),
+    ("SCOREBOARD_NHL_ENABLED",  lambda e: str(bool(e.get("SCOREBOARD_NHL_ENABLED", e.get("SCOREBOARD_ENABLED", True))))),
+    ("SCOREBOARD_NHL_TEAM_ID",  lambda e: str(int(e.get("SCOREBOARD_NHL_TEAM_ID") or e.get("SCOREBOARD_TEAM_ID") or 0))),
+    ("SCOREBOARD_NHL_TEAM_NAME", lambda e: repr(str(e.get("SCOREBOARD_NHL_TEAM_NAME") or e.get("SCOREBOARD_TEAM_NAME") or ""))),
+    ("SCOREBOARD_NFL_ENABLED",              "bool",  False),
+    ("SCOREBOARD_NFL_TEAM_ID",              "int",   0),
+    ("SCOREBOARD_NFL_TEAM_NAME",            "str",   ""),
+    ("SCOREBOARD_MLB_ENABLED",              "bool",  False),
+    ("SCOREBOARD_MLB_TEAM_ID",              "int",   0),
+    ("SCOREBOARD_MLB_TEAM_NAME",            "str",   ""),
+    ("SCOREBOARD_NBA_ENABLED",              "bool",  False),
+    ("SCOREBOARD_NBA_TEAM_ID",              "int",   0),
+    ("SCOREBOARD_NBA_TEAM_NAME",            "str",   ""),
+    ("SCOREBOARD_MLS_ENABLED",              "bool",  False),
+    ("SCOREBOARD_MLS_TEAM_ID",              "int",   0),
+    ("SCOREBOARD_MLS_TEAM_NAME",            "str",   ""),
+    ("FEEDER_MONTHLY_CREDIT",               "float", 10.00),
+    ("AIRLABS_MONTHLY_LIMIT",               "int",   1000),
+    ("AIRLABS_RESET_DAY",                   "int",   9),
+    ("AIRLABS2_MONTHLY_LIMIT",              "int",   1000),
+    ("AIRLABS2_RESET_DAY",                  "int",   9),
+    ("AEROAPI_RESET_DAY",                   "int",   1),
+    ("ADSBDB_CACHE_TTL",                    "int",   3600),
+    ("OPENSKY_CACHE_TTL",                   "int",   3600),
+    ("ROUTE_TTL_SCHEDULED",                 "int",   604800),
+    ("ROUTE_TTL_DEFAULT",                   "int",   3600),
+    ("ROUTE_MISS_TTL",                      "int",   300),
+    ("ROUTE_PAID_MISS_TTL",                 "int",   7200),
+]
+
+# Required structured keys, written as a header block ahead of the scalar schema.
+_STRUCTURED_KEYS = ("ZONE_HOME", "LOCATION_HOME")
+# Legacy keys: accepted into _KNOWN_KEYS so they're dropped (migrated out) on the next
+# save rather than re-emitted as "extra" user keys.
+_LEGACY_KEYS = {"LOCAL_AIRPORT", "SCOREBOARD_LEAGUE", "SCOREBOARD_TEAM_ID", "SCOREBOARD_TEAM_NAME"}
+
+# Every key the web UI manages — derived from the schema, so it can never disagree
+# with what write_config() actually emits.
+_KNOWN_KEYS = (set(_STRUCTURED_KEYS)
+               | {e[0] for e in _CONFIG_SCHEMA if e is not None}
+               | _LEGACY_KEYS)
 
 # Secret/key fields that must never be overwritten with an empty string.
 # The UI populates these from the loaded config, but if the page loads in a
@@ -228,78 +289,32 @@ def write_config(data):
     if not zone or not loc:
         raise ValueError("ZONE_HOME and LOCATION_HOME are required")
 
-    content = f"""ZONE_HOME = {{
-    "tl_y": {float(zone["tl_y"])},
-    "tl_x": {float(zone["tl_x"])},
-    "br_y": {float(zone["br_y"])},
-    "br_x": {float(zone["br_x"])}
-}}
-LOCATION_HOME = [
-    {float(loc[0])},
-    {float(loc[1])},
-    {float(loc[2])}
-]
-WEATHER_LOCATION = {repr(str(existing.get("WEATHER_LOCATION", "")))}
-OPENWEATHER_API_KEY = {repr(str(existing.get("OPENWEATHER_API_KEY", "")))}
-TEMPERATURE_UNITS = {repr(str(existing.get("TEMPERATURE_UNITS", "imperial")))}
-MIN_ALTITUDE = {int(existing.get("MIN_ALTITUDE") or 100)}
-MAX_ALTITUDE = {int(existing.get("MAX_ALTITUDE") or 15000)}
-BRIGHTNESS = {int(existing.get("BRIGHTNESS") or 80)}
-GPIO_SLOWDOWN = {int(existing.get("GPIO_SLOWDOWN") if existing.get("GPIO_SLOWDOWN") is not None else 2)}
-NIGHT_BRIGHTNESS = {int(existing.get("NIGHT_BRIGHTNESS") or 20)}
-JOURNEY_CODE_SELECTED = {repr(str(existing.get("JOURNEY_CODE_SELECTED") or ""))}
-JOURNEY_BLANK_FILLER = {repr(str(existing.get("JOURNEY_BLANK_FILLER") or " ? "))}
-DATE_FORMAT = {repr(str(existing.get("DATE_FORMAT") or "MDY"))}
-HAT_PWM_ENABLED = {bool(existing.get("HAT_PWM_ENABLED", True))}
+    lines = [
+        "ZONE_HOME = {",
+        f'    "tl_y": {float(zone["tl_y"])},',
+        f'    "tl_x": {float(zone["tl_x"])},',
+        f'    "br_y": {float(zone["br_y"])},',
+        f'    "br_x": {float(zone["br_x"])}',
+        "}",
+        "LOCATION_HOME = [",
+        f"    {float(loc[0])},",
+        f"    {float(loc[1])},",
+        f"    {float(loc[2])}",
+        "]",
+    ]
+    # Every scalar key, generated straight from _CONFIG_SCHEMA (one source of truth with
+    # _KNOWN_KEYS) — no hand-maintained template, so a key can't be silently dropped.
+    for _entry in _CONFIG_SCHEMA:
+        if _entry is None:
+            lines.append("")
+        elif callable(_entry[1]):
+            lines.append(f"{_entry[0]} = {_entry[1](existing)}")
+        else:
+            _name, _kind, _default = _entry
+            lines.append(f"{_name} = {_cfg_literal(existing, _name, _kind, _default)}")
+    content = "\n".join(lines) + "\n"
 
-RECEIVER_HOST = {repr(str(existing.get("RECEIVER_HOST") or "localhost"))}
-RECEIVER_TYPE = {repr(str(existing.get("RECEIVER_TYPE") or "dump1090"))}
-POLL_INTERVAL = {int(existing.get("POLL_INTERVAL") or 15)}
-DATA_CHECK_INTERVAL = {int(existing.get("DATA_CHECK_INTERVAL") or 2)}
-
-LOCAL_AIRPORTS = {repr(str(existing.get("LOCAL_AIRPORTS") or existing.get("LOCAL_AIRPORT") or ""))}
-OPENSKY_CLIENT_ID = {repr(str(existing.get("OPENSKY_CLIENT_ID") or ""))}
-OPENSKY_CLIENT_SECRET = {repr(str(existing.get("OPENSKY_CLIENT_SECRET") or ""))}
-FLIGHTAWARE_API_KEY = {repr(str(existing.get("FLIGHTAWARE_API_KEY") or ""))}
-AIRLABS_API_KEY = {repr(str(existing.get("AIRLABS_API_KEY") or ""))}
-AIRLABS_API_KEY_2 = {repr(str(existing.get("AIRLABS_API_KEY_2") or ""))}
-TIMEZONE = {repr(str(existing.get("TIMEZONE") or "America/Los_Angeles"))}
-LOADING_LED_ENABLED = {bool(existing.get("LOADING_LED_ENABLED", False))}
-LOADING_LED_GPIO_PIN = {int(existing.get("LOADING_LED_GPIO_PIN") or 25)}
-RAINFALL_ENABLED = {bool(existing.get("RAINFALL_ENABLED", False))}
-SCOREBOARD_ENABLED = {bool(existing.get("SCOREBOARD_ENABLED", False))}
-SCOREBOARD_POST_GAME_MINUTES = {int(existing.get("SCOREBOARD_POST_GAME_MINUTES") or 30)}
-SCOREBOARD_GOAL_CELEBRATION_SECONDS = {int(existing.get("SCOREBOARD_GOAL_CELEBRATION_SECONDS") or 30)}
-SCOREBOARD_PRIORITY = {repr(existing.get("SCOREBOARD_PRIORITY") or ["NHL", "NFL", "MLB", "NBA", "MLS"])}
-SCOREBOARD_NHL_ENABLED = {bool(existing.get("SCOREBOARD_NHL_ENABLED", existing.get("SCOREBOARD_ENABLED", True)))}
-SCOREBOARD_NHL_TEAM_ID = {int(existing.get("SCOREBOARD_NHL_TEAM_ID") or existing.get("SCOREBOARD_TEAM_ID") or 0)}
-SCOREBOARD_NHL_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_NHL_TEAM_NAME") or existing.get("SCOREBOARD_TEAM_NAME") or ""))}
-SCOREBOARD_NFL_ENABLED = {bool(existing.get("SCOREBOARD_NFL_ENABLED", False))}
-SCOREBOARD_NFL_TEAM_ID = {int(existing.get("SCOREBOARD_NFL_TEAM_ID") or 0)}
-SCOREBOARD_NFL_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_NFL_TEAM_NAME") or ""))}
-SCOREBOARD_MLB_ENABLED = {bool(existing.get("SCOREBOARD_MLB_ENABLED", False))}
-SCOREBOARD_MLB_TEAM_ID = {int(existing.get("SCOREBOARD_MLB_TEAM_ID") or 0)}
-SCOREBOARD_MLB_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_MLB_TEAM_NAME") or ""))}
-SCOREBOARD_NBA_ENABLED = {bool(existing.get("SCOREBOARD_NBA_ENABLED", False))}
-SCOREBOARD_NBA_TEAM_ID = {int(existing.get("SCOREBOARD_NBA_TEAM_ID") or 0)}
-SCOREBOARD_NBA_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_NBA_TEAM_NAME") or ""))}
-SCOREBOARD_MLS_ENABLED = {bool(existing.get("SCOREBOARD_MLS_ENABLED", False))}
-SCOREBOARD_MLS_TEAM_ID = {int(existing.get("SCOREBOARD_MLS_TEAM_ID") or 0)}
-SCOREBOARD_MLS_TEAM_NAME = {repr(str(existing.get("SCOREBOARD_MLS_TEAM_NAME") or ""))}
-FEEDER_MONTHLY_CREDIT = {float(existing.get("FEEDER_MONTHLY_CREDIT") or 10.00)}
-AIRLABS_MONTHLY_LIMIT = {int(existing.get("AIRLABS_MONTHLY_LIMIT") or 1000)}
-AIRLABS_RESET_DAY = {int(existing.get("AIRLABS_RESET_DAY") or 9)}
-AIRLABS2_MONTHLY_LIMIT = {int(existing.get("AIRLABS2_MONTHLY_LIMIT") or 1000)}
-AIRLABS2_RESET_DAY = {int(existing.get("AIRLABS2_RESET_DAY") or 9)}
-AEROAPI_RESET_DAY = {int(existing.get("AEROAPI_RESET_DAY") or 1)}
-ADSBDB_CACHE_TTL = {int(existing.get("ADSBDB_CACHE_TTL") or 3600)}
-OPENSKY_CACHE_TTL = {int(existing.get("OPENSKY_CACHE_TTL") or 3600)}
-ROUTE_TTL_SCHEDULED = {int(existing.get("ROUTE_TTL_SCHEDULED") or 604800)}
-ROUTE_TTL_DEFAULT = {int(existing.get("ROUTE_TTL_DEFAULT") or 3600)}
-ROUTE_MISS_TTL = {int(existing.get("ROUTE_MISS_TTL") or 300)}
-ROUTE_PAID_MISS_TTL = {int(existing.get("ROUTE_PAID_MISS_TTL") or 7200)}
-"""
-    # Preserve any extra keys not managed by this template (e.g. custom user keys)
+    # Preserve any extra keys not in the schema (e.g. custom user keys) verbatim.
     for k, v in existing.items():
         if k not in _KNOWN_KEYS and not k.startswith("_"):
             content += f"{k} = {repr(v)}\n"
