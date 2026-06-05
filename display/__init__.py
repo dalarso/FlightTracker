@@ -164,34 +164,61 @@ class Display(
             # empty — i.e. a flights→idle transition back to clock/date/day/weather.
             transitioning_to_idle = len(self._data) > 0 and len(new_data) == 0
 
-            if data_is_different:
-                # Capture what's already on screen BEFORE swapping in the new set,
-                # so the ding fires only for genuinely new aircraft (not planes leaving).
-                _prev_keys = {_flight_key(f) for f in self._data}
-                self._data_index = 0
-                self._data_all_looped = False
-                self._data = new_data
-                # Fire-and-forget LAN ding: a new plane just went up on the matrix.
+            if not data_is_different:
+                return  # same callsign set — keep showing/scrolling exactly what's up
+
+            # The aircraft currently mid-scroll (if any flights are on screen).
+            _cur     = self._data
+            _cur_key = (_flight_key(_cur[self._data_index])
+                        if _cur and 0 <= self._data_index < len(_cur) else None)
+            _new_keys = {_flight_key(f) for f in new_data}
+
+            # ── CONTINUE-IN-PLACE ─────────────────────────────────────────────────
+            # Planes were added and/or removed, but the one currently mid-scroll is
+            # still overhead.  Keep scrolling it instead of snapping back to plane 1
+            # and restarting the marquee:
+            #   • retained planes keep their on-screen order, so the active plane's
+            #     "n/N" position indicator stays put (only the total ticks up/down);
+            #   • the active plane keeps its OWN dict, so its text never changes mid-
+            #     scroll; the others adopt the refreshed data;
+            #   • departed planes drop out, genuinely-new planes append to the rotation.
+            # No reset_scene(), no index→0, no scroll reset — the scroll just continues.
+            if _cur_key is not None and _cur_key in _new_keys:
+                _new_by_key = {_flight_key(f): f for f in new_data}
+                _cur_keys   = {_flight_key(f) for f in _cur}
+                _retained   = [(f if _flight_key(f) == _cur_key else _new_by_key[_flight_key(f)])
+                               for f in _cur if _flight_key(f) in _new_keys]
+                _added      = [f for f in new_data if _flight_key(f) not in _cur_keys]
+                self._data       = _retained + _added
+                self._data_index = next(i for i, f in enumerate(self._data)
+                                        if _flight_key(f) == _cur_key)
                 try:
-                    _new = [f for f in new_data if _flight_key(f) not in _prev_keys]
-                    if _new:
-                        planeding.send_ding(_new[0], len(new_data))
+                    if _added:   # ding only for genuinely-new aircraft; departures are silent
+                        planeding.send_ding(_added[0], len(self._data))
                 except Exception:
                     pass
+                return
 
-            # Only reset if there's flight data already
-            # on the screen, or if there's some new
-            # data available to draw which is different
-            # from the current data
-            reset_required = there_is_data and data_is_different
+            # ── DISRUPTIVE / IDLE ─────────────────────────────────────────────────
+            # The plane being shown has left (or nothing was on screen, or we're
+            # going back to idle).  Reset to the first plane and restart, as before.
+            _prev_keys = {_flight_key(f) for f in _cur}
+            self._data_index = 0
+            self._data_all_looped = False
+            self._data = new_data
+            try:
+                _new = [f for f in new_data if _flight_key(f) not in _prev_keys]
+                if _new:
+                    planeding.send_ding(_new[0], len(new_data))
+            except Exception:
+                pass
 
-            if reset_required:
+            if there_is_data:    # data_is_different is True here
                 self.reset_scene()
                 if transitioning_to_idle:
-                    # Going flights→idle: reset_scene() alone leaves the idle
-                    # scenes (clock/date/day/weather) holding stale state, so
-                    # they won't repaint until a value changes (up to a second
-                    # for the clock, longer for date/day). Force them to redraw.
+                    # Going flights→idle: reset_scene() alone leaves the idle scenes
+                    # (clock/date/day/weather) holding stale state, so they won't repaint
+                    # until a value changes.  Force them to redraw.
                     self._reset_idle_scenes()
 
     def _reset_idle_scenes(self):
