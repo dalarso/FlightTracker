@@ -1,17 +1,21 @@
+import hmac
 import json
 import logging
 import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, render_template, request, Response, stream_with_context
+from werkzeug.exceptions import RequestEntityTooLarge
 
 # Silence Werkzeug's request log and startup banner — they pollute plane.log
 # with HTTP noise that makes flight data harder to read.
@@ -32,6 +36,10 @@ def _log(msg):
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0   # always revalidate static CSS/JS (no stale assets after an update)
+# Cap request bodies so a LAN client can't make waitress buffer / Flask parse an
+# arbitrarily large JSON body into memory on a RAM-constrained Pi — oversized
+# requests are rejected with 413 before get_json() ever parses them.
+app.config["MAX_CONTENT_LENGTH"] = 256 * 1024
 
 # ── LAN hardening (no password by design — single-user trusted LAN) ───────────
 # CSRF: a cross-site page can't set a custom request header without a CORS preflight
@@ -44,6 +52,31 @@ _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 def _csrf_guard():
     if request.method in _MUTATING_METHODS and request.headers.get("X-Requested-With") != "FlightTracker":
         return jsonify({"error": "missing or invalid X-Requested-With header"}), 403
+    # Reject oversized bodies up front with 413, before any handler reads/parses them —
+    # MAX_CONTENT_LENGTH is otherwise enforced lazily and the handlers' broad excepts
+    # would turn the resulting RequestEntityTooLarge into a generic 500.
+    cl = request.content_length
+    if cl is not None and cl > app.config["MAX_CONTENT_LENGTH"]:
+        return jsonify({"error": "request body too large"}), 413
+    # Optional shared-token gate (opt-in; OFF by default). When WEB_ACCESS_TOKEN is set
+    # in config.py, every state-changing request (POST/PUT/PATCH/DELETE — which now
+    # includes the secret-reveal endpoint, since it is POST) must carry a matching
+    # X-FT-Token header. Empty (the default) disables it, preserving the no-password
+    # LAN posture; setting it locks config writes + secret reveal to clients that know
+    # the token, closing the "any LAN device can rewrite config / read keys" exposure.
+    if request.method in _MUTATING_METHODS:
+        try:
+            _tok = str(read_config().get("WEB_ACCESS_TOKEN", "") or "").strip()
+        except Exception:
+            _tok = ""
+        if _tok and not hmac.compare_digest(request.headers.get("X-FT-Token", ""), _tok):
+            return jsonify({"error": "missing or invalid access token"}), 401
+
+@app.errorhandler(RequestEntityTooLarge)
+def _too_large(_e):
+    # Backstop for chunked bodies with no Content-Length: the cap is enforced when the
+    # body is read; surface a clean 413 here instead of an opaque error.
+    return jsonify({"error": "request body too large"}), 413
 
 @app.after_request
 def _security_headers(resp):
@@ -120,7 +153,13 @@ def _cfg_literal(existing, name, kind, default):
     if kind == "str":   return repr(str(v or default))
     if kind == "int":   return str(int(v) if str(v).strip() not in ("", "None") else default)
     if kind == "int0":  return str(int(v) if str(v).strip() not in ("", "None") else default)   # 0 is meaningful
-    if kind == "bool":  return str(bool(existing.get(name, default)))
+    if kind == "bool":
+        v = existing.get(name, default)
+        # A bool key may arrive as the string "False"/"0"/"no" — bool("False") is True,
+        # so normalize string inputs before coercing (the UI sends real JSON booleans,
+        # but a non-standard caller or a future <select> field could send strings).
+        v = (v.strip().lower() not in ("", "false", "0", "no", "off")) if isinstance(v, str) else bool(v)
+        return str(v)
     if kind == "float": return str(float(v or default))
     if kind == "float0": return str(float(v if v is not None and str(v).strip() != "" else default))  # 0.0 is meaningful
     if kind == "list":  return repr(v or default)
@@ -217,6 +256,15 @@ _SECRET_SENTINEL = "********"
 
 
 _config_cache = {"mtime": None, "data": None}
+# Guards the read_config() cache miss/refill so the data/mtime pair is published
+# atomically — otherwise two waitress workers can both miss and exec config.py at
+# once, racing the two assignments (harmless, but this avoids the duplicate exec).
+_config_cache_lock = threading.Lock()
+
+# Serializes the read-overlay-write in write_config() so two concurrent POST /api/config
+# requests (waitress runs threads=8) can't race on the temp file / clobber each other's
+# content. Paired with a unique temp name per write so the loser can't 500 on os.replace.
+_config_write_lock = threading.Lock()
 
 def read_config():
     """Execute config.py in a sandboxed namespace and return its variables.
@@ -226,11 +274,14 @@ def read_config():
     except OSError:
         mtime = None
     if _config_cache["data"] is None or _config_cache["mtime"] != mtime:
-        safe_globals = {"__builtins__": {}}
-        with open(CONFIG_PATH) as f:
-            exec(compile(f.read(), str(CONFIG_PATH), "exec"), safe_globals)
-        _config_cache["data"] = {k: v for k, v in safe_globals.items() if not k.startswith("_")}
-        _config_cache["mtime"] = mtime
+        with _config_cache_lock:
+            # Re-check inside the lock: another thread may have just refilled it.
+            if _config_cache["data"] is None or _config_cache["mtime"] != mtime:
+                safe_globals = {"__builtins__": {}}
+                with open(CONFIG_PATH) as f:
+                    exec(compile(f.read(), str(CONFIG_PATH), "exec"), safe_globals)
+                _config_cache["data"] = {k: v for k, v in safe_globals.items() if not k.startswith("_")}
+                _config_cache["mtime"] = mtime
     return dict(_config_cache["data"])   # shallow copy so callers (and masking) can't mutate the cache
 
 
@@ -248,7 +299,15 @@ def write_config(data):
     """
     Write config.py. Preserves any keys not managed by the web UI
     by reading the current config first and overlaying the new values.
+
+    Serialized under _config_write_lock so concurrent saves (waitress threads=8)
+    can't interleave the read-overlay-write or race on the temp file.
     """
+    with _config_write_lock:
+        _write_config_unlocked(data)
+
+
+def _write_config_unlocked(data):
     # Load existing config so unknown keys aren't lost.
     # If the file doesn't exist (fresh install) start from defaults.
     # If the file EXISTS but can't be parsed, abort rather than overwriting
@@ -318,12 +377,22 @@ def write_config(data):
         if k not in _KNOWN_KEYS and not k.startswith("_"):
             content += f"{k} = {repr(v)}\n"
 
-    # Atomic write: write to a temp file then rename so a crash mid-write
-    # can't leave config.py truncated or empty.
-    tmp = str(CONFIG_PATH) + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(content)
-    os.replace(tmp, CONFIG_PATH)
+    # Atomic write: write to a unique temp file then rename so a crash mid-write
+    # can't leave config.py truncated or empty. A unique temp name (not a fixed
+    # ".tmp") means two concurrent writers can't clobber each other's temp or hit
+    # FileNotFoundError on replace — see _config_write_lock below.
+    fd, tmp = tempfile.mkstemp(dir=str(CONFIG_PATH.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp, CONFIG_PATH)
+    except BaseException:
+        # Replace failed (or write raised) — don't leave an orphaned temp behind.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 @app.route("/")
@@ -345,12 +414,15 @@ def get_config():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/config/reveal", methods=["GET"])
+@app.route("/api/config/reveal", methods=["POST"])
 def reveal_secret():
     # Return the real value of ONE sensitive field, on explicit user request (the eye button).
+    # POST (not GET) so it falls under _csrf_guard + the optional WEB_ACCESS_TOKEN gate, and
+    # the key/secret never land in a URL — keeping them out of access logs and browser history.
     # Secrets are masked in GET /api/config by default; this is the opt-in, one-key-at-a-time
-    # reveal — never auto-loaded into the page. LAN-trusted (no auth by design).
-    key = request.args.get("key", "")
+    # reveal — never auto-loaded into the page.
+    body = request.get_json(silent=True) or {}
+    key = body.get("key", "")
     if key not in _SENSITIVE_KEYS:
         return jsonify({"error": "not a revealable field"}), 400
     try:
@@ -932,6 +1004,10 @@ def display_on():
 # ── Weather endpoint ──────────────────────────────────────────────────────────
 _weather_cache: dict = {"temp": None, "unit": "°F", "ts": 0.0}
 _weather_cache_lock  = threading.Lock()
+# In-flight guard: only one thread refreshes a cold/expired cache; concurrent
+# requests serve the (stale) cached value instead of each firing a duplicate 5 s
+# upstream call (wasted OpenWeather quota + worker threads blocked in parallel).
+_weather_fetch_lock  = threading.Lock()
 _WEATHER_CACHE_TTL   = 60  # seconds
 
 
@@ -945,6 +1021,22 @@ def api_weather():
     if now - cached["ts"] < _WEATHER_CACHE_TTL and cached["temp"] is not None:
         return jsonify({"temp": cached["temp"], "unit": cached["unit"]})
 
+    # Dedup the cold-cache stampede: if another thread is already fetching, don't
+    # issue a second upstream call — return whatever is cached (possibly stale).
+    if not _weather_fetch_lock.acquire(blocking=False):
+        return jsonify({"temp": cached["temp"], "unit": cached["unit"]})
+    try:
+        # Re-check under the fetch lock — a refresh may have just completed.
+        with _weather_cache_lock:
+            cached = _weather_cache.copy()
+        if now - cached["ts"] < _WEATHER_CACHE_TTL and cached["temp"] is not None:
+            return jsonify({"temp": cached["temp"], "unit": cached["unit"]})
+        return _refresh_weather(now)
+    finally:
+        _weather_fetch_lock.release()
+
+
+def _refresh_weather(now):
     try:
         cfg = read_config()
     except Exception:
@@ -959,10 +1051,12 @@ def api_weather():
     if location:
         if api_key:
             try:
-                # location is stored pre-encoded in config (e.g. "las%20vegas,nv,us")
+                # URL-encode the location at use-time so a literal space/&/= in the
+                # configured value can't inject query params (keep commas — OpenWeather
+                # wants city,state,country).
                 url = (
                     "https://api.openweathermap.org/data/2.5/weather"
-                    f"?q={location}&appid={api_key}&units={units}"
+                    f"?q={quote(location, safe=',')}&appid={api_key}&units={units}"
                 )
                 raw  = urllib.request.urlopen(urllib.request.Request(url), timeout=5).read()
                 data = json.loads(raw)
@@ -972,7 +1066,7 @@ def api_weather():
         if temp is None:
             # Fallback: taps-aff (returns °C; we convert if needed)
             try:
-                url = f"https://taps-aff.co.uk/api/{location}"
+                url = f"https://taps-aff.co.uk/api/{quote(location, safe='')}"
                 raw  = urllib.request.urlopen(urllib.request.Request(url), timeout=5).read()
                 data = json.loads(raw)
                 c    = float(data["temp_c"])
@@ -990,7 +1084,21 @@ def api_weather():
 # Persists in the server process so page refreshes don't reset the post-game countdown.
 _scoreboard_cache      = {"game": None, "team_name": "VGK", "sport_key": "NHL", "enabled": True, "ts": 0.0, "game_ended_at": None}
 _scoreboard_cache_lock = threading.Lock()
+# In-flight guard: only one thread refreshes the cold/expired scoreboard cache;
+# concurrent requests serve the (stale) cached value rather than each issuing a
+# duplicate _fetch_scoreboard_data() upstream call.
+_scoreboard_fetch_lock = threading.Lock()
 _SCOREBOARD_CACHE_TTL  = 30   # seconds
+
+
+def _scoreboard_response(cached):
+    return jsonify({
+        "game":          cached["game"],
+        "team_name":     cached["team_name"],
+        "sport_key":     cached.get("sport_key", "NHL"),
+        "enabled":       cached["enabled"],
+        "game_ended_at": cached.get("game_ended_at"),
+    })
 
 
 @app.route("/api/scoreboard", methods=["GET"])
@@ -1000,14 +1108,24 @@ def api_scoreboard():
     with _scoreboard_cache_lock:
         cached = _scoreboard_cache.copy()
     if now - cached["ts"] < _SCOREBOARD_CACHE_TTL:
-        return jsonify({
-            "game":          cached["game"],
-            "team_name":     cached["team_name"],
-            "sport_key":     cached.get("sport_key", "NHL"),
-            "enabled":       cached["enabled"],
-            "game_ended_at": cached.get("game_ended_at"),
-        })
+        return _scoreboard_response(cached)
 
+    # Dedup the cold-cache stampede: if another thread is already refreshing, serve
+    # the (possibly stale) cached value instead of firing a second upstream fetch.
+    if not _scoreboard_fetch_lock.acquire(blocking=False):
+        return _scoreboard_response(cached)
+    try:
+        # Re-check under the fetch lock — a refresh may have just completed.
+        with _scoreboard_cache_lock:
+            cached = _scoreboard_cache.copy()
+        if now - cached["ts"] < _SCOREBOARD_CACHE_TTL:
+            return _scoreboard_response(cached)
+        return _refresh_scoreboard(now)
+    finally:
+        _scoreboard_fetch_lock.release()
+
+
+def _refresh_scoreboard(now):
     try:
         game, team_name, sport_key, enabled = _fetch_scoreboard_data()
     except Exception:
@@ -1217,10 +1335,19 @@ def api_usage_adjust():
         period    = _billing_period_start(_fa_reset_day)
         write_val = round(value, 4)            # stored as dollar spend
 
-    # Atomic write — temp file then rename so a crash mid-write can't corrupt the file
-    tmp = Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps({"period_start": period, "value": write_val}, indent=2))
-    tmp.replace(path)
+    # Atomic write — unique temp file then rename so a crash mid-write can't corrupt the
+    # file, and two concurrent adjusts can't clobber a shared ".tmp" / 500 on replace.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(str(path)), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({"period_start": period, "value": write_val}, indent=2))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return jsonify({"ok": True})
 
 
@@ -1550,11 +1677,25 @@ def log_history():
         return jsonify({"lines": [], "error": str(e)})
 
 
+# Each open SSE stream pins one waitress worker for its whole lifetime (waitress is a
+# synchronous WSGI server — threads=8). Bound how many can be open at once so a few
+# stale/backgrounded log tabs can't starve every other endpoint, and cap each stream's
+# lifetime so half-open connections deterministically release their thread (the client
+# auto-reconnects via the 'retry: 5000' below).
+_MAX_LOG_STREAMS   = 3
+_LOG_STREAM_SLOTS  = threading.BoundedSemaphore(_MAX_LOG_STREAMS)
+_LOG_STREAM_MAX_SECONDS = 600   # 10 min, then return; EventSource reconnects on its own
+
+
 @app.route("/api/log/stream")
 def log_stream():
+    if not _LOG_STREAM_SLOTS.acquire(blocking=False):
+        return jsonify({"error": "too many log streams open"}), 503
+
     def generate():
         yield "retry: 5000\n\n"   # tell browser to wait 5 s before auto-reconnecting
         log_inode = None
+        _deadline = time.time() + _LOG_STREAM_MAX_SECONDS
         try:
             with open(LOG_PATH) as f:
                 log_inode = os.fstat(f.fileno()).st_ino
@@ -1565,6 +1706,10 @@ def log_stream():
                     if line:
                         yield f"data: {line.rstrip()}\n\n"
                     else:
+                        # Bound the stream's lifetime so a backgrounded/half-open tab
+                        # releases its worker thread; the client auto-reconnects.
+                        if time.time() >= _deadline:
+                            break
                         # Heartbeat through quiet periods keeps the SSE channel alive (and
                         # makes waitress / any proxy flush); also detect log rotation.
                         if time.time() - _last_beat > 10:
@@ -1580,6 +1725,8 @@ def log_stream():
             return
         except Exception:
             return
+        finally:
+            _LOG_STREAM_SLOTS.release()   # always give the worker slot back
 
     return Response(
         stream_with_context(generate()),

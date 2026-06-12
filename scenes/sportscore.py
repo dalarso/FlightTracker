@@ -151,11 +151,14 @@ def _send_state(slots, now_ts: float) -> None:
         for slot in slots:
             g = slot.get("game")
             e = slot.get("game_ended_at")
-            # e is None on the very first FINAL tick (game_ended_at is assigned LATER in this
-            # keyframe).  Treat None as "just ended, window starting" so we report FINAL here
-            # — not a spurious STATE|NONE that would blank the listener and wipe its horn log
-            # at the buzzer.  Once the window lapses, e is set and (now - e) > window → NONE.
-            if g and g.get("state") in ("FINAL", "OFF") and (e is None or now_ts - e <= POST_GAME_SECONDS):
+            # game_ended_at is stamped just BEFORE this call in _sports_score, so a genuinely
+            # just-ended game already has e set to ~now and reports FINAL here.  Require a
+            # stamped, in-window end (mirrors the display's own guard) so a stale FINAL the
+            # process restarted INTO — where stamping is deferred to this same tick but the
+            # buzzer was hours ago — is treated as out-of-window (e set, now - e > window)
+            # rather than mis-reported as a fresh FINAL.  e is None only transiently (no
+            # game / pre-stamp) → not reportable.
+            if g and g.get("state") in ("FINAL", "OFF") and e is not None and now_ts - e <= POST_GAME_SECONDS:
                 rep = slot
                 break
     if rep is not None:
@@ -241,14 +244,26 @@ def _secs_until_midnight() -> float:
     return max(60.0, (tomorrow - now).total_seconds())
 
 
+_pregame_parse_warned: set = set()
+
+
 def _secs_until_pregame(start_time_utc: str) -> float:
-    """Seconds until 30 min before scheduled start (0.0 if already past)."""
+    """Seconds until 30 min before scheduled start (0.0 if already past).
+
+    On a parse failure return 0.0 — the caller's _POLL_IDLE clamp keeps polling at the
+    2-min cadence regardless, so the return value is unchanged in practice.  We log the
+    failing value ONCE (deduped) so a permanent upstream schema change surfaces in the
+    log instead of silently degrading to constant 2-min polling forever."""
     try:
         utc_dt  = datetime.datetime.fromisoformat(start_time_utc.replace("Z", "+00:00"))
         pregame = utc_dt - datetime.timedelta(minutes=30)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         return max(0.0, (pregame - now_utc).total_seconds())
-    except Exception:
+    except Exception as e:
+        if start_time_utc not in _pregame_parse_warned:
+            _pregame_parse_warned.add(start_time_utc)
+            print(f"[sportscore] could not parse start_time_utc {start_time_utc!r}: {e} "
+                  f"(falling back to {_POLL_IDLE}s polling)", file=sys.stderr, flush=True)
         return 0.0
 
 
@@ -397,6 +412,7 @@ def _build_slots() -> list[dict]:
         "last_draw":       None,   # change-detection tuple
         "was_live":        False,  # saw this game LIVE/CRIT — gates the WIN celebration
         "win_shown":       False,  # WIN celebration already fired (one-shot per game)
+        "last_game_id":    None,   # game_id of the game whose state we're tracking
         "_inflight":       False,  # a background fetch is in progress for this slot
     }
 
@@ -478,6 +494,16 @@ class SportScoreScene(object):
         if not self._sport_slots:
             return
 
+        # Flights always win: while an aircraft is overhead the flight scenes own the
+        # canvas, so the celebration must yield exactly like the board does in
+        # _sports_score (mirrors the `if len(self._data): return` guard there).  Without
+        # this a goal/WIN scroll (up to WIN_CELEBRATION_SECONDS) would blank a live
+        # overhead plane — the opposite of the documented priority.  The LAN horn already
+        # fired when the celebration armed, so cutting the on-panel scroll short loses no
+        # audio cue; the celebration simply doesn't draw while flights are present.
+        if len(self._data):
+            return
+
         now_ts = time.time()
 
         if now_ts >= self._celebration_until:
@@ -534,13 +560,42 @@ class SportScoreScene(object):
             return
 
         now_ts = time.time()
+
+        # Stamp the post-game window start BEFORE _send_state reads it, so a FINAL that
+        # actually ended hours ago (e.g. process restarted long after the buzzer) is
+        # recognised as already-expired on the very first tick rather than mis-reported as
+        # a fresh FINAL to the LAN listener.  The full bookkeeping loop below re-stamps the
+        # same way; doing the minimal stamp here just makes _send_state agree with the
+        # display's own post-game-window guard on tick 1.
+        for slot in self._sport_slots:
+            g = slot.get("game")
+            if g and g.get("state") in ("FINAL", "OFF") and slot["game_ended_at"] is None:
+                slot["game_ended_at"] = now_ts
+
         _send_state(self._sport_slots, now_ts)   # heartbeat + game state → mirrors to the LAN listener
+
+        # ── Flights take priority; keep _scoreboard_active so idle scenes stay ─
+        # Checked BEFORE the celebration block so an overhead aircraft is top priority
+        # even mid-celebration: celebration_frame yields to flights too, so the flight
+        # scenes own the canvas while a plane is overhead.  Background polling/stamping
+        # still happens further down once flights clear.
+        if len(self._data):
+            self._reset_sport_draws()
+            return
 
         # ── Yield canvas to celebration; still poll APIs in background ─────────
         if self._goal_celebration_active:
             if now_ts >= self._celebration_until:
                 pass  # celebration_frame will clean up on next tick
             else:
+                # Decouple the LAN horn from the on-panel scroll: run a lightweight
+                # goal-detection pass for the active LIVE/CRIT slot even mid-celebration so
+                # each goal nudges the LAN listener (without re-arming the on-panel scroll).
+                horn_slot = next(
+                    (s for s in self._sport_slots
+                     if (s.get("game") or {}).get("state") in ("LIVE", "CRIT")),
+                    None,
+                )
                 for slot in self._sport_slots:
                     if now_ts >= slot["poll_due"] and not slot.get("_inflight"):
                         _poll_slot_async(slot, now_ts)
@@ -548,11 +603,18 @@ class SportScoreScene(object):
                     g = slot.get("game")
                     if g and g.get("state") in ("FINAL", "OFF") and slot["game_ended_at"] is None:
                         slot["game_ended_at"] = now_ts
-            return
-
-        # ── Flights take priority; keep _scoreboard_active so idle scenes stay ─
-        if len(self._data):
-            self._reset_sport_draws()
+                if horn_slot is not None:
+                    g = horn_slot["game"]
+                    new_score = g.get("team_score", 0)
+                    if (horn_slot["celebrate"]
+                            and horn_slot["last_team_score"] is not None
+                            and new_score > horn_slot["last_team_score"]):
+                        _send_horn("GOAL", horn_slot["team_name"], new_score,
+                                   g.get("opp_abbr", ""), g.get("opp_score", 0))
+                    # Advance the baseline so the post-celebration tick doesn't re-fire a
+                    # single coalesced scroll for goals already nudged here.
+                    if horn_slot["last_team_score"] is not None:
+                        horn_slot["last_team_score"] = new_score
             return
 
         # ── Poll each due slot on a background thread (never blocks the render loop) ─
@@ -569,8 +631,23 @@ class SportScoreScene(object):
                 slot["game_ended_at"] = None
                 slot["was_live"]      = False
                 slot["win_shown"]     = False
+                slot["last_game_id"]  = None
                 continue
             state = game.get("state", "FUT")
+            # New game in the slot (e.g. an MLB doubleheader game 2, or a back-to-back day
+            # on a restart) — fully reset the per-game tracking so game 2 isn't poisoned by
+            # game 1's frozen win_shown / last_team_score / game_ended_at.  Keyed on game_id,
+            # not state, so it fires regardless of was_live.  Guard against the `or 0`
+            # fallback ids in the fetchers: a transient parse miss (id 0) must NOT masquerade
+            # as a new game and wipe live state — only a real, non-zero, changed id resets.
+            gid = game.get("game_id") or 0
+            if gid and gid != slot["last_game_id"]:
+                if slot["last_game_id"] is not None:
+                    slot["was_live"]        = False
+                    slot["win_shown"]       = False
+                    slot["last_team_score"] = None
+                    slot["game_ended_at"]   = None
+                slot["last_game_id"] = gid
             # Pre-game baseline so the FIRST goal IS celebrated: capture the score while the
             # game hasn't started (0).  Only for FUT/PRE — a mid-game restart first sees LIVE
             # (last_team_score stays None) so we never falsely celebrate a lead that was

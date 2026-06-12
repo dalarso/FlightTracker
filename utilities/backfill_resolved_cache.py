@@ -20,6 +20,7 @@ Usage (on the Pi):
 """
 
 import argparse
+import os
 import shutil
 import sqlite3
 import sys
@@ -27,9 +28,14 @@ import time
 from pathlib import Path
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
+# Resolve the DB exactly like the live service (overhead.py): honor FT_DATA_DIR if the
+# operator relocated the DB off the SD card, else default to the repo root.  Without this
+# the maintenance tools would silently read/create a DIFFERENT ft_flights.db than the live
+# service whenever FT_DATA_DIR is set.
 _SCRIPT_DIR  = Path(__file__).resolve().parent
 _PROJECT_DIR = _SCRIPT_DIR.parent
-DB_FILE      = _PROJECT_DIR / "ft_flights.db"
+_DATA_DIR    = Path(os.environ.get("FT_DATA_DIR") or _PROJECT_DIR)
+DB_FILE      = _DATA_DIR / "ft_flights.db"
 
 # ── Constants (must match overhead.py) ────────────────────────────────────────
 ROUTE_TTL_SCHEDULED = 604800  # 7 days
@@ -125,16 +131,20 @@ def backfill(db_path: Path, verbose: bool = False, force: bool = False,
         if callsign not in best:
             best[callsign] = (origin, dest)
 
-    # ── Step 3: Filter to scheduled-airline prefixes with a LOCAL endpoint ──────
-    # The locality gate mirrors overhead.py's resolved-write guard: a non-local route
-    # written with NULL coords would just be busted + re-resolved on the next live poll,
-    # wasting a delete + a paid re-lookup.  Empty LOCAL_AIRPORTS → gate skipped.
+    # ── Step 3: Filter to scheduled-airline prefixes with a LOCAL ORIGIN ─────────
+    # The locality gate mirrors overhead.py's resolved-write guard: these entries are
+    # written with NULL coords, and the live read (overhead.py) only TRUSTS a coordless
+    # 'resolved' entry when its ORIGIN is local — a non-local origin busts the entry and
+    # re-resolves (possibly a PAID lookup) on the very next poll.  So require the ORIGIN to
+    # be local, not just either endpoint; a local-destination/non-local-origin inbound flight
+    # has no coords to backfill and would just bust + re-bill.  Empty LOCAL_AIRPORTS → gate
+    # skipped (and with nothing local, nothing is written).
     locals_ = _local_airports()
 
     def _keep(cs: str, route: tuple) -> bool:
         if not _is_scheduled(cs):
             return False
-        if locals_ and not (route[0] in locals_ or route[1] in locals_):
+        if locals_ and route[0] not in locals_:
             return False
         return True
 

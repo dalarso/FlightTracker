@@ -6,12 +6,19 @@ Safe to re-run: re-running fills in any BLANK fields on existing rows — it nev
 overwrites data the live service has since enriched, and never changes row ids.
 A timestamped DB backup is written before any changes.
 
+Note: the printed inserted/updated tallies are derived from a pre-SELECT existence check
+that is separate from the upsert, so under a CONCURRENT live writer the two counts can be
+slightly off (a row absent at SELECT time may exist by upsert time, or vice-versa).  The
+upsert itself is correct and idempotent — only the reporting can skew.  For exact counts,
+stop the FlightTracker service before backfilling.
+
 Usage (on the Pi):
     python3 /home/pi/FlightTracker/utilities/backfill_db.py [--log /path/to/plane.log]
 
 The script auto-locates ft_flights.db relative to this file's parent directory.
 """
 
+import os
 import re
 import shutil
 import sqlite3
@@ -21,9 +28,14 @@ import argparse
 from pathlib import Path
 
 # ── File paths ────────────────────────────────────────────────────────────────
+# Resolve the DB exactly like the live service (overhead.py): honor FT_DATA_DIR if the
+# operator relocated the DB off the SD card, else default to the repo root.  Without this
+# the maintenance tools would silently read/create a DIFFERENT ft_flights.db than the live
+# service whenever FT_DATA_DIR is set.
 _SCRIPT_DIR  = Path(__file__).resolve().parent
 _PROJECT_DIR = _SCRIPT_DIR.parent
-DB_FILE      = _PROJECT_DIR / "ft_flights.db"
+_DATA_DIR    = Path(os.environ.get("FT_DATA_DIR") or _PROJECT_DIR)
+DB_FILE      = _DATA_DIR / "ft_flights.db"
 DEFAULT_LOG  = Path.home() / "plane.log"
 
 # ── Log-line regexes ──────────────────────────────────────────────────────────

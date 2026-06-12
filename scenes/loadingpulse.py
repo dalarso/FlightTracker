@@ -13,6 +13,15 @@ class LoadingPulseScene(object):
 
     @Animator.KeyFrame.add(2)
     def loading_pulse(self, count):
+        # Suppress the pulse when the scoreboard is active or flights are
+        # showing — same guard the idle scenes (clock/date/day) use.  Blank the
+        # pixel too, so a leftover lit dot from a previous frame is erased, and
+        # return True to reset count so the pulse phase restarts cleanly when
+        # idle resumes.
+        if getattr(self, "_scoreboard_active", False) or len(self._data):
+            self.canvas.SetPixel(BLINKER_POSITION[0], BLINKER_POSITION[1], 0, 0, 0)
+            return True
+
         reset_count = True
         if self.overhead.processing:
             # Calculate the brightness scaler and

@@ -56,6 +56,12 @@ def _self(data, idx, plane_pos=17, looped=True):
     s.plane_position = plane_pos
     s.reset_scene = mock.Mock(name="reset_scene")
     s._reset_idle_scenes = mock.Mock(name="_reset_idle_scenes")
+    # Ding now routes through Display._ding_new (time-bounded dedup). Bind the real
+    # method + its backing dict so the dedup path runs and reaches planeding.send_ding
+    # (which _run patches). Without these the call raises AttributeError that the
+    # surrounding try/except swallows, and the ding assertions silently never fire.
+    s._recently_dinged = {}
+    s._ding_new = types.MethodType(display.Display._ding_new, s)
     return s
 
 

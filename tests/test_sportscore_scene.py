@@ -104,6 +104,7 @@ def _make_slot(key="NHL", team_name="VGK", celebrate=True,
         "last_draw":       None,
         "was_live":        False,
         "win_shown":       False,
+        "last_game_id":    None,
         "_inflight":       False,
     }
 

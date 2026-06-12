@@ -136,13 +136,19 @@ if ADAPTER == "pygame":
 
 
 # ── 3. Flights: PreviewOverhead pulls /api/flights ────────────────────────────────
+# Mirrors the real utilities.overhead.Overhead contract: grab_data() runs the blocking
+# HTTP GET on a short-lived daemon thread and returns instantly, so the render thread (which
+# calls grab_data on a KeyFrame) NEVER blocks on I/O — the core "render thread must never
+# block" rule.  _load() atomically swaps self._data and flips new_data; the render thread only
+# ever reads them.  processing gates re-entry exactly like the real path so a slow/unreachable
+# Pi can't pile up overlapping fetches.
 class PreviewOverhead:
     def __init__(self):
         self._data = []
         self.new_data = False
         self.processing = False
         self._last_ts = None
-        self._load()
+        self._load()                      # initial synchronous load at construction (off the render thread)
 
     @property
     def data(self):
@@ -160,11 +166,20 @@ class PreviewOverhead:
         ts = d.get("ts")
         if ts != self._last_ts:
             self._last_ts = ts
-            self._data = d.get("flights", []) or []
+            self._data = d.get("flights", []) or []   # atomic swap — render thread reads this
             self.new_data = True
 
     def grab_data(self):
-        self._load()
+        if self.processing:               # a previous fetch is still in flight — don't pile up
+            return
+        self.processing = True
+        threading.Thread(target=self._grab_data, daemon=True).start()
+
+    def _grab_data(self):
+        try:
+            self._load()
+        finally:
+            self.processing = False
 
 
 import utilities.overhead as _overhead   # noqa: E402

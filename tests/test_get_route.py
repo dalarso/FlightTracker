@@ -209,6 +209,9 @@ def run_scenario(scn):
     if scn.get("no_local"):
         patches["_LOCAL_AIRPORTS"] = frozenset()  # GLOBAL mode: no home airports
     patches["requests"].get.side_effect = fake_get
+    # overhead now routes external calls through a shared _session (connection reuse);
+    # point it at the same fake so fake_get still intercepts every HTTP call.
+    patches["_session"] = patches["requests"]
 
     with mock.patch.multiple(overhead, **patches), \
          mock.patch.object(overhead.os.path, "exists", return_value=False):
@@ -416,10 +419,15 @@ SCENARIOS = [
     },
     # ── prefer-local: walk the hierarchy for a local route, even into free ──────
     {
-        "name": "local-wins: free LOCAL beats trusted NON-LOCAL (hierarchy continues)",
+        # COMMERCIAL flight: the trust rule now keeps a free adsbdb/OpenSky route from
+        # beating a PLAUSIBLE paid route (the §overhead-#1 fix).  AirLabs returned a plausible
+        # DEN->ORD here (no plane coords -> plausible), so the live paid route wins and the
+        # free adsbdb LAS->JFK no longer competes.  (For a GA / non-commercial callsign the
+        # free LOCAL route would still win — that path is unchanged.)
+        "name": "local-wins: commercial paid route beats free LOCAL (trust rule)",
         "callsign": "AAL600", "airlabs1": {"origin": "DEN", "dest": "ORD"},
         "adsbdb": {"origin": "LAS", "dest": "JFK"},
-        "expect": ("LAS", "JFK", "adsbdb"),
+        "expect": ("DEN", "ORD", "airlabs"),
     },
     {
         "name": "no local anywhere: trusted non-local beats free non-local (priority)",
@@ -504,7 +512,8 @@ SCENARIOS = [
         # 'opensky:cached', not a bare 'opensky' that looks live (the NV98->? confusion).
         "name": "label-fix: picker serves a cached OpenSky route as opensky:cached",
         "callsign": "AAL_LBL", "hex": "lblhex1",
-        "cache": {("lblhex1", "route"): ("ABQ", "DEN", None, None, None, None, "opensky")},
+        # OpenSky route entries are namespaced under a 'hex:' prefix in the cache.
+        "cache": {("hex:lblhex1", "route"): ("ABQ", "DEN", None, None, None, None, "opensky")},
         "airlabs1": None, "aeroapi": None,
         "expect": ("ABQ", "DEN", "opensky:cached"),
     },
@@ -525,10 +534,14 @@ SCENARIOS = [
         "expect": ("LAS", "", "airlabs"),
     },
     {
-        "name": "decision-B: local complete still upgrades a local partial",
+        # COMMERCIAL flight: AirLabs (paid) returned a plausible local partial LAS->, so the
+        # trust rule (§overhead-#1) drops the free adsbdb candidate rather than letting its
+        # stale historical dest (JFK) complete a commercial route.  The paid partial serves.
+        # (A GA / non-commercial callsign would still upgrade to the complete free route.)
+        "name": "decision-B: commercial paid local partial held over free complete (trust rule)",
         "callsign": "AAL_LPC", "airlabs1": {"origin": "LAS", "dest": ""},
         "adsbdb": {"origin": "LAS", "dest": "JFK"},
-        "expect": ("LAS", "JFK", "adsbdb"),
+        "expect": ("LAS", "", "airlabs"),
     },
     # ── side-effect pins: cache TTL + backoff (protect the AirLabs refactor) ────
     {
@@ -582,11 +595,16 @@ SCENARIOS = [
         "expect": ("LAS", "", "opensky"),
     },
     {
-        "name": "MXY243 (no coords): tier alone — local partial beats non-local complete",
+        # COMMERCIAL (MXY is a scheduled prefix), NO plane coords: AeroAPI (paid) returned a
+        # plausible non-local complete SYR->CHS (no geometry to disqualify it), so the trust
+        # rule (§overhead-#1) keeps the free OpenSky LAS partial from beating it.  Contrast
+        # MXY243 above, where the plane's position proves SYR->CHS implausible and OpenSky's
+        # local origin then wins.  Without coords we trust the live paid route.
+        "name": "MXY244 (no coords): commercial trusts paid non-local over free local partial",
         "callsign": "MXY244", "opensky": {"origin": "LAS", "dest": ""},
         "adsbdb": {"origin": "SYR", "dest": "CHS"}, "airlabs1": None,
         "aeroapi": {"origin": "SYR", "dest": "CHS"},
-        "expect": ("LAS", "", "opensky"),
+        "expect": ("SYR", "CHS", "aeroapi"),
     },
     {
         "name": "commercial FR24 runs via cached hex->reg (feed lacks tail)",
@@ -637,7 +655,8 @@ SCENARIOS = [
         "callsign": "AAL_SKYT", "hex": "skyhex1", "plane": (36.0840, -115.1537),
         "opensky": {"origin": "DEN", "dest": "ORD"}, "airlabs1": None, "aeroapi": None,
         "expect": ("", "", "none"),
-        "expect_cache_ttl": {"skyhex1": overhead.ROUTE_MISS_TTL},
+        # OpenSky route entries are now namespaced under a 'hex:' prefix.
+        "expect_cache_ttl": {"hex:skyhex1": overhead.ROUTE_MISS_TTL},
     },
     {
         # A plausible non-local GA route is KEPT (prefer local, but don't strip a valid
@@ -803,6 +822,20 @@ SCENARIOS = [
         "expect_calls": {"airlabs2": 0},                    # shared-backend empty correctly skips AL-2
     },
     {
+        # §overhead-#9: on a later poll AL-1 serves a CACHED empty (its empty classification
+        # rides on a drift-prone local counter, so this empty may be a mis-classified
+        # over-quota one).  Rather than leak straight to the PAID AeroAPI, AL-2 (separate
+        # quota, FREE probe) is now consulted first.  Here AL-2 has the route and wins;
+        # AeroAPI is never reached.
+        "name": "AL-1 CACHED empty -> AL-2 probed before paid AeroAPI (no leak)",
+        "callsign": "AAL8003",
+        "cache": {("airlabs:AAL8003", "route"): ("", "", None, None, None, None, "airlabs")},
+        "airlabs2": {"origin": "LAS", "dest": "ORD"},
+        "aeroapi": {"origin": "LAS", "dest": "ORD"},        # available but must NOT be needed
+        "expect": ("LAS", "ORD", "airlabs2"),
+        "expect_calls": {"airlabs1": 0, "airlabs2": 1, "aeroapi": 0},
+    },
+    {
         # Phase-3 flip regression: an AeroAPI-resolved ARRIVAL (non-local origin -> home
         # airport) must still write the 7-day resolved cache.  The flip's _select candidate
         # for AeroAPI carries no inline coords, so coords are looked up from the harvested
@@ -940,6 +973,8 @@ class RunTestLookupFidelity(unittest.TestCase):
             "TEST_DISPLAY_FILE": _disp,
         }
         patches["requests"].get.side_effect = fake_get
+        # Shared-session calls go through overhead._session — point it at the same fake.
+        patches["_session"] = patches["requests"]
         try:
             with mock.patch.multiple(overhead, **patches), \
                  mock.patch.object(overhead.os.path, "exists", return_value=False):

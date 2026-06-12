@@ -215,3 +215,11 @@ AEROAPI_RESET_DAY = 1
 # unless you opt into a window.
 # API_CHECK_RETENTION_DAYS = 90   # prune internal accuracy stats older than N days
 # SIGHTINGS_RETENTION_DAYS = 0    # 0 = keep all sighting history; set >0 (days) to prune
+
+# ── Advanced: web dashboard access token (optional) ──────────────────────────
+# The dashboard is designed for a single-user trusted LAN and ships with NO password.
+# Leave this empty to keep that behaviour. If you set a non-empty value, every config
+# write and the secret-reveal endpoint require a matching token: the dashboard prompts
+# for it once and remembers it in the browser. This closes the "any device on the LAN
+# can rewrite config / read API keys" exposure without a full login system.
+WEB_ACCESS_TOKEN = ""

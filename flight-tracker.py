@@ -5,7 +5,14 @@ from zoneinfo import ZoneInfo
 
 from display import Display
 
-_PACIFIC = ZoneInfo("America/Los_Angeles")
+# Stamp crash/exit log lines in the user's configured timezone so they line up with every
+# other log line (overhead.py / web/server.py do the same).  config.py is user-authored and
+# gitignored, so TIMEZONE may be missing AND ZoneInfo() can raise on a bad string — guard both.
+try:
+    from config import TIMEZONE
+    _PACIFIC = ZoneInfo(TIMEZONE)
+except Exception:
+    _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
 def _ts():

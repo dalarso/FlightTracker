@@ -1,0 +1,13 @@
+# Test dependencies for the FlightTracker suite.
+#
+# The tests import the production modules, which pull in the runtime deps (requests, flask,
+# waitress); install those first so a fresh checkout doesn't error 8 of 9 test modules with
+# "ModuleNotFoundError: No module named 'requests'".  The rgbmatrix C-extension is stubbed
+# per-test (sys.modules), so it is NOT needed here.
+#
+# Run the suite with either:
+#   pip install -r requirements.txt -r requirements-test.txt
+#   python -m unittest discover -s tests      # stdlib runner
+#   pytest                                    # picks up pytest.ini (testpaths = tests)
+-r requirements.txt
+pytest>=8.0

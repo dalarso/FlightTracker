@@ -15,8 +15,17 @@ UDP is connectionless — nothing is held open; the heartbeat is how the listene
 Pi is alive.  Every send is non-blocking and fully swallowed: if the desktop is off, closed,
 or unreachable the packet simply vanishes and the display is never affected.  Empty
 PLANE_DING_HOST = feature off (every call below is a no-op).
+
+Threat model: packets are unauthenticated, unencrypted cleartext to a config-controlled
+destination (PLANE_DING_HOST).  The Pi is a sender only (no inbound surface), and _clean()
+strips '|'/newlines so a crafted callsign/route can't desync the wire format.  Two caveats
+for downstream: (1) the desktop listener must treat every sender as untrusted and never act
+on a payload beyond playing a sound; (2) if the config-write surface is ever opened to
+lower-trust users, PLANE_DING_HOST should be treated as a restricted field, since it can
+redirect these packets to an arbitrary LAN host.
 """
 
+import atexit
 import socket
 import time
 
@@ -41,6 +50,15 @@ if PLANE_DING_HOST:
     except Exception:
         _sock = None
 
+# Close the fire-and-forget UDP socket on interpreter exit so repeated imports
+# (tests/preview) don't leak file descriptors. Harmless for the long-lived
+# display process, which only exits at shutdown.
+if _sock is not None:
+    atexit.register(_sock.close)
+
+# render-thread-only; mutated via 'global _last_ping' in send_state and read in
+# the throttle check — NOT thread-safe. send_state() runs solely from the single
+# render thread's keyframes, so this single-writer invariant must hold.
 _last_ping = 0.0
 
 

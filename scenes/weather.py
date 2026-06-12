@@ -1,4 +1,5 @@
 import urllib.request
+from urllib.parse import quote
 import datetime
 import time
 import threading
@@ -71,7 +72,13 @@ RAINFALL_GRAPH_HEIGHT = 8
 RAINFALL_MAX_VALUE = 3  # mm
 RAINFALL_OVERSPILL_FLASH_ENABLED = True
 
-TEMPERATURE_REFRESH_SECONDS = 60
+# Weather barely changes minute-to-minute; 300s cuts API calls ~5x for both the
+# OpenWeather (uncached) and taps-aff (60s-bucketed) providers.
+TEMPERATURE_REFRESH_SECONDS = 300
+# How long to keep showing the last-good temperature after fetches start failing
+# before blanking it (so a transient network blip / 429 doesn't drop the reading,
+# but genuinely-dead data still clears eventually).
+TEMPERATURE_STALE_AFTER_SECONDS = 30 * 60
 TEMPERATURE_FONT = fonts.small
 TEMPERATURE_FONT_HEIGHT = 5
 TEMPERATURE_POSITION = (44, TEMPERATURE_FONT_HEIGHT + 2)
@@ -108,7 +115,9 @@ def grab_weather(location, ttl_hash=None):
 
     while retries:
         try:
-            request = urllib.request.Request(WEATHER_API_URL + location)
+            # URL-encode the location at use-time so a literal space/&/?/# in the
+            # configured value can't break or inject into the request URL.
+            request = urllib.request.Request(WEATHER_API_URL + quote(location, safe=""))
             response = urllib.request.urlopen(request, timeout=3)
             try:
                 raw_data = response.read()
@@ -196,7 +205,7 @@ def grab_current_temperature_openweather(location, apikey, units):
             request = urllib.request.Request(
                 OPENWEATHER_API_URL
                 + "weather?q="
-                + location
+                + quote(location, safe=",")   # encode at use-time (preserve City,State,Country commas)
                 + "&appid="
                 + apikey
                 + "&units="
@@ -229,8 +238,11 @@ class WeatherScene(object):
     def __init__(self):
         super().__init__()
         self._last_upcoming_rain_and_temp = None
-        self._last_temperature = None
         self._last_temperature_str = None
+        # Memoise temperature_to_colour keyed on the rounded temperature: the colour
+        # table is fixed at import, so quantising collapses the ~24 per-redraw
+        # graphics.Color allocations (one per rainfall column) down to a handful.
+        self._temperature_colour_cache = {}
         self.upcoming_rain_and_temp = None   # guard against read before first RAINFALL_REFRESH tick
         self.current_temperature = None      # guard against read before first TEMPERATURE_REFRESH tick
 
@@ -246,10 +258,17 @@ class WeatherScene(object):
         # Network fetches run on a background daemon so a slow/unreachable weather API can
         # never stall the render thread (mirrors how Overhead backgrounds its polls). The
         # KeyFrames below only READ self.current_temperature / self.upcoming_rain_and_temp.
+        # The stop event gives a clean shutdown hook so weather I/O can be halted (the
+        # daemon flag alone only guarantees it dies with the process).
+        self._weather_stop = threading.Event()
         self._weather_thread = threading.Thread(
             target=self._weather_refresh_loop, daemon=True
         )
         self._weather_thread.start()
+
+    def stop_weather(self):
+        """Signal the background weather loop to exit (no-op if already stopped)."""
+        self._weather_stop.set()
 
     def _weather_refresh_loop(self):
         """Background daemon: run the blocking weather fetches OFF the render thread.
@@ -260,7 +279,8 @@ class WeatherScene(object):
         assignment, atomic under the GIL — same sharing model as Overhead.data)."""
         last_temp = 0.0
         last_rain = 0.0
-        while True:
+        failed_since = None  # when fetches first started failing (keep-last-good window)
+        while not self._weather_stop.is_set():
             now = time.time()
             if now - last_temp >= TEMPERATURE_REFRESH_SECONDS:
                 last_temp = now
@@ -273,7 +293,19 @@ class WeatherScene(object):
                         # WeatherError or a malformed-but-200 payload (KeyError, etc.) —
                         # try the next provider; never let it escape onto this thread.
                         continue
-                self.current_temperature = temp
+                if temp is not None:
+                    # Swap-on-success: a negative-but-valid temp is still a good reading,
+                    # so guard on `is not None` (not falsiness).
+                    self.current_temperature = temp
+                    failed_since = None
+                else:
+                    # Keep showing the last-good value through a transient failure; only
+                    # blank once data has been continuously unavailable for the grace
+                    # window, so genuinely-dead data still clears eventually.
+                    if failed_since is None:
+                        failed_since = now
+                    elif now - failed_since >= TEMPERATURE_STALE_AFTER_SECONDS:
+                        self.current_temperature = None
             if RAINFALL_ENABLED and (now - last_rain >= RAINFALL_REFRESH_SECONDS):
                 last_rain = now
                 try:
@@ -282,7 +314,8 @@ class WeatherScene(object):
                     )
                 except Exception:
                     pass
-            time.sleep(1.0)
+            # Interruptible sleep: wakes immediately when stop is signalled.
+            self._weather_stop.wait(1.0)
 
     def colour_gradient(self, colour_A, colour_B, ratio):
         return graphics.Color(
@@ -292,6 +325,14 @@ class WeatherScene(object):
         )
 
     def temperature_to_colour(self, current_temperature):
+        # graphics.Color is never mutated after construction, so a cached instance is
+        # safe to reuse across draws. Key on the rounded temp — temps repeat heavily
+        # across the 24 rainfall columns and across per-tick redraws.
+        cache_key = round(current_temperature)
+        cached = self._temperature_colour_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         colours_table = (
             TEMPERATURE_COLOURS_METRIC if TEMPERATURE_UNITS == "metric"
             else TEMPERATURE_COLOURS
@@ -313,11 +354,16 @@ class WeatherScene(object):
         if current_temperature > max_temp:
             ratio = 1
         elif current_temperature > min_temp:
-            ratio = (current_temperature - min_temp) / (max_temp - min_temp)
+            # Guard against a duplicated/out-of-order stop making the band zero-width
+            # (a ZeroDivisionError here would kill the render thread).
+            denom = max_temp - min_temp
+            ratio = (current_temperature - min_temp) / denom if denom else 1
         else:
             ratio = 0
 
-        return self.colour_gradient(min_temp_colour, max_temp_colour, ratio)
+        colour = self.colour_gradient(min_temp_colour, max_temp_colour, ratio)
+        self._temperature_colour_cache[cache_key] = colour
+        return colour
 
     def draw_rainfall_and_temperature(
         self, rainfall_and_temperature, graph_colour=None, flash_enabled=False
@@ -475,5 +521,4 @@ class WeatherScene(object):
                     temp_str,
                 )
 
-            self._last_temperature = self.current_temperature
             self._last_temperature_str = temp_str

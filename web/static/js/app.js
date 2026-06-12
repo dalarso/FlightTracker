@@ -1,11 +1,29 @@
 // CSRF: tag every same-origin request so the server can reject cross-site drive-by POSTs.
 // (The server requires this header on all state-changing requests — see _csrf_guard.)
+// Also attach the OPTIONAL shared access token (X-FT-Token) when one has been stored. If
+// the server has WEB_ACCESS_TOKEN set and rejects a state-changing request with 401, prompt
+// for the token once, store it in localStorage, and retry. Default (no token configured on
+// the server) never returns 401, so this never prompts.
 (function () {
   const _origFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    init = init || {};
-    init.headers = Object.assign({}, init.headers, { 'X-Requested-With': 'FlightTracker' });
-    return _origFetch(input, init);
+  function _withHeaders(init) {
+    init = Object.assign({}, init || {});
+    init.headers = Object.assign({}, init.headers, {
+      'X-Requested-With': 'FlightTracker',
+      'X-FT-Token': localStorage.getItem('ft_token') || '',
+    });
+    return init;
+  }
+  window.fetch = async function (input, init) {
+    let r = await _origFetch(input, _withHeaders(init));
+    if (r.status === 401) {
+      const t = window.prompt('This FlightTracker requires an access token:');
+      if (t) {
+        localStorage.setItem('ft_token', t);
+        r = await _origFetch(input, _withHeaders(init));   // retry once with the new token
+      }
+    }
+    return r;
   };
 })();
 
@@ -62,11 +80,12 @@ function showTab(name, btn) {
 // Pause the heavy polling timers when the tab/screen is hidden (saves phone battery and
 // Pi load for a 24/7-open dashboard); resume the active tab's poller when it returns.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stopAPIsTab(); }
+  if (document.hidden) { stopAPIsTab(); stopLog(); }
   else {
     const active = document.querySelector('.tab-content.active');
     const tab = active ? active.id.replace('-tab', '') : '';
     if (tab === 'apis') initAPIsTab();
+    else if (tab === 'log') initLog();
   }
 });
 
@@ -99,8 +118,13 @@ async function checkInitialStatus(retries = 3) {
       setTimeout(() => checkInitialStatus(retries - 1), 1500);
       return;  // don't show toggles yet; show them after a successful retry
     }
-    // Exhausted retries — fall through and show toggles with default state
+    // Exhausted retries — the Pi is still unreachable. Don't reveal toggles in their HTML
+    // default state (which would assert a control state we never confirmed); keep waiting and
+    // slowly re-poll so the UI converges once the Pi comes back.
+    setTimeout(() => checkInitialStatus(3), 10000);
+    return;
   }
+  // Only reach here on a successful status read — every toggle now reflects real state.
   document.getElementById('display-toggle').style.removeProperty('display');
   document.getElementById('night-toggle').style.removeProperty('display');
   document.getElementById('service-toggle').style.removeProperty('display');
@@ -288,7 +312,11 @@ async function toggleEye(id, btn) {
   // demand the first time the eye is opened while the field still holds the mask.
   if (revealing && _SECRET_FIELDS[id] && inp.value === _SECRET_SENTINEL) {
     try {
-      const r = await fetch('/api/config/reveal?key=' + encodeURIComponent(_SECRET_FIELDS[id]));
+      const r = await fetch('/api/config/reveal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: _SECRET_FIELDS[id] }),
+      });
       const d = await r.json();
       if (d && typeof d.value === 'string') inp.value = d.value;
     } catch (e) { /* leave the mask in place if the reveal fetch fails */ }
@@ -308,6 +336,14 @@ async function loadConfig() {
     showToast('Failed to load config: ' + e.message, 'err');
     return;
   }
+  populateForm();
+}
+
+// Mirror the in-memory `config` into every Config-tab input.  Called after the initial
+// load AND after a successful save, so the form always reflects the values that were
+// actually persisted (numeric fields that buildConfigPayload clamped/defaulted no longer
+// silently differ from what's on screen).
+function populateForm() {
   document.getElementById('zone_tl_y').value = config.ZONE_HOME.tl_y;
   document.getElementById('zone_tl_x').value = config.ZONE_HOME.tl_x;
   document.getElementById('zone_br_y').value = config.ZONE_HOME.br_y;
@@ -489,6 +525,10 @@ async function saveConfig(restart) {
     if (data.ok) {
       const { restart: _, ...savedConfig } = payload;
       config = savedConfig;
+      // Re-render the form from the normalized payload so any field that was clamped or
+      // defaulted in buildConfigPayload (e.g. a cleared team ID -> 0, an out-of-range TTL)
+      // now shows the value that was actually saved instead of the user's discarded input.
+      populateForm();
       const msg = restart ? '✓ Saved — restarting display…' : '✓ Saved';
       status.textContent = msg; status.className = 'save-status ok';
       showToast(msg, 'ok');
@@ -509,7 +549,15 @@ async function saveConfig(restart) {
 let zoneBounds = {};
 
 function initMap() {
-  if (map) { setTimeout(() => map.invalidateSize(), 100); return; }
+  if (map) {
+    // Map persists for the page's lifetime, but config.ZONE_HOME may have changed since it
+    // was built (e.g. the user edited + saved zone numbers on the Config tab). Re-seed the
+    // rectangle/handles/coord display from the latest config so the map never shows — or
+    // saves back — stale bounds.
+    syncMapToConfig();
+    setTimeout(() => map.invalidateSize(), 100);
+    return;
+  }
   if (!config.LOCATION_HOME || !Array.isArray(config.LOCATION_HOME) || !config.ZONE_HOME) {
     showToast('Config not loaded — save your settings on the Config tab first', 'err');
     return;
@@ -598,13 +646,21 @@ function saveFromMap() {
   saveConfig(false);
 }
 
-function discardMapChanges() {
-  if (!config.ZONE_HOME) { showToast('Config not loaded yet', 'err'); return; }
+// Re-seed the rectangle, corner handles, and coord display from the current
+// config.ZONE_HOME.  Used both to discard in-progress drags and to refresh the map when it
+// re-opens after an external (Config-tab) save.  Returns false if there's nothing to sync.
+function syncMapToConfig() {
+  if (!config.ZONE_HOME || !zoneRect) return false;
   const z = config.ZONE_HOME;
   zoneBounds = { n: z.tl_y, s: z.br_y, w: z.tl_x, e: z.br_x };
   zoneRect.setBounds([[zoneBounds.n, zoneBounds.w], [zoneBounds.s, zoneBounds.e]]);
   placeCornerMarkers();
   updateMapCoordDisplay();
+  return true;
+}
+
+function discardMapChanges() {
+  if (!syncMapToConfig()) { showToast('Config not loaded yet', 'err'); return; }
   showToast('Zone changes discarded', 'ok');
 }
 
@@ -709,6 +765,7 @@ async function loadAPIsTab() {
 
 // ── Stats tab ────────────────────────────────────────────────────────────────
 let _statsPeriodDirty = false;   // true when date inputs differ from current loaded range
+let _statsReqSeq = 0;            // monotonic token: only the newest /api/stats fetch renders
 
 function _isoToday() {
   const now = new Date();
@@ -725,12 +782,14 @@ async function loadStatsTab() {
   document.getElementById('period-to').value   = _serverToday || _isoToday();
   document.getElementById('period-apply-btn').style.display = 'none';
   _statsPeriodDirty = false;
+  const seq = ++_statsReqSeq;
   try {
     const [d, acc, gaAcc] = await Promise.all([
       fetch('/api/stats?days=90').then(r => r.json()),
       fetch('/api/free-api-accuracy').then(r => r.json()).catch(() => null),
       fetch('/api/ga-accuracy').then(r => r.json()).catch(() => null),
     ]);
+    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
     if (d.today) {
       _serverToday = d.today;
       document.getElementById('period-to').value = d.today;
@@ -755,8 +814,10 @@ async function applyStatsPeriod() {
   const to   = document.getElementById('period-to').value;
   if (!from || !to) return;
   document.getElementById('period-apply-btn').textContent = '…';
+  const seq = ++_statsReqSeq;
   try {
     const d = await fetch(`/api/stats?from=${from}&to=${to}`).then(r => r.json());
+    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
     if (d.error) { showToast(d.error, 'err'); return; }
     renderRecentFlights(d);
     renderPeriodStats(d);
@@ -774,8 +835,10 @@ async function resetStatsPeriod() {
   document.getElementById('period-to').value   = _serverToday || _isoToday();
   document.getElementById('period-apply-btn').style.display = 'none';
   _statsPeriodDirty = false;
+  const seq = ++_statsReqSeq;
   try {
     const d = await fetch('/api/stats?days=90').then(r => r.json());
+    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
     renderRecentFlights(d);
     renderPeriodStats(d);
   } catch(e) {}
@@ -812,8 +875,10 @@ async function quickPeriod(preset) {
   document.getElementById('period-to').value   = to;
   document.getElementById('period-apply-btn').style.display = 'none';
   _statsPeriodDirty = false;
+  const seq = ++_statsReqSeq;
   try {
     const d = await fetch(`/api/stats?from=${from}&to=${to}`).then(r => r.json());
+    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
     if (d.error) { showToast('Failed to load stats', 'err'); return; }
     renderRecentFlights(d);
     renderPeriodStats(d);
@@ -1217,6 +1282,7 @@ let _searchQ        = '';
 let _searchOffset   = 0;
 let _searchTotal    = 0;
 let _searchLastDate = null;
+let _searchGen      = 0;     // bumped on each new search; an in-flight "See more" bails if stale
 
 function _buildSearchRow(s, QU) {
   const hlCs  = QU.length >= 2 && s.callsign.includes(QU);
@@ -1273,6 +1339,7 @@ async function doStatsSearch() {
     return;
   }
   _searchQ = q; _searchOffset = 0; _searchTotal = 0; _searchLastDate = null;
+  _searchGen++;   // invalidate any in-flight "See more" from a previous search
   resEl.innerHTML = '<span style="font-size:11px;color:var(--muted)">Searching...</span>';
   try {
     const r = await fetch(`/api/stats/search?q=${encodeURIComponent(q)}&limit=100&offset=0`);
@@ -1312,15 +1379,19 @@ async function doStatsSearch() {
 async function loadMoreSearchResults() {
   const btn = document.getElementById('search-more-btn');
   if (btn) { btn.textContent = 'Loading...'; btn.disabled = true; }
+  const gen = _searchGen;   // tie this page to the search that spawned the button
+  const q = _searchQ;
   try {
-    const r = await fetch(`/api/stats/search?q=${encodeURIComponent(_searchQ)}&limit=100&offset=${_searchOffset}`);
+    const r = await fetch(`/api/stats/search?q=${encodeURIComponent(q)}&limit=100&offset=${_searchOffset}`);
     const d = await r.json();
+    if (gen !== _searchGen) return;   // a new search started — don't append into its table
     if (d.error || !d.sightings?.length) { if (btn) btn.remove(); return; }
     _searchOffset += d.sightings.length;
     const tbody = document.querySelector('#search-table tbody');
-    if (tbody) _appendSearchRows(d.sightings, tbody, _searchQ.toUpperCase());
+    if (tbody) _appendSearchRows(d.sightings, tbody, q.toUpperCase());
     _updateSeeMoreBtn(document.getElementById('stats-search-results'));
   } catch(e) {
+    if (gen !== _searchGen) return;
     if (btn) { btn.textContent = 'Load failed — tap to retry'; btn.disabled = false; }
   }
 }

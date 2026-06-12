@@ -65,9 +65,14 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
         if not dates:
             return None
 
-        # Note: MLB can schedule doubleheaders (two games same day).
-        # We return the first game that matches the team — game 2 of a
-        # doubleheader is ignored.  Acceptable trade-off for a single LED display.
+        # MLB can schedule doubleheaders (two games same day).  The schedule array is
+        # chronological, so blindly taking the first team match pins us to game 1 even
+        # after it goes FINAL while game 2 is LIVE.  Instead collect ALL of the team's
+        # games and pick by state priority below: a LIVE game wins; otherwise the earliest
+        # upcoming FUT (so a not-yet-started game 2 surfaces the moment game 1 ends); else
+        # the latest FINAL (so a finished game 2 wins the post-game window over game 1).
+        # The common single-game day still just returns that one game.
+        matches = []
         for game in dates[0].get("games", []):
             teams    = game.get("teams", {})
             home     = teams.get("home", {})
@@ -80,10 +85,6 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
             if str(team_id) not in (str(home_id), str(away_id)):
                 continue
 
-            team_home = str(home_id) == str(team_id)
-            team_data = home if team_home else away
-            opp_data  = away if team_home else home
-
             # ── Game state ────────────────────────────────────────────────
             abstract = game.get("status", {}).get("abstractGameState", "Preview")
             if abstract == "Preview":
@@ -94,39 +95,81 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
                 state = "FINAL"
             else:
                 state = "FUT"
+            matches.append((state, game))
 
-            # ── Inning / linescore ────────────────────────────────────────
-            ls          = game.get("linescore", {})
-            inning      = int(ls.get("currentInning") or 0)
-            is_top      = ls.get("isTopInning", True)
-            inning_half = ls.get("inningHalf", "")   # "Top", "Bottom", "End", "Middle"
-            in_int      = inning_half in ("Middle", "End")
+        if not matches:
+            return None
 
-            # Period label: "TOP 7", "BOT 3", "F/10" for extra innings, "FINAL"
-            if state == "FINAL":
-                period_label = f"F/{inning}" if inning > 9 else "FINAL"
-            elif state == "LIVE":
-                half_abbr    = "TOP" if is_top else "BOT"
-                period_label = f"{half_abbr} {inning}" if inning else ""
-            else:
-                period_label = ""
+        # Pick the single game to display.  Within a state, the schedule array is already
+        # chronological, so the first LIVE / first FUT / last FINAL are the right picks.
+        chosen = None
+        for _state, _game in matches:
+            if _state == "LIVE":
+                chosen = _game
+                break
+        if chosen is None:
+            for _state, _game in matches:
+                if _state == "FUT":
+                    chosen = _game
+                    break
+        if chosen is None:
+            for _state, _game in matches:
+                if _state == "FINAL":
+                    chosen = _game            # keep walking → last FINAL wins
+        if chosen is None:
+            chosen = matches[0][1]            # any non-standard state: fall back to first
 
-            return {
-                "state":           state,
-                "team_score":      int(team_data.get("score") or 0),
-                "opp_score":       int(opp_data.get("score") or 0),
-                "opp_abbr":        opp_data.get("team", {}).get("abbreviation", "???"),
-                "team_home":       team_home,
-                "period":          inning,
-                "period_type":     "REG" if inning <= 9 else "OT",
-                "period_label":    period_label,
-                "time_remaining":  "",
-                "in_intermission": in_int,
-                "start_time_utc":  game.get("gameDate", ""),
-                "game_id":         int(game.get("gamePk") or 0),
-            }
+        game = chosen
+        teams    = game.get("teams", {})
+        home     = teams.get("home", {})
+        away     = teams.get("away", {})
+        home_id  = home.get("team", {}).get("id")
 
-        return None
+        team_home = str(home_id) == str(team_id)
+        team_data = home if team_home else away
+        opp_data  = away if team_home else home
+
+        # ── Game state ────────────────────────────────────────────────
+        abstract = game.get("status", {}).get("abstractGameState", "Preview")
+        if abstract == "Preview":
+            state = "FUT"
+        elif abstract == "Live":
+            state = "LIVE"
+        elif abstract == "Final":
+            state = "FINAL"
+        else:
+            state = "FUT"
+
+        # ── Inning / linescore ────────────────────────────────────────
+        ls          = game.get("linescore", {})
+        inning      = int(ls.get("currentInning") or 0)
+        is_top      = ls.get("isTopInning", True)
+        inning_half = ls.get("inningHalf", "")   # "Top", "Bottom", "End", "Middle"
+        in_int      = inning_half in ("Middle", "End")
+
+        # Period label: "TOP 7", "BOT 3", "F/10" for extra innings, "FINAL"
+        if state == "FINAL":
+            period_label = f"F/{inning}" if inning > 9 else "FINAL"
+        elif state == "LIVE":
+            half_abbr    = "TOP" if is_top else "BOT"
+            period_label = f"{half_abbr} {inning}" if inning else ""
+        else:
+            period_label = ""
+
+        return {
+            "state":           state,
+            "team_score":      int(team_data.get("score") or 0),
+            "opp_score":       int(opp_data.get("score") or 0),
+            "opp_abbr":        opp_data.get("team", {}).get("abbreviation", "???"),
+            "team_home":       team_home,
+            "period":          inning,
+            "period_type":     "REG" if inning <= 9 else "OT",
+            "period_label":    period_label,
+            "time_remaining":  "",
+            "in_intermission": in_int,
+            "start_time_utc":  game.get("gameDate", ""),
+            "game_id":         int(game.get("gamePk") or 0),
+        }
 
     except Exception as e:
         print(f"[mlb] fetch_mlb_game error: {e}", file=sys.stderr, flush=True)

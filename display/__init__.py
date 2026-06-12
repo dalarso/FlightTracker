@@ -74,6 +74,11 @@ DATA_CHECK_INTERVAL = max(1, int(DATA_CHECK_INTERVAL))
 PAUSE_FLAG  = "/tmp/ft_paused"
 NIGHT_FLAG  = "/tmp/ft_night"
 
+# How long a flight key stays in the "recently dinged" memory so that an ADS-B
+# feed dropping an aircraft for a poll or two and then returning it doesn't fire
+# a second spurious ding for a plane that never actually left the sky.
+DING_DEDUP_SECS = 120
+
 
 class Display(
     WeatherScene,
@@ -136,9 +141,30 @@ class Display(
         self._was_paused = self._paused
         self._was_night = self._night
 
+        # Mirror the matrix brightness we set on the hardware (options.brightness
+        # above is BRIGHTNESS) so sync() only writes the C-binding property on an
+        # actual transition instead of every frame.
+        self._cur_brightness = BRIGHTNESS
+
+        # Time-bounded memory of recently-dinged flight keys → ding timestamp,
+        # so brief ADS-B feed dropouts don't re-ding a plane that never left.
+        self._recently_dinged = {}
+
     def draw_square(self, x0, y0, x1, y1, colour):
-        for x in range(x0, x1):
-            _ = graphics.DrawLine(self.canvas, x, y0, x, y1, colour)
+        # Solid same-colour fill covering columns [x0, x1-1] × rows [y0, y1]
+        # (unchanged from the original per-column loop, which spanned y via a
+        # single DrawLine and so was order-independent on y — preserved via the
+        # min/max below; the rainfall graph passes y2 < y1). When the band is
+        # wider than it is tall, iterate the shorter (vertical) dimension so a
+        # wide, short strip costs a handful of horizontal DrawLines instead of
+        # one vertical DrawLine per column.
+        ylo, yhi = (y0, y1) if y0 <= y1 else (y1, y0)
+        if (x1 - x0) >= (yhi - ylo):
+            for y in range(ylo, yhi + 1):
+                _ = graphics.DrawLine(self.canvas, x0, y, x1 - 1, y, colour)
+        else:
+            for x in range(x0, x1):
+                _ = graphics.DrawLine(self.canvas, x, y0, x, y1, colour)
 
     @Animator.KeyFrame.add(0)
     def clear_screen(self):
@@ -149,11 +175,14 @@ class Display(
     @Animator.KeyFrame.add(int(frames.PER_SECOND * DATA_CHECK_INTERVAL))
     def check_for_loaded_data(self, count):
         if self.overhead.new_data:
-            # Check if there's data
-            there_is_data = len(self._data) > 0 or not self.overhead.data_is_empty
-
-            # this marks self.overhead.data as no longer new
+            # Consume the freshly-polled set FIRST (this single atomic property
+            # read also marks self.overhead.data as no longer new), then derive
+            # everything from that one snapshot. Reading data_is_empty separately
+            # would open a torn-read window if a poll committed between the reads.
             new_data = self.overhead.data
+
+            # Check if there's data
+            there_is_data = len(self._data) > 0 or len(new_data) > 0
 
             # See if this matches the data already on the screen
             # This test only checks if it's 2 lists with the same
@@ -192,9 +221,14 @@ class Display(
                 self._data       = _retained + _added
                 self._data_index = next(i for i, f in enumerate(self._data)
                                         if _flight_key(f) == _cur_key)
+                if _added:
+                    # Genuinely-new planes haven't been looped yet — mirror the
+                    # disruptive branch so the re-poll gate (grab_new_data) waits
+                    # for them to be shown before issuing the next poll.
+                    self._data_all_looped = False
                 try:
                     if _added:   # ding only for genuinely-new aircraft; departures are silent
-                        planeding.send_ding(_added[0], len(self._data))
+                        self._ding_new(_added[0], len(self._data))
                 except Exception:
                     pass
                 return
@@ -209,7 +243,7 @@ class Display(
             try:
                 _new = [f for f in new_data if _flight_key(f) not in _prev_keys]
                 if _new:
-                    planeding.send_ding(_new[0], len(new_data))
+                    self._ding_new(_new[0], len(new_data))
             except Exception:
                 pass
 
@@ -232,6 +266,22 @@ class Display(
         # SportScoreScene tracking — forces score to redraw on next tick
         self._reset_sport_draws()
 
+    def _ding_new(self, flight, count):
+        # De-flicker: skip the ding if this exact aircraft was dinged within the
+        # last DING_DEDUP_SECS (it briefly dropped out of the feed and returned).
+        # Refresh the timestamp on every sighting and prune lazily so the dict
+        # can't grow without bound.
+        now = time.time()
+        key = _flight_key(flight)
+        for k, ts in list(self._recently_dinged.items()):
+            if now - ts >= DING_DEDUP_SECS:
+                del self._recently_dinged[k]
+        if key in self._recently_dinged:
+            self._recently_dinged[key] = now
+            return
+        self._recently_dinged[key] = now
+        planeding.send_ding(flight, count)
+
     @Animator.KeyFrame.add(int(frames.PER_SECOND))
     def refresh_flags(self, count):
         # Poll the pause/night flag files once per second (not every frame) and
@@ -247,7 +297,7 @@ class Display(
         if paused:
             # Blank the canvas every frame so nothing bleeds through
             self.canvas.Clear()
-            self.matrix.brightness = 0
+            target = 0
         else:
             if self._was_paused:
                 # Transitioning back on — canvas is already blank from the
@@ -258,7 +308,13 @@ class Display(
                 # change is immediately visible on all static elements.
                 self._reset_idle_scenes()
 
-            self.matrix.brightness = NIGHT_BRIGHTNESS if night else BRIGHTNESS
+            target = NIGHT_BRIGHTNESS if night else BRIGHTNESS
+
+        # Brightness only changes on a pause/night transition; writing the
+        # C-binding property every frame (~10x/sec) is pure waste on the Pi.
+        if target != self._cur_brightness:
+            self.matrix.brightness = target
+            self._cur_brightness = target
 
         self._was_paused = paused
         self._was_night  = night
