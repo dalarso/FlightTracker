@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from utilities.nhl  import fetch_game      as _sb_fetch_nhl
 from utilities.espn import fetch_espn_game as _sb_fetch_espn
 from utilities.mlb  import fetch_mlb_game  as _sb_fetch_mlb
+from utilities.scoreboard_select import select_active
 
 
 def read_config():        # replaced by server.py's read_config in bind()
@@ -129,15 +130,11 @@ def _fetch_scoreboard_data():
         for k in priority if k in _SPORT_DEFS
     )
 
-    # Check sports in priority order; return first active (LIVE/CRIT) game,
-    # then fall back to first FINAL game, then the first game found at all.
-    best_live      = None
-    best_live_name = "VGK"
-    best_live_key  = "NHL"
-    best_final      = None
-    best_final_name = "VGK"
-    best_final_key  = "NHL"
-
+    # Fetch each enabled sport once (priority order), then apply the SHARED selection
+    # contract (utilities.scoreboard_select.select_active): first LIVE/CRIT, else first
+    # FINAL/OFF.  No post-game window here — server.py applies it via the persisted
+    # ended-at file (the documented divergence from the LED display, which gates inline).
+    fetched = {}   # league -> (game_or_None, team_name)
     for league in priority:
         spec = _SPORT_DEFS.get(league)
         if not spec or not spec["enabled"] or not spec["team_id"]:
@@ -146,22 +143,13 @@ def _fetch_scoreboard_data():
             game = spec["fetch_fn"](spec["team_id"])
         except Exception:
             game = None
-        if game is None:
-            continue
-        state = game.get("state", "FUT")
-        if state in ("LIVE", "CRIT") and best_live is None:
-            best_live      = game
-            best_live_name = spec["team_name"]
-            best_live_key  = league
-        if state in ("FINAL", "OFF") and best_final is None:
-            best_final      = game
-            best_final_name = spec["team_name"]
-            best_final_key  = league
+        fetched[league] = (game, spec["team_name"])
 
-    if best_live:
-        return best_live, best_live_name, best_live_key, any_enabled
-    if best_final:
-        return best_final, best_final_name, best_final_key, any_enabled
+    entries = [(league, fetched[league][0]) for league in priority if league in fetched]
+    winner = select_active(entries)
+    if winner is not None:
+        game, team_name = fetched[winner]
+        return game, team_name, winner, any_enabled
 
     # No active game — return None so the cache signals no scoreboard
     return None, "VGK", "NHL", any_enabled

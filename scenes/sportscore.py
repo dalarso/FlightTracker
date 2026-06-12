@@ -53,6 +53,7 @@ from utilities.animator import Animator
 from utilities.nhl  import fetch_game   as _fetch_nhl
 from utilities.espn import fetch_espn_game
 from utilities.mlb  import fetch_mlb_game as _fetch_mlb
+from utilities.scoreboard_select import select_active
 from setup import colours, fonts, frames, screen
 from rgbmatrix import graphics
 
@@ -686,23 +687,19 @@ class SportScoreScene(object):
                                game.get("opp_abbr", ""), game.get("opp_score", 0))   # nudge the LAN listener (win sound)
 
         # ── Find highest-priority displayable game ─────────────────────────────
-        # Pass 1: first LIVE/CRIT game (absolute priority)
-        active_slot = None
-        for slot in self._sport_slots:
-            game = slot["game"]
-            if game and game.get("state") in ("LIVE", "CRIT"):
-                active_slot = slot
-                break
+        # Shared selection contract with the web side (utilities.scoreboard_select):
+        # first LIVE/CRIT, else first FINAL/OFF.  The display additionally gates a
+        # FINAL/OFF on its post-game window (the web side leaves that to server.py).
+        _slot_by_key = {s["key"]: s for s in self._sport_slots}
 
-        # Pass 2: first post-game within window (if no live game)
-        if active_slot is None:
-            for slot in self._sport_slots:
-                game = slot["game"]
-                if game and game.get("state") in ("FINAL", "OFF"):
-                    ended = slot["game_ended_at"]
-                    if ended and now_ts - ended <= POST_GAME_SECONDS:
-                        active_slot = slot
-                        break
+        def _final_window_ok(key):
+            ended = _slot_by_key[key]["game_ended_at"]
+            return bool(ended) and (now_ts - ended) <= POST_GAME_SECONDS
+
+        _winner = select_active(
+            [(s["key"], s["game"]) for s in self._sport_slots], _final_window_ok
+        )
+        active_slot = _slot_by_key.get(_winner)
 
         # ── Expire post-game slots that have timed out ─────────────────────────
         # IMPORTANT: leave game_ended_at at the real end time.  Pass 2 already stops
