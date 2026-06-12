@@ -11,7 +11,7 @@ import time
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, render_template, request, Response, stream_with_context
@@ -1056,7 +1056,7 @@ def _refresh_weather(now):
                 # wants city,state,country).
                 url = (
                     "https://api.openweathermap.org/data/2.5/weather"
-                    f"?q={quote(location, safe=',')}&appid={api_key}&units={units}"
+                    f"?q={quote(unquote(location), safe=',')}&appid={api_key}&units={units}"
                 )
                 raw  = urllib.request.urlopen(urllib.request.Request(url), timeout=5).read()
                 data = json.loads(raw)
@@ -1066,7 +1066,7 @@ def _refresh_weather(now):
         if temp is None:
             # Fallback: taps-aff (returns °C; we convert if needed)
             try:
-                url = f"https://taps-aff.co.uk/api/{quote(location, safe='')}"
+                url = f"https://taps-aff.co.uk/api/{quote(unquote(location), safe=',')}"
                 raw  = urllib.request.urlopen(urllib.request.Request(url), timeout=5).read()
                 data = json.loads(raw)
                 c    = float(data["temp_c"])

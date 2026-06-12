@@ -193,5 +193,44 @@ class WeatherShutdownHook(unittest.TestCase):
         s._weather_stop.is_set.assert_called()
 
 
+class LocationEncodingIdempotent(unittest.TestCase):
+    """A WEATHER_LOCATION saved ALREADY url-encoded ('spring%20valley,nv,us') must not be
+    double-encoded at use-time into '%2520...' (which 404s the weather API and blanks the
+    temperature). unquote()-then-quote() makes the encode idempotent for both forms."""
+
+    def _captured_url(self, location):
+        seen = {}
+
+        class _Resp:
+            def read(self_):
+                return b'{"temp_c": 20, "main": {"temp": 68}}'
+            def __enter__(self_):
+                return self_
+            def __exit__(self_, *a):
+                return False
+
+        def _fake_urlopen(req, timeout=None):
+            seen["url"] = req.full_url
+            return _Resp()
+
+        with mock.patch.object(weather.urllib.request, "urlopen", _fake_urlopen):
+            try:
+                weather.grab_weather(location, ttl_hash=object())
+            except Exception:
+                pass
+        return seen.get("url", "")
+
+    def test_preencoded_location_not_double_encoded(self):
+        url = self._captured_url("spring%20valley,nv,us")
+        self.assertNotIn("%2520", url)                 # the double-encode bug
+        self.assertIn("spring%20valley,nv,us", url)    # the correct single-encoded form
+        self.assertNotIn("%2C", url)                   # City,State commas stay literal
+
+    def test_plain_location_encoded_once(self):
+        url = self._captured_url("spring valley,nv,us")
+        self.assertIn("spring%20valley,nv,us", url)
+        self.assertNotIn("%2520", url)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

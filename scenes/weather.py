@@ -1,5 +1,5 @@
 import urllib.request
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import datetime
 import time
 import threading
@@ -115,9 +115,14 @@ def grab_weather(location, ttl_hash=None):
 
     while retries:
         try:
-            # URL-encode the location at use-time so a literal space/&/?/# in the
-            # configured value can't break or inject into the request URL.
-            request = urllib.request.Request(WEATHER_API_URL + quote(location, safe=""))
+            # Encode the location at use-time so a literal space/&/?/# can't break or
+            # inject into the URL. unquote() first makes this IDEMPOTENT: a value that
+            # was already saved URL-encoded (e.g. 'spring%20valley,nv,us') is decoded then
+            # re-encoded once, instead of double-encoding the '%' into '%25'. safe=','
+            # keeps the City,State,Country commas literal (matching the working URL form).
+            request = urllib.request.Request(
+                WEATHER_API_URL + quote(unquote(location), safe=",")
+            )
             response = urllib.request.urlopen(request, timeout=3)
             try:
                 raw_data = response.read()
@@ -205,7 +210,7 @@ def grab_current_temperature_openweather(location, apikey, units):
             request = urllib.request.Request(
                 OPENWEATHER_API_URL
                 + "weather?q="
-                + quote(location, safe=",")   # encode at use-time (preserve City,State,Country commas)
+                + quote(unquote(location), safe=",")   # idempotent encode (preserve City,State,Country commas)
                 + "&appid="
                 + apikey
                 + "&units="
