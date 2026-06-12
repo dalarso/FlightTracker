@@ -309,14 +309,9 @@ class CacheStampedeDedup(unittest.TestCase):
         m.assert_not_called()
 
 
-class AccessTokenGateAndReveal(unittest.TestCase):
-    """Optional WEB_ACCESS_TOKEN gate + the /api/config/reveal GET→POST conversion.
-
-    reveal is POST (not GET) so it falls under the CSRF + token guard and the key/secret
-    never land in a URL (access logs / browser history). When WEB_ACCESS_TOKEN is set in
-    config, mutating requests (incl. reveal) require a matching X-FT-Token; empty (the
-    default) preserves the no-password LAN behaviour.
-    """
+class RevealEndpoint(unittest.TestCase):
+    """The /api/config/reveal GET→POST conversion: POST (not GET) so it falls under the
+    CSRF guard and the key/secret never land in a URL (access logs / browser history)."""
 
     @classmethod
     def setUpClass(cls):
@@ -344,34 +339,6 @@ class AccessTokenGateAndReveal(unittest.TestCase):
         with mock.patch.object(self.srv, "read_config", return_value=self._cfg()):
             r = self.client.post("/api/config/reveal", json={"key": "NOT_A_SECRET"}, headers=_CSRF)
         self.assertEqual(r.status_code, 400)
-
-    def test_gate_blocks_mutating_without_token(self):
-        with mock.patch.object(self.srv, "read_config",
-                               return_value=self._cfg(WEB_ACCESS_TOKEN="letmein")):
-            r = self.client.post("/api/config/reveal", json={"key": self.skey}, headers=_CSRF)
-        self.assertEqual(r.status_code, 401)
-
-    def test_gate_allows_mutating_with_correct_token(self):
-        hdrs = dict(_CSRF); hdrs["X-FT-Token"] = "letmein"
-        with mock.patch.object(self.srv, "read_config",
-                               return_value=self._cfg(WEB_ACCESS_TOKEN="letmein")):
-            r = self.client.post("/api/config/reveal", json={"key": self.skey}, headers=hdrs)
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.get_json()["value"], "s3cr3t-value")
-
-    def test_gate_rejects_wrong_token(self):
-        hdrs = dict(_CSRF); hdrs["X-FT-Token"] = "wrong"
-        with mock.patch.object(self.srv, "read_config",
-                               return_value=self._cfg(WEB_ACCESS_TOKEN="letmein")):
-            r = self.client.post("/api/config/reveal", json={"key": self.skey}, headers=hdrs)
-        self.assertEqual(r.status_code, 401)
-
-    def test_gate_off_does_not_block_get(self):
-        # Non-mutating GETs are never gated (read-only stays open on the trusted LAN).
-        with mock.patch.object(self.srv, "read_config",
-                               return_value=self._cfg(WEB_ACCESS_TOKEN="letmein")):
-            r = self.client.get("/api/config")
-        self.assertEqual(r.status_code, 200)
 
 
 if __name__ == "__main__":

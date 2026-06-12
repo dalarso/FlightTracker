@@ -1,29 +1,11 @@
 // CSRF: tag every same-origin request so the server can reject cross-site drive-by POSTs.
 // (The server requires this header on all state-changing requests — see _csrf_guard.)
-// Also attach the OPTIONAL shared access token (X-FT-Token) when one has been stored. If
-// the server has WEB_ACCESS_TOKEN set and rejects a state-changing request with 401, prompt
-// for the token once, store it in localStorage, and retry. Default (no token configured on
-// the server) never returns 401, so this never prompts.
 (function () {
   const _origFetch = window.fetch.bind(window);
-  function _withHeaders(init) {
-    init = Object.assign({}, init || {});
-    init.headers = Object.assign({}, init.headers, {
-      'X-Requested-With': 'FlightTracker',
-      'X-FT-Token': localStorage.getItem('ft_token') || '',
-    });
-    return init;
-  }
-  window.fetch = async function (input, init) {
-    let r = await _origFetch(input, _withHeaders(init));
-    if (r.status === 401) {
-      const t = window.prompt('This FlightTracker requires an access token:');
-      if (t) {
-        localStorage.setItem('ft_token', t);
-        r = await _origFetch(input, _withHeaders(init));   // retry once with the new token
-      }
-    }
-    return r;
+  window.fetch = function (input, init) {
+    init = init || {};
+    init.headers = Object.assign({}, init.headers, { 'X-Requested-With': 'FlightTracker' });
+    return _origFetch(input, init);
   };
 })();
 

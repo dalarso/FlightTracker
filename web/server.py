@@ -1,4 +1,3 @@
-import hmac
 import json
 import logging
 import os
@@ -58,19 +57,6 @@ def _csrf_guard():
     cl = request.content_length
     if cl is not None and cl > app.config["MAX_CONTENT_LENGTH"]:
         return jsonify({"error": "request body too large"}), 413
-    # Optional shared-token gate (opt-in; OFF by default). When WEB_ACCESS_TOKEN is set
-    # in config.py, every state-changing request (POST/PUT/PATCH/DELETE — which now
-    # includes the secret-reveal endpoint, since it is POST) must carry a matching
-    # X-FT-Token header. Empty (the default) disables it, preserving the no-password
-    # LAN posture; setting it locks config writes + secret reveal to clients that know
-    # the token, closing the "any LAN device can rewrite config / read keys" exposure.
-    if request.method in _MUTATING_METHODS:
-        try:
-            _tok = str(read_config().get("WEB_ACCESS_TOKEN", "") or "").strip()
-        except Exception:
-            _tok = ""
-        if _tok and not hmac.compare_digest(request.headers.get("X-FT-Token", ""), _tok):
-            return jsonify({"error": "missing or invalid access token"}), 401
 
 @app.errorhandler(RequestEntityTooLarge)
 def _too_large(_e):
@@ -417,8 +403,8 @@ def get_config():
 @app.route("/api/config/reveal", methods=["POST"])
 def reveal_secret():
     # Return the real value of ONE sensitive field, on explicit user request (the eye button).
-    # POST (not GET) so it falls under _csrf_guard + the optional WEB_ACCESS_TOKEN gate, and
-    # the key/secret never land in a URL — keeping them out of access logs and browser history.
+    # POST (not GET) so it falls under _csrf_guard and the key/secret never land in a URL —
+    # keeping them out of access logs and browser history.
     # Secrets are masked in GET /api/config by default; this is the opt-in, one-key-at-a-time
     # reveal — never auto-loaded into the page.
     body = request.get_json(silent=True) or {}
