@@ -2264,6 +2264,37 @@ def _route_write_resolved_cache(origin, destination, callsign,
              f"coord_olat={coord_olat is not None} coord_iata={coord_origin_iata!r}")
 
 
+def _route_record_paid_miss(callsign, *, need_airlabs, skip_paid, apis_disabled,
+                            al_origin, al_dest, al2_origin, al2_dest, fa_origin, fa_dest):
+    """Suppress the paid APIs for ROUTE_PAID_MISS_TTL when the PAID chain (AirLabs-1/-2,
+    AeroAPI) was actually consulted yet returned nothing — independent of whether a FREE
+    source later filled the route.  Recomputes per-API eligibility from the live flags so a
+    paid-miss isn't recorded for a flight whose paid tier was short-circuited by a cheaper
+    source.  FR24 is FREE and intentionally excluded from 'paid returned nothing'."""
+    airlabs_eligible = (
+        bool(AIRLABS_API_KEY) and not apis_disabled
+        and not os.path.exists(AIRLABS_DISABLED_FLAG)
+        and not skip_paid and not _in_backoff("airlabs")
+    )
+    airlabs2_eligible = (
+        bool(AIRLABS_API_KEY_2) and not apis_disabled
+        and not os.path.exists(AIRLABS2_DISABLED_FLAG)
+        and not skip_paid and not _in_backoff("airlabs2")
+    )
+    aeroapi_eligible = (
+        bool(FLIGHTAWARE_API_KEY) and not apis_disabled
+        and not os.path.exists(AEROAPI_DISABLED_FLAG)
+        and not skip_paid and not _in_backoff("aeroapi")
+    )
+    paid_returned_nothing = not (al_origin or al_dest or al2_origin or al2_dest
+                                 or fa_origin or fa_dest)
+    if (paid_returned_nothing and need_airlabs and callsign
+            and (airlabs_eligible or airlabs2_eligible)
+            and aeroapi_eligible):
+        _cache_db_set_paid_miss(callsign)
+        _log(f"[route] {callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -3155,40 +3186,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 
 
     # If still no route and all eligible paid APIs returned empty, record a combined
-    # miss so none are called again for ROUTE_PAID_MISS_TTL.
-    # The AirLabs "chain" (key 1 or key 2) counts as one paid tier — if at least one
-    # was eligible AND AeroAPI was eligible, the full paid stack has been exhausted.
-    _airlabs_was_eligible = (
-        bool(AIRLABS_API_KEY) and not _apis_disabled
-        and not os.path.exists(AIRLABS_DISABLED_FLAG)
-        and not _skip_paid and not _in_backoff("airlabs")
+    # paid-miss so none are called again for ROUTE_PAID_MISS_TTL.
+    _route_record_paid_miss(
+        callsign, need_airlabs=_need_airlabs, skip_paid=_skip_paid, apis_disabled=_apis_disabled,
+        al_origin=al_origin, al_dest=al_dest, al2_origin=al2_origin, al2_dest=al2_dest,
+        fa_origin=fa_origin, fa_dest=fa_dest,
     )
-    _airlabs2_was_eligible = (
-        bool(AIRLABS_API_KEY_2) and not _apis_disabled
-        and not os.path.exists(AIRLABS2_DISABLED_FLAG)
-        and not _skip_paid and not _in_backoff("airlabs2")
-    )
-    _aeroapi_was_eligible = (
-        bool(FLIGHTAWARE_API_KEY) and not _apis_disabled
-        and not os.path.exists(AEROAPI_DISABLED_FLAG)
-        and not _skip_paid and not _in_backoff("aeroapi")
-    )
-    # Fires when the PAID chain (AirLabs-1, AirLabs-2, AeroAPI) returned nothing —
-    # independent of whether the free safety net (FR24, adsbdb, OpenSky) later filled
-    # the route — so the paid APIs are suppressed for 2 h when they genuinely had no
-    # data.  FR24 is FREE and is intentionally NOT included: its having a route must
-    # not keep the (empty) paid APIs from being suppressed, or they re-bill every poll.
-    _paid_returned_nothing = not (al_origin or al_dest or al2_origin or al2_dest
-                                  or fa_origin or fa_dest)
-    # Only record a paid-miss when the paid chain was actually CONSULTED (the route was
-    # still incomplete at AirLabs' turn) — not when a cheaper source (e.g. FR24 §1)
-    # resolved it first and the paid APIs were short-circuited.  Otherwise we'd suppress
-    # paid for a flight we never asked them about and log a misleading "paid returned empty".
-    if (_paid_returned_nothing and _need_airlabs and callsign
-            and (_airlabs_was_eligible or _airlabs2_was_eligible)
-            and _aeroapi_was_eligible):
-        _cache_db_set_paid_miss(callsign)
-        _log(f"[route] {callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
 
     # Cross-check log — for commercial flights where adsbdb had data, report whether
     # the paid APIs confirmed or overrode it (GA flights never enter this branch).
