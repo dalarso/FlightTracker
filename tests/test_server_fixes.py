@@ -363,7 +363,10 @@ class OriginCsrfGuard(unittest.TestCase):
         f = self.srv._is_lan_origin
         for good in ("", "http://192.168.1.50:5000", "http://raspberrypi.local",
                      "http://localhost:5000", "http://127.0.0.1", "http://192.168.1.9",
-                     "http://10.42.0.6", "http://raspberrypi"):
+                     "http://10.42.0.6", "http://raspberrypi",
+                     "http://100.64.0.99:5000",                    # Tailscale CGNAT IP
+                     "http://flighttracker.tail1a2b.ts.net:5000",  # Tailscale MagicDNS
+                     "http://raspberrypi.my-tnet.ts.net"):
             self.assertTrue(f(good), good)
         for bad in ("http://evil.com", "https://attacker.example.com", "http://8.8.8.8"):
             self.assertFalse(f(bad), bad)

@@ -49,11 +49,15 @@ _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _is_lan_origin(origin: str) -> bool:
-    """True if a browser Origin header is a LAN/loopback address — the only places this
-    GUI is legitimately reached from.  Defends against DNS rebinding: a public hostname
+    """True if a browser Origin header is a LAN / loopback / Tailscale address — the places
+    this GUI is legitimately reached from.  Defends against DNS rebinding: a public hostname
     rebound to the Pi's LAN IP arrives with a foreign Origin (e.g. http://evil.com), which
     this rejects even though it carries the (publicly-known) X-Requested-With header.
-    Absent Origin (curl, same-origin GETs) is allowed — X-Requested-With still gates those."""
+    Absent Origin (curl, same-origin GETs) is allowed — X-Requested-With still gates those.
+
+    Tailscale is fully allowed: tailnet devices reach the Pi by its CGNAT IP (100.64.0.0/10,
+    matched below) or by MagicDNS name (*.ts.net) — both pass, so remote access over the
+    tailnet works while genuine public origins stay blocked."""
     if not origin:
         return True
     host = origin.split("://", 1)[-1].split("/", 1)[0].strip().lower()
@@ -64,10 +68,14 @@ def _is_lan_origin(origin: str) -> bool:
     try:
         import ipaddress
         ip = ipaddress.ip_address(host)
+        # is_private also covers Tailscale's fd7a:115c:a1e0::/48 IPv6 (ULA); 100.64.0.0/10 is
+        # the Tailscale/CGNAT IPv4 range.
         return ip.is_private or ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")
     except ValueError:
         pass
     if "." not in host:                       # bare LAN hostname, e.g. "raspberrypi"
+        return True
+    if host.endswith(".ts.net"):              # Tailscale MagicDNS (any tailnet)
         return True
     return host.rsplit(".", 1)[-1] in ("local", "lan", "home", "internal", "localdomain")
 
