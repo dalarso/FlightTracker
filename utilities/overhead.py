@@ -2183,6 +2183,31 @@ def _query_fr24_com(callsign, hex_code, registration, origin, destination,
     return _fr24_com_origin, _fr24_com_dest, _fr24_com_src
 
 
+def _reconstruct_select_label(s, *, al_src, al2_src, cached_fa,
+                              fr24_com_src, fr24_com_origin, fr24_com_dest, fr24_src,
+                              adsbdb_src, sky_src):
+    """Reconstruct the cached-aware source label from _select's bare source name,
+    reusing the picker's bare->live mapping and handling the '+' merge combos."""
+    def _lbl1(p):
+        if p == "airlabs":  return al_src
+        if p == "airlabs2": return al2_src
+        if p == "aeroapi":  return "aeroapi:cached" if cached_fa else "aeroapi"
+        if p == "fr24":     return fr24_com_src if (fr24_com_origin or fr24_com_dest) else fr24_src
+        if p == "adsbdb":   return adsbdb_src
+        if p == "opensky":  return sky_src
+        return p
+    if not s:
+        return s
+    if s == "adsbdb+opensky":
+        return ("adsbdb+opensky:cached"
+                if adsbdb_src.endswith(":cached") and sky_src.endswith(":cached")
+                else "adsbdb+opensky")
+    if "+" in s:
+        _a, _b = s.split("+", 1)
+        return f"{_lbl1(_a)}+{_lbl1(_b)}"
+    return _lbl1(s)
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -2734,6 +2759,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # references them on every path.  Without this, any path that skips the AeroAPI
     # live call (no key, cache hit, backoff, non-200, _skip_paid) raises NameError.
     fa_origin = fa_dest = ""
+    _cached_fa = None   # likewise defined on every path: the source-label reconstruction
+                        # reads it even when the AeroAPI tier below is skipped entirely.
     if (not (origin and destination) or _al_held_nonlocal) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not os.path.exists(AEROAPI_DISABLED_FLAG) and not _skip_paid:
         _cached_fa = _cache_db_get_route(callsign, 'aeroapi')
         if _cached_fa:
@@ -3185,31 +3212,15 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _cands.append(_Cand(_norm_code(_sky_origin), _norm_code(_sky_dest), None, None, None, None, "opensky"))
         _best = _select(_cands, plane_lat, plane_lon)
 
-        # Reconstruct the cached-aware source label from _select's bare source name,
-        # reusing the picker's bare->live mapping and handling the '+' merge combos.
-        def _select_lbl1(p):
-            if p == "airlabs":  return _al_src
-            if p == "airlabs2": return _al2_src
-            if p == "aeroapi":  return "aeroapi:cached" if _cached_fa else "aeroapi"
-            if p == "fr24":     return _fr24_com_src if (_fr24_com_origin or _fr24_com_dest) else _fr24_src
-            if p == "adsbdb":   return _adsbdb_src
-            if p == "opensky":  return _sky_src
-            return p
-        def _select_label(s):
-            if not s:
-                return s
-            if s == "adsbdb+opensky":
-                return ("adsbdb+opensky:cached"
-                        if _adsbdb_src.endswith(":cached") and _sky_src.endswith(":cached")
-                        else "adsbdb+opensky")
-            if "+" in s:
-                _a, _b = s.split("+", 1)
-                return f"{_select_lbl1(_a)}+{_select_lbl1(_b)}"
-            return _select_lbl1(s)
-
         origin, destination = (_best.origin, _best.dest) if _best else ("", "")
         if _best:
-            source = _select_label(_best.source)
+            source = _reconstruct_select_label(
+                _best.source,
+                al_src=_al_src, al2_src=_al2_src, cached_fa=_cached_fa,
+                fr24_com_src=_fr24_com_src, fr24_com_origin=_fr24_com_origin,
+                fr24_com_dest=_fr24_com_dest, fr24_src=_fr24_src,
+                adsbdb_src=_adsbdb_src, sky_src=_sky_src,
+            )
             _coord_olat, _coord_olon = _best.olat, _best.olon
             _coord_dlat, _coord_dlon = _best.dlat, _best.dlon
             _coord_origin_iata = _best.origin
