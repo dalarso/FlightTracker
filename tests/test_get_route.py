@@ -1167,6 +1167,38 @@ class RoutePlausibleGeometry(unittest.TestCase):
         self.assertFalse(overhead._route_plausible(0.0, 0.0, *self.LAS, *self.JFK))
 
 
+class LastResortTierStrictness(unittest.TestCase):
+    """Blind spot #2 (found by mutation testing): _route_last_resort_pick must require a
+    STRICTLY-better tier (`<`, not `<=`) before overriding the already-committed route, so a
+    SAME-tier candidate can't clobber the committed source. Both endpoints/tier are equal here
+    (LAS->'' local partial); only the SOURCE differs, so a `<=` regression silently flips the
+    served source (feeding stats / display / the resolved-cache source field)."""
+
+    def _pick(self):
+        # _has_local_endpoint -> True makes LAS local (tier 1 = local partial) without needing
+        # the _LOCAL_AIRPORTS harness; _fr24_route_plausible -> True keeps the candidate usable.
+        with mock.patch.object(overhead, "_has_local_endpoint", return_value=True), \
+             mock.patch.object(overhead, "_fr24_route_plausible", return_value=True):
+            return overhead._route_last_resort_pick(
+                "LAS", "", "opensky",                 # already-committed local partial (opensky)
+                al_origin="", al_dest="", al2_origin="", al2_dest="",
+                fa_origin="", fa_dest="",
+                fr24_com_origin="", fr24_com_dest="",
+                adsbdb_origin="LAS", adsbdb_dest="",  # SAME-tier (local partial) rival candidate
+                sky_origin="", sky_dest="",
+                plane_lat=36.1, plane_lon=-115.1, callsign="AAL1",
+                al_src="airlabs", al2_src="airlabs2", cached_fa=None,
+                fr24_com_src="fr24", adsbdb_src="adsbdb", sky_src="opensky",
+            )
+
+    def test_same_tier_candidate_does_not_replace_committed_source(self):
+        o, d, s = self._pick()
+        self.assertEqual(
+            (o, d, s), ("LAS", "", "opensky"),
+            "a same-tier candidate must NOT override the committed route — the picker requires "
+            "a strictly-better tier (`<`); `<=` would flip the source to 'adsbdb'")
+
+
 if __name__ == "__main__":
     print("=== get_route baseline (result + live API call counts) ===")
     for s in SCENARIOS:
