@@ -1756,6 +1756,11 @@ def _write_usage(path, data):
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f)
+            # mkstemp creates the temp file 0600.  The web process reads these usage files
+            # as a DIFFERENT user (it runs as pi; the display drops to daemon after the LED
+            # matrix grabs the GPIO), so a 0600 file shows up as 0 usage in the dashboard.
+            # World-readable (counts only, no secrets) so either process can read the other's.
+            os.chmod(tmp, 0o644)
             os.replace(tmp, path)
         except Exception:
             try:

@@ -114,6 +114,20 @@ class HealthSnapshot(unittest.TestCase):
         self.assertIn("active_threads", data)
 
 
+class UsageFilePermissions(unittest.TestCase):
+    """Usage files are written by the display (daemon) and read by the web UI (pi) — a
+    different user — so they must be world-readable, or the API page shows 0."""
+
+    def test_write_usage_is_world_readable(self):
+        import json
+        import stat
+        p = os.path.join(_TMP, "airlabs_usage.json")
+        overhead._write_usage(p, {"period_start": "2026-06-09", "value": 42.0})
+        mode = os.stat(p).st_mode
+        self.assertTrue(mode & stat.S_IROTH, "usage file must be o+r for the cross-user read")
+        self.assertEqual(json.loads(Path(p).read_text())["value"], 42.0)
+
+
 class CacheWriteFailureCounter(unittest.TestCase):
     def test_swallowed_write_failure_is_counted_not_silent(self):
         before = cache.write_failure_count()

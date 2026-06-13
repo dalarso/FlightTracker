@@ -1391,6 +1391,10 @@ def api_usage_adjust():
     try:
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps({"period_start": period, "value": write_val}, indent=2))
+        # mkstemp creates 0600; the display process reads these as a different user (daemon
+        # vs this server's pi), so a manual adjustment must be world-readable too — otherwise
+        # the display would silently re-base the count from 0.  Counts only, no secrets.
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
         try:
