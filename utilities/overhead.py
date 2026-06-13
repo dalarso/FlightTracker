@@ -2208,6 +2208,62 @@ def _reconstruct_select_label(s, *, al_src, al2_src, cached_fa,
     return _lbl1(s)
 
 
+def _route_fill_trace(trace, *, adsbdb_origin, adsbdb_dest, sky_origin, sky_dest,
+                      al_origin, al_dest, al2_origin, al2_dest, fa_origin, fa_dest):
+    """Populate the diagnostic _trace dict with each source's raw result (test-flight grid)."""
+    trace["adsbdb_route"] = {"origin": adsbdb_origin, "destination": adsbdb_dest}
+    trace["opensky"]      = {"origin": sky_origin, "destination": sky_dest}
+    # Report whichever AirLabs key actually produced a result as a unit — never mix
+    # key-1's origin with key-2's dest into a route neither key returned.
+    _al_tr_o, _al_tr_d = (al_origin, al_dest) if (al_origin or al_dest) else (al2_origin, al2_dest)
+    trace["airlabs"]      = {"origin": _al_tr_o, "destination": _al_tr_d}
+    trace["aeroapi"]      = {"origin": fa_origin, "destination": fa_dest}
+
+
+def _route_write_resolved_cache(origin, destination, callsign,
+                                coord_olat, coord_olon, coord_dlat, coord_dlon,
+                                coord_origin_iata, source):
+    """Persist the final resolved route for a scheduled airline so future sightings of the
+    same daily flight skip the full API chain.  Coords are required only for NON-local
+    origins (whose read does a geometry check); a LOCAL-origin route is trusted without
+    them.  The elif branches are diagnostics for cases that deliberately do NOT persist."""
+    if (origin and destination and callsign
+            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+            and _LOCAL_AIRPORTS                       # GLOBAL mode (no home) skips the 7-day cache
+            and _has_local_endpoint(origin, destination)
+            and (origin.upper() in _LOCAL_AIRPORTS or coord_olat is not None)
+            and (not coord_origin_iata or coord_origin_iata == origin)):  # guard mismatch
+        _cache_db_set_route(callsign, 'resolved',
+                            origin, destination,
+                            coord_olat, coord_olon, coord_dlat, coord_dlon,
+                            int(time.time()) + ROUTE_TTL_SCHEDULED,
+                            source=source.removesuffix(":cached"))
+    elif (origin and destination and callsign
+            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+            and coord_olat is not None
+            and coord_origin_iata and coord_origin_iata != origin):
+        _log(f"[resolved] {callsign}: skipping resolved-cache write — coord origin "
+             f"({coord_origin_iata}) does not match final origin ({origin})")
+    elif (origin and destination and callsign
+            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+            and not _has_local_endpoint(origin, destination)):
+        _log(f"[resolved] {callsign}: skipping resolved-cache write — "
+             f"non-local route {_route_display(origin, destination)} must not persist 7 days")
+    elif (origin and destination and callsign
+            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+            and _LOCAL_AIRPORTS
+            and origin.upper() in _LOCAL_AIRPORTS):
+        # Diagnostic (Issue B): a scheduled, complete, LOCAL-ORIGIN departure should
+        # always persist — condition 5 passes on locality and condition 6 passes unless
+        # a coord-iata mismatch (caught by the first elif).  The resolved-write logic is
+        # provably correct in tests for every modeled input, yet a few flights (AAL2040,
+        # SCX3001) carried stale entries live.  If this ever fires it pinpoints the
+        # real-world state we could not reproduce in mocks; logs the exact guard inputs.
+        _log(f"[resolved] {callsign}: NOT persisted (unexpected) — "
+             f"{_route_display(origin, destination)} src={source} "
+             f"coord_olat={coord_olat is not None} coord_iata={coord_origin_iata!r}")
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -3226,52 +3282,13 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _coord_origin_iata = _best.origin
 
     # ── Resolved-route cache write ─────────────────────────────────────────────
-    # If both endpoints are now known for a scheduled airline, cache the final
-    # result so future sightings of the same daily flight skip the full API
-    # chain — even when individual upstream caches (e.g. OpenSky's 1-hour TTL)
-    # have expired or only have partial data.
-    # Coords requirement is conditional on locality.  The READ trusts a LOCAL-origin entry
-    # unconditionally (no geometry), so a local-origin route needs no coords — even a
-    # coordless source (AirLabs without lat/lng, FR24) gets a 7-day entry that short-circuits
-    # the whole chain on future sightings instead of re-walking adsbdb -> OpenSky -> AirLabs
-    # every poll.  A NON-local origin's read DOES geometry-check, so a coordless non-local
-    # entry would bust every poll (perpetual bust cycle) — those still require coords and
-    # otherwise fall back to the per-API caches.
-    if (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
-            and _LOCAL_AIRPORTS                       # GLOBAL mode (no home) skips the 7-day cache
-            and _has_local_endpoint(origin, destination)
-            and (origin.upper() in _LOCAL_AIRPORTS or _coord_olat is not None)
-            and (not _coord_origin_iata or _coord_origin_iata == origin)):  # guard mismatch
-        _cache_db_set_route(callsign, 'resolved',
-                            origin, destination,
-                            _coord_olat, _coord_olon, _coord_dlat, _coord_dlon,
-                            int(time.time()) + ROUTE_TTL_SCHEDULED,
-                            source=source.removesuffix(":cached"))
-    elif (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
-            and _coord_olat is not None
-            and _coord_origin_iata and _coord_origin_iata != origin):
-        _log(f"[resolved] {callsign}: skipping resolved-cache write — coord origin "
-             f"({_coord_origin_iata}) does not match final origin ({origin})")
-    elif (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
-            and not _has_local_endpoint(origin, destination)):
-        _log(f"[resolved] {callsign}: skipping resolved-cache write — "
-             f"non-local route {_route_display(origin, destination)} must not persist 7 days")
-    elif (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
-            and _LOCAL_AIRPORTS
-            and origin.upper() in _LOCAL_AIRPORTS):
-        # Diagnostic (Issue B): a scheduled, complete, LOCAL-ORIGIN departure should
-        # always persist — condition 5 passes on locality and condition 6 passes unless
-        # a coord-iata mismatch (caught by the first elif).  The resolved-write logic is
-        # provably correct in tests for every modeled input, yet a few flights (AAL2040,
-        # SCX3001) carried stale entries live.  If this ever fires it pinpoints the
-        # real-world state we could not reproduce in mocks; logs the exact guard inputs.
-        _log(f"[resolved] {callsign}: NOT persisted (unexpected) — "
-             f"{_route_display(origin, destination)} src={source} "
-             f"coord_olat={_coord_olat is not None} coord_iata={_coord_origin_iata!r}")
+    # If both endpoints are now known for a scheduled airline, persist the final
+    # result so future sightings of the same daily flight skip the full API chain —
+    # even when individual upstream caches (e.g. OpenSky's 1-hour TTL) have expired.
+    _route_write_resolved_cache(
+        origin, destination, callsign,
+        _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata, source,
+    )
 
     # (The Phase-2 read-only shadow and the Phase-3 [flip-check] backstop that compared
     # _select() to the inline logic have both been retired now that _select() is the proven
@@ -3279,14 +3296,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # short-circuiting and override-partial completion.)
 
     if _trace is not None:
-        # diagnostic only: each source's raw result for the test-flight step grid
-        _trace["adsbdb_route"] = {"origin": adsbdb_origin, "destination": adsbdb_dest}
-        _trace["opensky"]      = {"origin": _sky_origin, "destination": _sky_dest}
-        # Report whichever AirLabs key actually produced a result as a unit — never mix
-        # key-1's origin with key-2's dest into a route neither key returned.
-        _al_tr_o, _al_tr_d = (al_origin, al_dest) if (al_origin or al_dest) else (al2_origin, al2_dest)
-        _trace["airlabs"]      = {"origin": _al_tr_o, "destination": _al_tr_d}
-        _trace["aeroapi"]      = {"origin": fa_origin, "destination": fa_dest}
+        _route_fill_trace(
+            _trace,
+            adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
+            sky_origin=_sky_origin, sky_dest=_sky_dest,
+            al_origin=al_origin, al_dest=al_dest,
+            al2_origin=al2_origin, al2_dest=al2_dest,
+            fa_origin=fa_origin, fa_dest=fa_dest,
+        )
 
     # Drop non-IATA airport codes (e.g. OpenSky FAA identifiers like "NV98") to "?" — real
     # IATA codes are 3 letters and a 4-char code doesn't fit the display.  Done at the
