@@ -2443,6 +2443,249 @@ def _route_last_resort_pick(origin, destination, source, *,
     return origin, destination, source
 
 
+def _route_aeroapi_tier(origin, destination, source, callsign, plane_lat, plane_lon,
+                        _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
+                        *, al_origin, al_dest, al2_origin, al2_dest, skip_paid, apis_disabled):
+    """§4 FlightAware AeroAPI (paid — last resort, capped at monthly limit).
+
+    Extracted byte-for-byte from get_route.  Returns the full write-set so the caller
+    reassigns: origin, destination, source, fa_origin, fa_dest, _cached_fa,
+    _coord_*, _coord_origin_iata, and _al_held_nonlocal (read later by §5).
+    fa_origin/fa_dest/_cached_fa are pre-initialised here and returned on EVERY path
+    (a prior NameError in the final-acceptance / source-label code is documented in-code)."""
+    # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
+    # Also runs when AirLabs returned a complete non-local route — AeroAPI is
+    # given a chance to supply a local-airport route instead.
+    # _al_held_nonlocal: True when AirLabs-1 or AirLabs-2 had a complete non-local
+    # route that was intentionally NOT committed to origin/destination (deferred for
+    # AeroAPI/FR24 verification — origin/dest are still empty in that path).
+    _al_held_nonlocal = (
+        _is_nonlocal(al_origin, al_dest)
+        or _is_nonlocal(al2_origin, al2_dest)
+    )
+    # Pre-initialize AeroAPI held-route vars at function scope.  They are otherwise
+    # assigned only inside the live-200 branch below, yet the final-acceptance block
+    # references them on every path.  Without this, any path that skips the AeroAPI
+    # live call (no key, cache hit, backoff, non-200, _skip_paid) raises NameError.
+    fa_origin = fa_dest = ""
+    _cached_fa = None   # likewise defined on every path: the source-label reconstruction
+                        # reads it even when the AeroAPI tier below is skipped entirely.
+    if (not (origin and destination) or _al_held_nonlocal) and FLIGHTAWARE_API_KEY and callsign and not apis_disabled and not os.path.exists(AEROAPI_DISABLED_FLAG) and not skip_paid:
+        _cached_fa = _cache_db_get_route(callsign, 'aeroapi')
+        if _cached_fa:
+            # Apply geometry plausibility even on cache hits — a 7-day-old AeroAPI
+            # result for the same callsign could be from a different prior flight leg.
+            _cached_plausible = not _cached_fa[0] or _route_plausible(
+                plane_lat, plane_lon, _cached_fa[2], _cached_fa[3],
+                _cached_fa[4], _cached_fa[5]
+            )
+            if _cached_plausible:
+                _fa_cached_origin = _cached_fa[0] or ""
+                _fa_cached_dest   = _cached_fa[1] or ""
+                # Surface the cached AeroAPI route to _select as a candidate (via
+                # fa_origin/fa_dest) for LOCAL routes too.  Previously only the non-local
+                # branch below bridged these, so a cached AeroAPI *local* route never became
+                # a candidate — _select then resolved the flight to "none" (or to a wrong
+                # non-local source).  _select's local-first tiering now picks it correctly.
+                fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
+                if (_al_held_nonlocal
+                        and _fa_cached_origin and _fa_cached_dest
+                        and _has_local_endpoint(_fa_cached_origin, _fa_cached_dest)):
+                    # AirLabs gave a complete non-local route; AeroAPI cache has a
+                    # local-airport route — prefer it.
+                    if al2_origin and al2_dest:
+                        _al_nl_o, _al_nl_d = al2_origin, al2_dest
+                    else:
+                        _al_nl_o, _al_nl_d = al_origin, al_dest
+                    _log(f"[aeroapi] {callsign}: AirLabs {_route_display(_al_nl_o, _al_nl_d)} non-local "
+                         f"— preferring AeroAPI local route {_route_display(_fa_cached_origin, _fa_cached_dest)}")
+                    origin      = _fa_cached_origin
+                    destination = _fa_cached_dest
+                    source = "aeroapi:cached"
+                else:
+                    _fa_cached_nonlocal = _is_nonlocal(_fa_cached_origin, _fa_cached_dest)
+                    if not _fa_cached_nonlocal:
+                        if not origin:
+                            origin = _fa_cached_origin
+                        if not destination:
+                            destination = _fa_cached_dest
+                        source = source or "aeroapi:cached"
+                    else:
+                        # Non-local cached AeroAPI route — surface it through the live
+                        # held vars (fa_origin/fa_dest) so the last-resort picker can
+                        # serve it, mirroring the live-call path.  (Without this a
+                        # cached non-local AeroAPI result was silently dropped.)
+                        fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
+                # Capture coords for the resolved-cache plausibility check.
+                # Use _fa_cached_origin (the AeroAPI-returned airport code) as the iata
+                # tag — NOT the 'origin' variable, which may be set by an earlier
+                # source (e.g. AirLabs).  The resolved-cache write guard checks that
+                # _coord_origin_iata == origin; a mismatch blocks a bad write.
+                if _cached_fa[2] is not None:
+                    _coord_olat, _coord_olon = _cached_fa[2], _cached_fa[3]
+                    _coord_dlat, _coord_dlon = _cached_fa[4], _cached_fa[5]
+                    _coord_origin_iata = _fa_cached_origin  # the airport these coords actually belong to
+            else:
+                _cache_db_delete_route(callsign, 'aeroapi')
+                _log(f"[aeroapi] {callsign}: cached {_cached_fa[0]}->{_cached_fa[1]} fails geometry check — busting stale entry")
+                _cached_fa = None  # signal that live call should fire this same poll
+            # No log for normal cache hits — suppress spam; live fetches log below
+        # Restore a persisted over-budget probe backoff (anchored across restarts) and
+        # clear it at the billing reset — same daily-probe model as the AirLabs keys.
+        _check_period_reset("aeroapi", AEROAPI_RESET_DAY)
+        _restore_persisted_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
+        if not _cached_fa and not _in_backoff("aeroapi"):
+            try:
+                r = _session.get(
+                    AEROAPI_URL.format(callsign.strip()),
+                    headers={"x-apikey": FLIGHTAWARE_API_KEY},
+                    timeout=10,
+                )
+                if r.status_code == 429:
+                    _set_backoff("aeroapi", secs=BACKOFF_RATE_LIMIT_SECS)
+                elif r.status_code == 402:
+                    # Payment required — over budget.  A rejected 402 isn't charged, so
+                    # back off ONE probe interval and re-test daily (budget frees at the
+                    # billing reset); persisted so restarts don't drift it — same model
+                    # as the AirLabs keys.
+                    _set_quota_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY,
+                                       "aeroapi", f"{callsign}: 402 — over budget / no credit remaining")
+                elif r.status_code in (401, 403):
+                    _set_backoff("aeroapi", secs=BACKOFF_AUTH_SECS)
+                    _log(f"[aeroapi] auth error ({r.status_code}) — check FLIGHTAWARE_API_KEY")
+                elif r.status_code == 200:
+                    flights = r.json().get("flights", [])
+                    # Prefer an en-route flight; fall back to most recent
+                    active = [f for f in flights if not f.get("actual_on")]
+                    active.sort(key=lambda f: f.get("scheduled_out") or f.get("actual_off") or "", reverse=True)
+                    f = active[0] if active else (flights[0] if flights else None)
+                    fa_origin = fa_dest = ""
+                    fa_olat = fa_olon = fa_dlat = fa_dlon = None
+                    if f:
+                        _fa_orig  = f.get("origin") or {}
+                        _fa_dest  = f.get("destination") or {}
+                        fa_origin = _fa_orig.get("code_iata", "") or ""
+                        fa_dest   = _fa_dest.get("code_iata", "") or ""
+                        fa_olat   = _fa_orig.get("latitude")
+                        fa_olon   = _fa_orig.get("longitude")
+                        fa_dlat   = _fa_dest.get("latitude")
+                        fa_dlon   = _fa_dest.get("longitude")
+                        _remember_airport(fa_origin, fa_olat, fa_olon)
+                        _remember_airport(fa_dest,   fa_dlat, fa_dlon)
+                    _aeroapi_increment()  # logs running spend
+                    if not (fa_origin or fa_dest):
+                        _log(f"[aeroapi] {callsign}: no flights returned")
+                    # When checking for a local-route alternative (_al_held_nonlocal),
+                    # use ROUTE_TTL_DEFAULT (1 hr) for empty results instead of ROUTE_MISS_TTL
+                    # (5 min) — the flight won't gain a local endpoint mid-flight, so
+                    # re-querying every 5 min would burn AeroAPI quota needlessly.
+                    _fa_miss_ttl = ROUTE_TTL_DEFAULT if _al_held_nonlocal else ROUTE_MISS_TTL
+                    _fa_is_nonlocal_cache = _is_nonlocal(fa_origin, fa_dest)
+                    # Non-local complete routes → ROUTE_MISS_TTL (5 min); they're almost
+                    # certainly wrong for this zone and must not persist.
+                    # Local or partial results → ROUTE_TTL_DEFAULT (1 hr).
+                    _fa_ttl = (
+                        ROUTE_MISS_TTL if _fa_is_nonlocal_cache
+                        else ROUTE_TTL_DEFAULT if (fa_origin or fa_dest)
+                        else _fa_miss_ttl
+                    )
+                    _cache_db_set_route(callsign, 'aeroapi',
+                                        fa_origin, fa_dest,
+                                        fa_olat, fa_olon, fa_dlat, fa_dlon,
+                                        int(time.time()) + _fa_ttl,
+                                        source="aeroapi")
+                    if fa_origin or fa_dest:
+                        fa_plausible = _route_plausible(plane_lat, plane_lon,
+                                                         fa_olat, fa_olon,
+                                                         fa_dlat, fa_dlon)
+                        if fa_plausible:
+                            # Paid APIs trust any plausible route — no origin-local restriction.
+                            _fa_applied   = False   # tracks whether AeroAPI route was actually adopted
+                            _fa_filled_dest = not destination
+                            # Compute non-local status once, before the branch split.  A
+                            # non-local AeroAPI route (neither endpoint local) is NEVER
+                            # committed to origin/destination — it is held for FR24 §5 /
+                            # final-acceptance instead (the no-cache-non-local rule).
+                            _fa_is_nonlocal = _is_nonlocal(fa_origin, fa_dest)
+                            if source and _fa_filled_dest and fa_dest:  # fa_dest guard — see AirLabs-1
+                                # A prior source set origin only; AeroAPI fills the missing
+                                # destination.  Only commit when the AeroAPI route keeps a
+                                # local endpoint — otherwise defer (never commit non-local).
+                                if _fa_is_nonlocal:
+                                    # AeroAPI's complete route is non-local — don't overwrite
+                                    # the prior origin.  Hold for FR24 / final-acceptance.
+                                    _log(f"[aeroapi] {callsign}: {_route_display(fa_origin, fa_dest)} non-local — deferring to FR24")
+                                elif fa_origin and origin and fa_origin.upper() != origin.upper():
+                                    _log(f"[aeroapi] origin conflict ({origin} vs {fa_origin}) — preferring AeroAPI complete route")
+                                    origin = fa_origin
+                                    destination = fa_dest
+                                    source = "aeroapi"
+                                    _fa_applied = True
+                                else:
+                                    if not origin:
+                                        origin = fa_origin
+                                    destination = fa_dest
+                                    source = f"{source}+aeroapi"
+                                    _fa_applied = True
+                            else:
+                                if (_al_held_nonlocal
+                                        and fa_origin and fa_dest
+                                        and _has_local_endpoint(fa_origin, fa_dest)):
+                                    # AirLabs returned a complete non-local route; AeroAPI
+                                    # has a local-airport route — prefer it.
+                                    origin      = fa_origin
+                                    destination = fa_dest
+                                    source = "aeroapi"
+                                    _fa_applied = True
+                                else:
+                                    if _fa_is_nonlocal:
+                                        # Non-local AeroAPI result — don't commit; hold for
+                                        # FR24 §5 to try, then final-acceptance picks best.
+                                        _log(f"[aeroapi] {callsign}: {_route_display(fa_origin, fa_dest)} non-local — deferring to FR24")
+                                    else:
+                                        if not origin:
+                                            origin = fa_origin
+                                            _fa_applied = True
+                                        if not destination:
+                                            destination = fa_dest
+                                            _fa_applied = True
+                                        source = source or "aeroapi"
+                            if _fa_applied:
+                                _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
+                            # Capture coords for the resolved-cache plausibility check.
+                            # Use fa_origin (the AeroAPI-returned airport code) as the
+                            # iata tag — NOT the 'origin' variable, which may be from
+                            # an earlier source (e.g. AirLabs).
+                            if fa_olat is not None:
+                                _coord_olat, _coord_olon = fa_olat, fa_olon
+                                _coord_dlat, _coord_dlon = fa_dlat, fa_dlon
+                                _coord_origin_iata = fa_origin  # the airport these coords actually belong to
+                        else:
+                            _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
+                            # Overwrite the route just cached above with a short negative
+                            # entry.  Otherwise the next poll re-reads it, the geometry
+                            # check busts+deletes it, and a fresh AeroAPI call fires again
+                            # (AeroAPI returns the same leg for minutes) — re-billing on a
+                            # loop.  The 5-min negative entry rate-limits the refetch; the
+                            # route self-heals on the next expiry.
+                            _cache_db_set_route(callsign, 'aeroapi', "", "", None, None, None, None,
+                                                int(time.time()) + ROUTE_MISS_TTL, source="aeroapi")
+                else:
+                    # Unexpected status (4xx/5xx other than explicitly handled codes) —
+                    # negatively cache for ROUTE_MISS_TTL to prevent per-poll retries.
+                    _log(f"[aeroapi] unexpected status {r.status_code} for {callsign} — negative caching")
+                    _cache_db_set_route(callsign, 'aeroapi',
+                                        "", "", None, None, None, None,
+                                        int(time.time()) + ROUTE_MISS_TTL,
+                                        source="aeroapi")
+            except Exception as e:
+                _log(f"[aeroapi] {callsign}: request error — {e}")
+        # else: in backoff — already logged when backoff was set
+    return (origin, destination, source, fa_origin, fa_dest, _cached_fa,
+            _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
+            _al_held_nonlocal)
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -2956,233 +3199,16 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _log(f"[airlabs-2] implausible route {al2_origin}->{al2_dest} rejected for {callsign}")
 
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
-    # Also runs when AirLabs returned a complete non-local route — AeroAPI is
-    # given a chance to supply a local-airport route instead.
-    # _al_held_nonlocal: True when AirLabs-1 or AirLabs-2 had a complete non-local
-    # route that was intentionally NOT committed to origin/destination (deferred for
-    # AeroAPI/FR24 verification — origin/dest are still empty in that path).
-    _al_held_nonlocal = (
-        _is_nonlocal(al_origin, al_dest)
-        or _is_nonlocal(al2_origin, al2_dest)
-    )
-    # Pre-initialize AeroAPI held-route vars at function scope.  They are otherwise
-    # assigned only inside the live-200 branch below, yet the final-acceptance block
-    # references them on every path.  Without this, any path that skips the AeroAPI
-    # live call (no key, cache hit, backoff, non-200, _skip_paid) raises NameError.
-    fa_origin = fa_dest = ""
-    _cached_fa = None   # likewise defined on every path: the source-label reconstruction
-                        # reads it even when the AeroAPI tier below is skipped entirely.
-    if (not (origin and destination) or _al_held_nonlocal) and FLIGHTAWARE_API_KEY and callsign and not _apis_disabled and not os.path.exists(AEROAPI_DISABLED_FLAG) and not _skip_paid:
-        _cached_fa = _cache_db_get_route(callsign, 'aeroapi')
-        if _cached_fa:
-            # Apply geometry plausibility even on cache hits — a 7-day-old AeroAPI
-            # result for the same callsign could be from a different prior flight leg.
-            _cached_plausible = not _cached_fa[0] or _route_plausible(
-                plane_lat, plane_lon, _cached_fa[2], _cached_fa[3],
-                _cached_fa[4], _cached_fa[5]
-            )
-            if _cached_plausible:
-                _fa_cached_origin = _cached_fa[0] or ""
-                _fa_cached_dest   = _cached_fa[1] or ""
-                # Surface the cached AeroAPI route to _select as a candidate (via
-                # fa_origin/fa_dest) for LOCAL routes too.  Previously only the non-local
-                # branch below bridged these, so a cached AeroAPI *local* route never became
-                # a candidate — _select then resolved the flight to "none" (or to a wrong
-                # non-local source).  _select's local-first tiering now picks it correctly.
-                fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
-                if (_al_held_nonlocal
-                        and _fa_cached_origin and _fa_cached_dest
-                        and _has_local_endpoint(_fa_cached_origin, _fa_cached_dest)):
-                    # AirLabs gave a complete non-local route; AeroAPI cache has a
-                    # local-airport route — prefer it.
-                    if al2_origin and al2_dest:
-                        _al_nl_o, _al_nl_d = al2_origin, al2_dest
-                    else:
-                        _al_nl_o, _al_nl_d = al_origin, al_dest
-                    _log(f"[aeroapi] {callsign}: AirLabs {_route_display(_al_nl_o, _al_nl_d)} non-local "
-                         f"— preferring AeroAPI local route {_route_display(_fa_cached_origin, _fa_cached_dest)}")
-                    origin      = _fa_cached_origin
-                    destination = _fa_cached_dest
-                    source = "aeroapi:cached"
-                else:
-                    _fa_cached_nonlocal = _is_nonlocal(_fa_cached_origin, _fa_cached_dest)
-                    if not _fa_cached_nonlocal:
-                        if not origin:
-                            origin = _fa_cached_origin
-                        if not destination:
-                            destination = _fa_cached_dest
-                        source = source or "aeroapi:cached"
-                    else:
-                        # Non-local cached AeroAPI route — surface it through the live
-                        # held vars (fa_origin/fa_dest) so the last-resort picker can
-                        # serve it, mirroring the live-call path.  (Without this a
-                        # cached non-local AeroAPI result was silently dropped.)
-                        fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
-                # Capture coords for the resolved-cache plausibility check.
-                # Use _fa_cached_origin (the AeroAPI-returned airport code) as the iata
-                # tag — NOT the 'origin' variable, which may be set by an earlier
-                # source (e.g. AirLabs).  The resolved-cache write guard checks that
-                # _coord_origin_iata == origin; a mismatch blocks a bad write.
-                if _cached_fa[2] is not None:
-                    _coord_olat, _coord_olon = _cached_fa[2], _cached_fa[3]
-                    _coord_dlat, _coord_dlon = _cached_fa[4], _cached_fa[5]
-                    _coord_origin_iata = _fa_cached_origin  # the airport these coords actually belong to
-            else:
-                _cache_db_delete_route(callsign, 'aeroapi')
-                _log(f"[aeroapi] {callsign}: cached {_cached_fa[0]}->{_cached_fa[1]} fails geometry check — busting stale entry")
-                _cached_fa = None  # signal that live call should fire this same poll
-            # No log for normal cache hits — suppress spam; live fetches log below
-        # Restore a persisted over-budget probe backoff (anchored across restarts) and
-        # clear it at the billing reset — same daily-probe model as the AirLabs keys.
-        _check_period_reset("aeroapi", AEROAPI_RESET_DAY)
-        _restore_persisted_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
-        if not _cached_fa and not _in_backoff("aeroapi"):
-            try:
-                r = _session.get(
-                    AEROAPI_URL.format(callsign.strip()),
-                    headers={"x-apikey": FLIGHTAWARE_API_KEY},
-                    timeout=10,
-                )
-                if r.status_code == 429:
-                    _set_backoff("aeroapi", secs=BACKOFF_RATE_LIMIT_SECS)
-                elif r.status_code == 402:
-                    # Payment required — over budget.  A rejected 402 isn't charged, so
-                    # back off ONE probe interval and re-test daily (budget frees at the
-                    # billing reset); persisted so restarts don't drift it — same model
-                    # as the AirLabs keys.
-                    _set_quota_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY,
-                                       "aeroapi", f"{callsign}: 402 — over budget / no credit remaining")
-                elif r.status_code in (401, 403):
-                    _set_backoff("aeroapi", secs=BACKOFF_AUTH_SECS)
-                    _log(f"[aeroapi] auth error ({r.status_code}) — check FLIGHTAWARE_API_KEY")
-                elif r.status_code == 200:
-                    flights = r.json().get("flights", [])
-                    # Prefer an en-route flight; fall back to most recent
-                    active = [f for f in flights if not f.get("actual_on")]
-                    active.sort(key=lambda f: f.get("scheduled_out") or f.get("actual_off") or "", reverse=True)
-                    f = active[0] if active else (flights[0] if flights else None)
-                    fa_origin = fa_dest = ""
-                    fa_olat = fa_olon = fa_dlat = fa_dlon = None
-                    if f:
-                        _fa_orig  = f.get("origin") or {}
-                        _fa_dest  = f.get("destination") or {}
-                        fa_origin = _fa_orig.get("code_iata", "") or ""
-                        fa_dest   = _fa_dest.get("code_iata", "") or ""
-                        fa_olat   = _fa_orig.get("latitude")
-                        fa_olon   = _fa_orig.get("longitude")
-                        fa_dlat   = _fa_dest.get("latitude")
-                        fa_dlon   = _fa_dest.get("longitude")
-                        _remember_airport(fa_origin, fa_olat, fa_olon)
-                        _remember_airport(fa_dest,   fa_dlat, fa_dlon)
-                    _aeroapi_increment()  # logs running spend
-                    if not (fa_origin or fa_dest):
-                        _log(f"[aeroapi] {callsign}: no flights returned")
-                    # When checking for a local-route alternative (_al_held_nonlocal),
-                    # use ROUTE_TTL_DEFAULT (1 hr) for empty results instead of ROUTE_MISS_TTL
-                    # (5 min) — the flight won't gain a local endpoint mid-flight, so
-                    # re-querying every 5 min would burn AeroAPI quota needlessly.
-                    _fa_miss_ttl = ROUTE_TTL_DEFAULT if _al_held_nonlocal else ROUTE_MISS_TTL
-                    _fa_is_nonlocal_cache = _is_nonlocal(fa_origin, fa_dest)
-                    # Non-local complete routes → ROUTE_MISS_TTL (5 min); they're almost
-                    # certainly wrong for this zone and must not persist.
-                    # Local or partial results → ROUTE_TTL_DEFAULT (1 hr).
-                    _fa_ttl = (
-                        ROUTE_MISS_TTL if _fa_is_nonlocal_cache
-                        else ROUTE_TTL_DEFAULT if (fa_origin or fa_dest)
-                        else _fa_miss_ttl
-                    )
-                    _cache_db_set_route(callsign, 'aeroapi',
-                                        fa_origin, fa_dest,
-                                        fa_olat, fa_olon, fa_dlat, fa_dlon,
-                                        int(time.time()) + _fa_ttl,
-                                        source="aeroapi")
-                    if fa_origin or fa_dest:
-                        fa_plausible = _route_plausible(plane_lat, plane_lon,
-                                                         fa_olat, fa_olon,
-                                                         fa_dlat, fa_dlon)
-                        if fa_plausible:
-                            # Paid APIs trust any plausible route — no origin-local restriction.
-                            _fa_applied   = False   # tracks whether AeroAPI route was actually adopted
-                            _fa_filled_dest = not destination
-                            # Compute non-local status once, before the branch split.  A
-                            # non-local AeroAPI route (neither endpoint local) is NEVER
-                            # committed to origin/destination — it is held for FR24 §5 /
-                            # final-acceptance instead (the no-cache-non-local rule).
-                            _fa_is_nonlocal = _is_nonlocal(fa_origin, fa_dest)
-                            if source and _fa_filled_dest and fa_dest:  # fa_dest guard — see AirLabs-1
-                                # A prior source set origin only; AeroAPI fills the missing
-                                # destination.  Only commit when the AeroAPI route keeps a
-                                # local endpoint — otherwise defer (never commit non-local).
-                                if _fa_is_nonlocal:
-                                    # AeroAPI's complete route is non-local — don't overwrite
-                                    # the prior origin.  Hold for FR24 / final-acceptance.
-                                    _log(f"[aeroapi] {callsign}: {_route_display(fa_origin, fa_dest)} non-local — deferring to FR24")
-                                elif fa_origin and origin and fa_origin.upper() != origin.upper():
-                                    _log(f"[aeroapi] origin conflict ({origin} vs {fa_origin}) — preferring AeroAPI complete route")
-                                    origin = fa_origin
-                                    destination = fa_dest
-                                    source = "aeroapi"
-                                    _fa_applied = True
-                                else:
-                                    if not origin:
-                                        origin = fa_origin
-                                    destination = fa_dest
-                                    source = f"{source}+aeroapi"
-                                    _fa_applied = True
-                            else:
-                                if (_al_held_nonlocal
-                                        and fa_origin and fa_dest
-                                        and _has_local_endpoint(fa_origin, fa_dest)):
-                                    # AirLabs returned a complete non-local route; AeroAPI
-                                    # has a local-airport route — prefer it.
-                                    origin      = fa_origin
-                                    destination = fa_dest
-                                    source = "aeroapi"
-                                    _fa_applied = True
-                                else:
-                                    if _fa_is_nonlocal:
-                                        # Non-local AeroAPI result — don't commit; hold for
-                                        # FR24 §5 to try, then final-acceptance picks best.
-                                        _log(f"[aeroapi] {callsign}: {_route_display(fa_origin, fa_dest)} non-local — deferring to FR24")
-                                    else:
-                                        if not origin:
-                                            origin = fa_origin
-                                            _fa_applied = True
-                                        if not destination:
-                                            destination = fa_dest
-                                            _fa_applied = True
-                                        source = source or "aeroapi"
-                            if _fa_applied:
-                                _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
-                            # Capture coords for the resolved-cache plausibility check.
-                            # Use fa_origin (the AeroAPI-returned airport code) as the
-                            # iata tag — NOT the 'origin' variable, which may be from
-                            # an earlier source (e.g. AirLabs).
-                            if fa_olat is not None:
-                                _coord_olat, _coord_olon = fa_olat, fa_olon
-                                _coord_dlat, _coord_dlon = fa_dlat, fa_dlon
-                                _coord_origin_iata = fa_origin  # the airport these coords actually belong to
-                        else:
-                            _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
-                            # Overwrite the route just cached above with a short negative
-                            # entry.  Otherwise the next poll re-reads it, the geometry
-                            # check busts+deletes it, and a fresh AeroAPI call fires again
-                            # (AeroAPI returns the same leg for minutes) — re-billing on a
-                            # loop.  The 5-min negative entry rate-limits the refetch; the
-                            # route self-heals on the next expiry.
-                            _cache_db_set_route(callsign, 'aeroapi', "", "", None, None, None, None,
-                                                int(time.time()) + ROUTE_MISS_TTL, source="aeroapi")
-                else:
-                    # Unexpected status (4xx/5xx other than explicitly handled codes) —
-                    # negatively cache for ROUTE_MISS_TTL to prevent per-poll retries.
-                    _log(f"[aeroapi] unexpected status {r.status_code} for {callsign} — negative caching")
-                    _cache_db_set_route(callsign, 'aeroapi',
-                                        "", "", None, None, None, None,
-                                        int(time.time()) + ROUTE_MISS_TTL,
-                                        source="aeroapi")
-            except Exception as e:
-                _log(f"[aeroapi] {callsign}: request error — {e}")
-        # else: in backoff — already logged when backoff was set
+    # Extracted to _route_aeroapi_tier (byte-identical).  fa_origin/fa_dest/_cached_fa
+    # and _al_held_nonlocal are pre-initialised inside and returned on EVERY path;
+    # _al_held_nonlocal is read by §5 below.
+    (origin, destination, source, fa_origin, fa_dest, _cached_fa,
+     _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
+     _al_held_nonlocal) = _route_aeroapi_tier(
+        origin, destination, source, callsign, plane_lat, plane_lon,
+        _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
+        al_origin=al_origin, al_dest=al_dest, al2_origin=al2_origin, al2_dest=al2_dest,
+        skip_paid=_skip_paid, apis_disabled=_apis_disabled)
 
     origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
     destination = destination if destination.upper() not in BLANK_FIELDS else ""
