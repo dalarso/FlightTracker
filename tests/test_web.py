@@ -29,13 +29,21 @@ import usage_data       # noqa: E402
 import scoreboard_data  # noqa: E402
 
 
+_OPTIONAL_WEB_DEPS = {"flask", "waitress", "werkzeug", "requests"}
+
+
 def _load_server():
-    """Import the Flask app lazily; skip app-level tests if it can't import here."""
+    """Import the Flask app.  Skip ONLY when an optional third-party web dep is genuinely
+    absent (e.g. flask not installed in a minimal env); re-raise every other import error —
+    a SyntaxError, a renamed/removed symbol, or a missing PROJECT module must FAIL the build,
+    not silently SKIP ~60 web tests to a green CI."""
     try:
         import server
         return server
-    except Exception as exc:  # pragma: no cover - env-dependent
-        raise unittest.SkipTest(f"server import unavailable: {exc}")
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").split(".")[0] in _OPTIONAL_WEB_DEPS:
+            raise unittest.SkipTest(f"optional web dependency missing: {exc.name}")
+        raise
 
 
 # ── stats_data: temp DB matching overhead's sightings/api_calls schema ──────────

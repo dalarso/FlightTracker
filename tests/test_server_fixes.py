@@ -31,12 +31,20 @@ for _p in (str(_WEB), str(_ROOT)):
         sys.path.insert(0, _p)
 
 
+_OPTIONAL_WEB_DEPS = {"flask", "waitress", "werkzeug", "requests"}
+
+
 def _load_server():
+    # Skip only when an optional web dep is genuinely absent; re-raise any other import error
+    # (SyntaxError / renamed symbol / missing project module) so a broken server.py FAILS
+    # rather than silently SKIPping every web test to a green CI.
     try:
         import server
         return server
-    except Exception as exc:  # pragma: no cover - env-dependent
-        raise unittest.SkipTest(f"server import unavailable: {exc}")
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").split(".")[0] in _OPTIONAL_WEB_DEPS:
+            raise unittest.SkipTest(f"optional web dependency missing: {exc.name}")
+        raise
 
 
 _CSRF = {"X-Requested-With": "FlightTracker"}

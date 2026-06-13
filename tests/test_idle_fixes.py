@@ -27,22 +27,24 @@ if str(_ROOT) not in sys.path:
 
 os.environ.setdefault("FT_DATA_DIR", tempfile.mkdtemp(prefix="ft-test-"))
 
-for _m, _v in (("rgbmatrix", mock.MagicMock()), ("rgbmatrix.graphics", mock.MagicMock()),
-               ("RPi", mock.MagicMock()), ("RPi.GPIO", mock.MagicMock())):
-    sys.modules.setdefault(_m, _v)
-
-
-# setup.colours builds its palette from rgbmatrix.graphics.Color, and
-# loading_pulse does real arithmetic (brightness * BLINKER_COLOUR.red).  Give the
-# stubbed Color real numeric .red/.green/.blue so that math produces numbers, not
-# MagicMocks, and our "pixel is lit" assertions are meaningful.
+# setup.colours builds its palette from rgbmatrix.graphics.Color, and loading_pulse does real
+# arithmetic (brightness * BLINKER_COLOUR.red), so the stubbed Color must carry real numeric
+# .red/.green/.blue for the "pixel is lit" assertions to be meaningful.
 class _Color:
     def __init__(self, r=0, g=0, b=0):
         self.red, self.green, self.blue = r, g, b
 
 
-sys.modules["rgbmatrix"].graphics.Color = _Color
-sys.modules["rgbmatrix.graphics"].Color = _Color
+# setdefault (never in-place assignment) + a real Color, so we don't swap conftest's shared
+# stub out from under the rest of the suite: under pytest conftest already installed a numeric
+# Color and wins here; standalone (no conftest) this real-Color stub is installed instead.
+_graphics = mock.MagicMock(name="rgbmatrix.graphics")
+_graphics.Color = _Color
+_rgbmatrix = mock.MagicMock(name="rgbmatrix")
+_rgbmatrix.graphics = _graphics
+for _m, _v in (("rgbmatrix", _rgbmatrix), ("rgbmatrix.graphics", _graphics),
+               ("RPi", mock.MagicMock()), ("RPi.GPIO", mock.MagicMock())):
+    sys.modules.setdefault(_m, _v)
 
 from scenes.loadingpulse import (  # noqa: E402
     LoadingPulseScene,
