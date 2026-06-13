@@ -1177,19 +1177,21 @@ class LastResortTierStrictness(unittest.TestCase):
     def _pick(self):
         # _has_local_endpoint -> True makes LAS local (tier 1 = local partial) without needing
         # the _LOCAL_AIRPORTS harness; _fr24_route_plausible -> True keeps the candidate usable.
+        # The picker now reads/writes a _RouteCtx in place — build one with the same field
+        # values the old explicit-kwarg call used, invoke it, and read the result off ctx.
+        ctx = overhead._RouteCtx(
+            "abc123", "AAL1", "", 36.1, -115.1, "", "",  # hex, callsign, reg, lat, lon, vrs_o, vrs_d
+        )
+        ctx.origin, ctx.destination, ctx.source = "LAS", "", "opensky"   # committed local partial
+        ctx.adsbdb_origin, ctx.adsbdb_dest = "LAS", ""                   # SAME-tier rival candidate
+        ctx._adsbdb_src, ctx._sky_src = "adsbdb", "opensky"
+        ctx._al_src, ctx._al2_src = "airlabs", "airlabs2"
+        ctx._fr24_com_src = "fr24"
+        ctx._cached_fa = None
         with mock.patch.object(overhead, "_has_local_endpoint", return_value=True), \
              mock.patch.object(overhead, "_fr24_route_plausible", return_value=True):
-            return overhead._route_last_resort_pick(
-                "LAS", "", "opensky",                 # already-committed local partial (opensky)
-                al_origin="", al_dest="", al2_origin="", al2_dest="",
-                fa_origin="", fa_dest="",
-                fr24_com_origin="", fr24_com_dest="",
-                adsbdb_origin="LAS", adsbdb_dest="",  # SAME-tier (local partial) rival candidate
-                sky_origin="", sky_dest="",
-                plane_lat=36.1, plane_lon=-115.1, callsign="AAL1",
-                al_src="airlabs", al2_src="airlabs2", cached_fa=None,
-                fr24_com_src="fr24", adsbdb_src="adsbdb", sky_src="opensky",
-            )
+            overhead._route_last_resort_pick(ctx)
+        return ctx.origin, ctx.destination, ctx.source
 
     def test_same_tier_candidate_does_not_replace_committed_source(self):
         o, d, s = self._pick()

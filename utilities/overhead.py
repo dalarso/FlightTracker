@@ -12,6 +12,7 @@ import time
 import traceback
 import warnings
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -2208,161 +2209,149 @@ def _reconstruct_select_label(s, *, al_src, al2_src, cached_fa,
     return _lbl1(s)
 
 
-def _route_fill_trace(trace, *, adsbdb_origin, adsbdb_dest, sky_origin, sky_dest,
-                      al_origin, al_dest, al2_origin, al2_dest, fa_origin, fa_dest):
+def _route_fill_trace(ctx, trace):
     """Populate the diagnostic _trace dict with each source's raw result (test-flight grid)."""
-    trace["adsbdb_route"] = {"origin": adsbdb_origin, "destination": adsbdb_dest}
-    trace["opensky"]      = {"origin": sky_origin, "destination": sky_dest}
+    trace["adsbdb_route"] = {"origin": ctx.adsbdb_origin, "destination": ctx.adsbdb_dest}
+    trace["opensky"]      = {"origin": ctx._sky_origin, "destination": ctx._sky_dest}
     # Report whichever AirLabs key actually produced a result as a unit — never mix
     # key-1's origin with key-2's dest into a route neither key returned.
-    _al_tr_o, _al_tr_d = (al_origin, al_dest) if (al_origin or al_dest) else (al2_origin, al2_dest)
+    _al_tr_o, _al_tr_d = (ctx.al_origin, ctx.al_dest) if (ctx.al_origin or ctx.al_dest) else (ctx.al2_origin, ctx.al2_dest)
     trace["airlabs"]      = {"origin": _al_tr_o, "destination": _al_tr_d}
-    trace["aeroapi"]      = {"origin": fa_origin, "destination": fa_dest}
+    trace["aeroapi"]      = {"origin": ctx.fa_origin, "destination": ctx.fa_dest}
 
 
-def _route_write_resolved_cache(origin, destination, callsign,
-                                coord_olat, coord_olon, coord_dlat, coord_dlon,
-                                coord_origin_iata, source):
+def _route_write_resolved_cache(ctx):
     """Persist the final resolved route for a scheduled airline so future sightings of the
     same daily flight skip the full API chain.  Coords are required only for NON-local
     origins (whose read does a geometry check); a LOCAL-origin route is trusted without
-    them.  The elif branches are diagnostics for cases that deliberately do NOT persist."""
-    if (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+    them.  The elif branches are diagnostics for cases that deliberately do NOT persist.
+    Read-only on ctx — persists via _cache_db_set_route."""
+    if (ctx.origin and ctx.destination and ctx.callsign
+            and _route_ttl(ctx.callsign) == ROUTE_TTL_SCHEDULED
             and _LOCAL_AIRPORTS                       # GLOBAL mode (no home) skips the 7-day cache
-            and _has_local_endpoint(origin, destination)
-            and (origin.upper() in _LOCAL_AIRPORTS or coord_olat is not None)
-            and (not coord_origin_iata or coord_origin_iata == origin)):  # guard mismatch
-        _cache_db_set_route(callsign, 'resolved',
-                            origin, destination,
-                            coord_olat, coord_olon, coord_dlat, coord_dlon,
+            and _has_local_endpoint(ctx.origin, ctx.destination)
+            and (ctx.origin.upper() in _LOCAL_AIRPORTS or ctx._coord_olat is not None)
+            and (not ctx._coord_origin_iata or ctx._coord_origin_iata == ctx.origin)):  # guard mismatch
+        _cache_db_set_route(ctx.callsign, 'resolved',
+                            ctx.origin, ctx.destination,
+                            ctx._coord_olat, ctx._coord_olon, ctx._coord_dlat, ctx._coord_dlon,
                             int(time.time()) + ROUTE_TTL_SCHEDULED,
-                            source=source.removesuffix(":cached"))
-    elif (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
-            and coord_olat is not None
-            and coord_origin_iata and coord_origin_iata != origin):
-        _log(f"[resolved] {callsign}: skipping resolved-cache write — coord origin "
-             f"({coord_origin_iata}) does not match final origin ({origin})")
-    elif (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
-            and not _has_local_endpoint(origin, destination)):
-        _log(f"[resolved] {callsign}: skipping resolved-cache write — "
-             f"non-local route {_route_display(origin, destination)} must not persist 7 days")
-    elif (origin and destination and callsign
-            and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED
+                            source=ctx.source.removesuffix(":cached"))
+    elif (ctx.origin and ctx.destination and ctx.callsign
+            and _route_ttl(ctx.callsign) == ROUTE_TTL_SCHEDULED
+            and ctx._coord_olat is not None
+            and ctx._coord_origin_iata and ctx._coord_origin_iata != ctx.origin):
+        _log(f"[resolved] {ctx.callsign}: skipping resolved-cache write — coord origin "
+             f"({ctx._coord_origin_iata}) does not match final origin ({ctx.origin})")
+    elif (ctx.origin and ctx.destination and ctx.callsign
+            and _route_ttl(ctx.callsign) == ROUTE_TTL_SCHEDULED
+            and not _has_local_endpoint(ctx.origin, ctx.destination)):
+        _log(f"[resolved] {ctx.callsign}: skipping resolved-cache write — "
+             f"non-local route {_route_display(ctx.origin, ctx.destination)} must not persist 7 days")
+    elif (ctx.origin and ctx.destination and ctx.callsign
+            and _route_ttl(ctx.callsign) == ROUTE_TTL_SCHEDULED
             and _LOCAL_AIRPORTS
-            and origin.upper() in _LOCAL_AIRPORTS):
+            and ctx.origin.upper() in _LOCAL_AIRPORTS):
         # Diagnostic (Issue B): a scheduled, complete, LOCAL-ORIGIN departure should
         # always persist — condition 5 passes on locality and condition 6 passes unless
         # a coord-iata mismatch (caught by the first elif).  The resolved-write logic is
         # provably correct in tests for every modeled input, yet a few flights (AAL2040,
         # SCX3001) carried stale entries live.  If this ever fires it pinpoints the
         # real-world state we could not reproduce in mocks; logs the exact guard inputs.
-        _log(f"[resolved] {callsign}: NOT persisted (unexpected) — "
-             f"{_route_display(origin, destination)} src={source} "
-             f"coord_olat={coord_olat is not None} coord_iata={coord_origin_iata!r}")
+        _log(f"[resolved] {ctx.callsign}: NOT persisted (unexpected) — "
+             f"{_route_display(ctx.origin, ctx.destination)} src={ctx.source} "
+             f"coord_olat={ctx._coord_olat is not None} coord_iata={ctx._coord_origin_iata!r}")
 
 
-def _route_record_paid_miss(callsign, *, need_airlabs, skip_paid, apis_disabled,
-                            al_origin, al_dest, al2_origin, al2_dest, fa_origin, fa_dest):
+def _route_record_paid_miss(ctx):
     """Suppress the paid APIs for ROUTE_PAID_MISS_TTL when the PAID chain (AirLabs-1/-2,
     AeroAPI) was actually consulted yet returned nothing — independent of whether a FREE
     source later filled the route.  Recomputes per-API eligibility from the live flags so a
     paid-miss isn't recorded for a flight whose paid tier was short-circuited by a cheaper
-    source.  FR24 is FREE and intentionally excluded from 'paid returned nothing'."""
+    source.  FR24 is FREE and intentionally excluded from 'paid returned nothing'.
+    Read-only on ctx — persists via _cache_db_set_paid_miss."""
     airlabs_eligible = (
-        bool(AIRLABS_API_KEY) and not apis_disabled
+        bool(AIRLABS_API_KEY) and not ctx._apis_disabled
         and not os.path.exists(AIRLABS_DISABLED_FLAG)
-        and not skip_paid and not _in_backoff("airlabs")
+        and not ctx._skip_paid and not _in_backoff("airlabs")
     )
     airlabs2_eligible = (
-        bool(AIRLABS_API_KEY_2) and not apis_disabled
+        bool(AIRLABS_API_KEY_2) and not ctx._apis_disabled
         and not os.path.exists(AIRLABS2_DISABLED_FLAG)
-        and not skip_paid and not _in_backoff("airlabs2")
+        and not ctx._skip_paid and not _in_backoff("airlabs2")
     )
     aeroapi_eligible = (
-        bool(FLIGHTAWARE_API_KEY) and not apis_disabled
+        bool(FLIGHTAWARE_API_KEY) and not ctx._apis_disabled
         and not os.path.exists(AEROAPI_DISABLED_FLAG)
-        and not skip_paid and not _in_backoff("aeroapi")
+        and not ctx._skip_paid and not _in_backoff("aeroapi")
     )
-    paid_returned_nothing = not (al_origin or al_dest or al2_origin or al2_dest
-                                 or fa_origin or fa_dest)
-    if (paid_returned_nothing and need_airlabs and callsign
+    paid_returned_nothing = not (ctx.al_origin or ctx.al_dest or ctx.al2_origin or ctx.al2_dest
+                                 or ctx.fa_origin or ctx.fa_dest)
+    if (paid_returned_nothing and ctx._need_airlabs and ctx.callsign
             and (airlabs_eligible or airlabs2_eligible)
             and aeroapi_eligible):
-        _cache_db_set_paid_miss(callsign)
-        _log(f"[route] {callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
+        _cache_db_set_paid_miss(ctx.callsign)
+        _log(f"[route] {ctx.callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
 
 
-def _route_ga_crosscheck(*, fr24_src, is_n_number, fr24_origin, fr24_dest,
-                         adsbdb_origin, adsbdb_dest, sky_origin, sky_dest,
-                         callsign, registration):
+def _route_ga_crosscheck(ctx):
     """GA cross-check: record whether the free APIs (adsbdb / OpenSky) agreed with FR24
-    ground truth for N-number aircraft.  Read-only — builds accuracy stats, mutates no
-    caller state."""
-    _fr24_live = (fr24_src == "fr24")   # True = live call this invocation
-    if is_n_number and fr24_origin and fr24_dest and _fr24_live:
-        _fr24_route_str = f"{fr24_origin}->{fr24_dest}"
+    ground truth for N-number aircraft.  Read-only on ctx — builds accuracy stats, mutates
+    no ctx state."""
+    _fr24_live = (ctx._fr24_src == "fr24")   # True = live call this invocation
+    if ctx._is_n_number and ctx._fr24_origin and ctx._fr24_dest and _fr24_live:
+        _fr24_route_str = f"{ctx._fr24_origin}->{ctx._fr24_dest}"
 
-        if adsbdb_origin or adsbdb_dest:
-            _ga_db_route = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
+        if ctx.adsbdb_origin or ctx.adsbdb_dest:
+            _ga_db_route = f"{ctx.adsbdb_origin or '?'}->{ctx.adsbdb_dest or '?'}"
             _ga_db_matched = (
-                (adsbdb_origin or "").upper() == fr24_origin.upper()
-                and (adsbdb_dest or "").upper() == fr24_dest.upper()
+                (ctx.adsbdb_origin or "").upper() == ctx._fr24_origin.upper()
+                and (ctx.adsbdb_dest or "").upper() == ctx._fr24_dest.upper()
             )
             if _ga_db_matched:
-                _log(f"[adsbdb] {callsign} ({registration}): FR24 confirmed adsbdb GA route ({_fr24_route_str})")
+                _log(f"[adsbdb] {ctx.callsign} ({ctx.registration}): FR24 confirmed adsbdb GA route ({_fr24_route_str})")
             else:
-                _log(f"[adsbdb] {callsign} ({registration}): FR24 overrode adsbdb — was {_ga_db_route}, FR24 has {_fr24_route_str}")
-            _record_ga_free_api_check(registration, callsign,
+                _log(f"[adsbdb] {ctx.callsign} ({ctx.registration}): FR24 overrode adsbdb — was {_ga_db_route}, FR24 has {_fr24_route_str}")
+            _record_ga_free_api_check(ctx.registration, ctx.callsign,
                                       "adsbdb", _ga_db_route, _fr24_route_str, _ga_db_matched)
 
-        if sky_origin or sky_dest:
-            _ga_sky_route = f"{sky_origin or '?'}->{sky_dest or '?'}"
+        if ctx._sky_origin or ctx._sky_dest:
+            _ga_sky_route = f"{ctx._sky_origin or '?'}->{ctx._sky_dest or '?'}"
             _ga_sky_matched = (
-                (sky_origin or "").upper() == fr24_origin.upper()
-                and (sky_dest or "").upper() == fr24_dest.upper()
+                (ctx._sky_origin or "").upper() == ctx._fr24_origin.upper()
+                and (ctx._sky_dest or "").upper() == ctx._fr24_dest.upper()
             )
             if _ga_sky_matched:
-                _log(f"[opensky] {callsign} ({registration}): FR24 confirmed OpenSky GA route ({_fr24_route_str})")
+                _log(f"[opensky] {ctx.callsign} ({ctx.registration}): FR24 confirmed OpenSky GA route ({_fr24_route_str})")
             else:
-                _log(f"[opensky] {callsign} ({registration}): FR24 overrode OpenSky — was {_ga_sky_route}, FR24 has {_fr24_route_str}")
-            _record_ga_free_api_check(registration, callsign,
+                _log(f"[opensky] {ctx.callsign} ({ctx.registration}): FR24 overrode OpenSky — was {_ga_sky_route}, FR24 has {_fr24_route_str}")
+            _record_ga_free_api_check(ctx.registration, ctx.callsign,
                                       "opensky", _ga_sky_route, _fr24_route_str, _ga_sky_matched)
 
 
-def _route_adsbdb_crosscheck(*, adsbdb_commercial, adsbdb_origin, adsbdb_dest,
-                             origin, destination, source, callsign):
+def _route_adsbdb_crosscheck(ctx):
     """Cross-check log for commercial flights where adsbdb had data — report whether the
-    paid APIs confirmed or overrode it.  Read-only — builds accuracy stats, mutates no
-    caller state."""
-    if (adsbdb_commercial and (adsbdb_origin or adsbdb_dest) and (origin or destination)
-            and "fr24" not in (source or "")
-            and source not in ("adsbdb", "opensky", "adsbdb+opensky")):
-        _db_route   = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
-        _paid_route = f"{origin or '?'}->{destination or '?'}"
-        _matched    = ((adsbdb_origin or "").upper() == (origin or "").upper()
-                       and (adsbdb_dest or "").upper() == (destination or "").upper())
+    paid APIs confirmed or overrode it.  Read-only on ctx — builds accuracy stats, mutates
+    no ctx state."""
+    if (ctx._adsbdb_commercial and (ctx.adsbdb_origin or ctx.adsbdb_dest) and (ctx.origin or ctx.destination)
+            and "fr24" not in (ctx.source or "")
+            and ctx.source not in ("adsbdb", "opensky", "adsbdb+opensky")):
+        _db_route   = f"{ctx.adsbdb_origin or '?'}->{ctx.adsbdb_dest or '?'}"
+        _paid_route = f"{ctx.origin or '?'}->{ctx.destination or '?'}"
+        _matched    = ((ctx.adsbdb_origin or "").upper() == (ctx.origin or "").upper()
+                       and (ctx.adsbdb_dest or "").upper() == (ctx.destination or "").upper())
         # Only log on the first (live) resolution — suppress on cached repeat polls
         # where the route is already known and the cross-check adds no new information.
-        _source_is_cached = bool(source) and source.endswith(":cached")
+        _source_is_cached = bool(ctx.source) and ctx.source.endswith(":cached")
         if not _source_is_cached:
             if _matched:
-                _log(f"[adsbdb] {callsign}: paid APIs confirmed adsbdb route ({_paid_route})")
+                _log(f"[adsbdb] {ctx.callsign}: paid APIs confirmed adsbdb route ({_paid_route})")
             else:
-                _log(f"[adsbdb] {callsign}: paid APIs overrode adsbdb — was {_db_route}, now {_paid_route}")
-        _record_free_api_check(callsign, _db_route, _paid_route, _matched)
+                _log(f"[adsbdb] {ctx.callsign}: paid APIs overrode adsbdb — was {_db_route}, now {_paid_route}")
+        _record_free_api_check(ctx.callsign, _db_route, _paid_route, _matched)
 
 
-def _route_last_resort_pick(origin, destination, source, *,
-                            al_origin, al_dest, al2_origin, al2_dest,
-                            fa_origin, fa_dest,
-                            fr24_com_origin, fr24_com_dest,
-                            adsbdb_origin, adsbdb_dest, sky_origin, sky_dest,
-                            plane_lat, plane_lon, callsign,
-                            al_src, al2_src, cached_fa,
-                            fr24_com_src, adsbdb_src, sky_src):
+def _route_last_resort_pick(ctx):
     """Last-resort selection: walk the full hierarchy for any usable route.
 
     Local routes already committed inline and short-circuited.  If we're still
@@ -2372,30 +2361,30 @@ def _route_last_resort_pick(origin, destination, source, *,
     DBs.  Candidates are re-validated for geometry, then ranked by
     (tier, SOURCE_PRIORITY).  Reached only as a last resort; result is short-TTL
     and never written to the resolved cache (no coordinates captured), so an
-    unreliable guess can't persist.  Returns (origin, destination, source)."""
-    if not (origin and destination):
+    unreliable guess can't persist.  Writes ctx.origin/destination/source in place."""
+    if not (ctx.origin and ctx.destination):
         # Candidates include PARTIALS (origin OR dest) so a LOCAL partial — e.g.
         # OpenSky finding only the departure airport (LAS->?) — competes against and,
         # via the tier sort below, BEATS a stale non-local complete (e.g. a previous
         # leg SYR->CHS) returned by another source.  Geometry filtering still applies.
         _cands = []
-        if al_origin or al_dest:
-            _cands.append(("airlabs", al_origin, al_dest))
-        if al2_origin or al2_dest:
-            _cands.append(("airlabs2", al2_origin, al2_dest))
-        if fa_origin or fa_dest:
-            _cands.append(("aeroapi", fa_origin, fa_dest))
-        if fr24_com_origin or fr24_com_dest:
-            _cands.append(("fr24", fr24_com_origin, fr24_com_dest))
+        if ctx.al_origin or ctx.al_dest:
+            _cands.append(("airlabs", ctx.al_origin, ctx.al_dest))
+        if ctx.al2_origin or ctx.al2_dest:
+            _cands.append(("airlabs2", ctx.al2_origin, ctx.al2_dest))
+        if ctx.fa_origin or ctx.fa_dest:
+            _cands.append(("aeroapi", ctx.fa_origin, ctx.fa_dest))
+        if ctx._fr24_com_origin or ctx._fr24_com_dest:
+            _cands.append(("fr24", ctx._fr24_com_origin, ctx._fr24_com_dest))
         # Consensus of the two free feeds (both COMPLETE and agreeing) is the
         # strongest free signal; for commercial these were recorded but deferred.
-        if (adsbdb_origin and sky_origin and adsbdb_origin.upper() == sky_origin.upper()
-                and adsbdb_dest and sky_dest and adsbdb_dest.upper() == sky_dest.upper()):
-            _cands.append(("adsbdb+opensky", adsbdb_origin, adsbdb_dest))
-        if adsbdb_origin or adsbdb_dest:
-            _cands.append(("adsbdb", adsbdb_origin, adsbdb_dest))
-        if sky_origin or sky_dest:
-            _cands.append(("opensky", sky_origin, sky_dest))
+        if (ctx.adsbdb_origin and ctx._sky_origin and ctx.adsbdb_origin.upper() == ctx._sky_origin.upper()
+                and ctx.adsbdb_dest and ctx._sky_dest and ctx.adsbdb_dest.upper() == ctx._sky_dest.upper()):
+            _cands.append(("adsbdb+opensky", ctx.adsbdb_origin, ctx.adsbdb_dest))
+        if ctx.adsbdb_origin or ctx.adsbdb_dest:
+            _cands.append(("adsbdb", ctx.adsbdb_origin, ctx.adsbdb_dest))
+        if ctx._sky_origin or ctx._sky_dest:
+            _cands.append(("opensky", ctx._sky_origin, ctx._sky_dest))
         # Re-validate geometry here.  A route an inline check already rejected as
         # implausible leaves its held vars set, so without this filter the picker
         # could resurrect and serve it — exactly the stale/wrong-leg ("random PHX")
@@ -2403,7 +2392,7 @@ def _route_last_resort_pick(origin, destination, source, *,
         # airport-coords table; airports it doesn't know get benefit of the doubt,
         # matching each source's own inline coordless behavior.
         _cands = [c for c in _cands
-                  if _fr24_route_plausible(plane_lat, plane_lon, c[1], c[2])]
+                  if _fr24_route_plausible(ctx.plane_lat, ctx.plane_lon, c[1], c[2])]
         if _cands:
             # Tier: 0 local-complete, 1 local-partial, 2 non-local-complete,
             # 3 non-local-partial.  A LOCAL endpoint outranks completeness (your
@@ -2417,127 +2406,124 @@ def _route_last_resort_pick(origin, destination, source, *,
             # STRICTLY better tier — so a held NON-LOCAL complete cannot clobber an
             # already-committed LOCAL partial (a known home endpoint beats a non-local
             # guess).  A LOCAL complete still upgrades a local partial.
-            _cur_tier = _route_tier(origin, destination) if (origin or destination) else 99
+            _cur_tier = _route_tier(ctx.origin, ctx.destination) if (ctx.origin or ctx.destination) else 99
             if _route_tier(_best[1], _best[2]) < _cur_tier:
                 _tier_label = ("local" if _has_local_endpoint(_best[1], _best[2])
                                else "non-local (no local found anywhere)")
-                origin, destination = _best[1], _best[2]
+                ctx.origin, ctx.destination = _best[1], _best[2]
                 # Preserve the :cached marker the picker otherwise drops — a cached
                 # last-resort route was served under a bare source name and looked live
                 # (e.g. a cached OpenSky NV98->? read as [route:opensky], not :cached).
                 _bs = _best[0]
-                if   _bs == "airlabs":  source = al_src
-                elif _bs == "airlabs2": source = al2_src
-                elif _bs == "aeroapi":  source = "aeroapi:cached" if cached_fa else "aeroapi"
-                elif _bs == "fr24":     source = fr24_com_src
-                elif _bs == "adsbdb":   source = adsbdb_src
-                elif _bs == "opensky":  source = sky_src
+                if   _bs == "airlabs":  ctx.source = ctx._al_src
+                elif _bs == "airlabs2": ctx.source = ctx._al2_src
+                elif _bs == "aeroapi":  ctx.source = "aeroapi:cached" if ctx._cached_fa else "aeroapi"
+                elif _bs == "fr24":     ctx.source = ctx._fr24_com_src
+                elif _bs == "adsbdb":   ctx.source = ctx._adsbdb_src
+                elif _bs == "opensky":  ctx.source = ctx._sky_src
                 elif _bs == "adsbdb+opensky":
-                    source = ("adsbdb+opensky:cached"
-                              if adsbdb_src.endswith(":cached") and sky_src.endswith(":cached")
-                              else "adsbdb+opensky")
-                else:                   source = _bs
-                _log(f"[route] {_airline_display(callsign)}: no committed local route — "
-                     f"serving {_tier_label} {_route_display(origin, destination)} from {source} "
+                    ctx.source = ("adsbdb+opensky:cached"
+                                  if ctx._adsbdb_src.endswith(":cached") and ctx._sky_src.endswith(":cached")
+                                  else "adsbdb+opensky")
+                else:                   ctx.source = _bs
+                _log(f"[route] {_airline_display(ctx.callsign)}: no committed local route — "
+                     f"serving {_tier_label} {_route_display(ctx.origin, ctx.destination)} from {ctx.source} "
                      f"(short-TTL; not written to resolved cache)")
-    return origin, destination, source
 
 
-def _route_aeroapi_tier(origin, destination, source, callsign, plane_lat, plane_lon,
-                        _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
-                        *, al_origin, al_dest, al2_origin, al2_dest, skip_paid, apis_disabled):
+def _route_aeroapi_tier(ctx):
     """§4 FlightAware AeroAPI (paid — last resort, capped at monthly limit).
 
-    Extracted byte-for-byte from get_route.  Returns the full write-set so the caller
-    reassigns: origin, destination, source, fa_origin, fa_dest, _cached_fa,
-    _coord_*, _coord_origin_iata, and _al_held_nonlocal (read later by §5).
-    fa_origin/fa_dest/_cached_fa are pre-initialised here and returned on EVERY path
+    Extracted byte-for-byte from get_route.  Reads/writes ctx in place: ctx.origin,
+    ctx.destination, ctx.source, ctx.fa_origin, ctx.fa_dest, ctx._cached_fa, ctx._coord_*,
+    ctx._coord_origin_iata, and ctx._al_held_nonlocal (read later by §5).
+    ctx.fa_origin/fa_dest/_cached_fa are (re)initialised here and written on EVERY path
     (a prior NameError in the final-acceptance / source-label code is documented in-code)."""
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
     # Also runs when AirLabs returned a complete non-local route — AeroAPI is
     # given a chance to supply a local-airport route instead.
-    # _al_held_nonlocal: True when AirLabs-1 or AirLabs-2 had a complete non-local
+    # ctx._al_held_nonlocal: True when AirLabs-1 or AirLabs-2 had a complete non-local
     # route that was intentionally NOT committed to origin/destination (deferred for
     # AeroAPI/FR24 verification — origin/dest are still empty in that path).
-    _al_held_nonlocal = (
-        _is_nonlocal(al_origin, al_dest)
-        or _is_nonlocal(al2_origin, al2_dest)
+    ctx._al_held_nonlocal = (
+        _is_nonlocal(ctx.al_origin, ctx.al_dest)
+        or _is_nonlocal(ctx.al2_origin, ctx.al2_dest)
     )
-    # Pre-initialize AeroAPI held-route vars at function scope.  They are otherwise
-    # assigned only inside the live-200 branch below, yet the final-acceptance block
-    # references them on every path.  Without this, any path that skips the AeroAPI
-    # live call (no key, cache hit, backoff, non-200, _skip_paid) raises NameError.
-    fa_origin = fa_dest = ""
-    _cached_fa = None   # likewise defined on every path: the source-label reconstruction
-                        # reads it even when the AeroAPI tier below is skipped entirely.
-    if (not (origin and destination) or _al_held_nonlocal) and FLIGHTAWARE_API_KEY and callsign and not apis_disabled and not os.path.exists(AEROAPI_DISABLED_FLAG) and not skip_paid:
-        _cached_fa = _cache_db_get_route(callsign, 'aeroapi')
-        if _cached_fa:
+    # (Re)initialize AeroAPI held-route ctx fields.  They are otherwise written only
+    # inside the live-200 branch below, yet the final-acceptance block references them
+    # on every path.  Without this, any path that skips the AeroAPI live call (no key,
+    # cache hit, backoff, non-200, _skip_paid) would read stale/empty values.
+    ctx.fa_origin = ctx.fa_dest = ""
+    ctx._cached_fa = None   # likewise written on every path: the source-label reconstruction
+                            # reads it even when the AeroAPI tier below is skipped entirely.
+    if (not (ctx.origin and ctx.destination) or ctx._al_held_nonlocal) and FLIGHTAWARE_API_KEY and ctx.callsign and not ctx._apis_disabled and not os.path.exists(AEROAPI_DISABLED_FLAG) and not ctx._skip_paid:
+        ctx._cached_fa = _cache_db_get_route(ctx.callsign, 'aeroapi')
+        if ctx._cached_fa:
             # Apply geometry plausibility even on cache hits — a 7-day-old AeroAPI
             # result for the same callsign could be from a different prior flight leg.
-            _cached_plausible = not _cached_fa[0] or _route_plausible(
-                plane_lat, plane_lon, _cached_fa[2], _cached_fa[3],
-                _cached_fa[4], _cached_fa[5]
+            _cached_plausible = not ctx._cached_fa[0] or _route_plausible(
+                ctx.plane_lat, ctx.plane_lon, ctx._cached_fa[2], ctx._cached_fa[3],
+                ctx._cached_fa[4], ctx._cached_fa[5]
             )
             if _cached_plausible:
-                _fa_cached_origin = _cached_fa[0] or ""
-                _fa_cached_dest   = _cached_fa[1] or ""
+                _fa_cached_origin = ctx._cached_fa[0] or ""
+                _fa_cached_dest   = ctx._cached_fa[1] or ""
                 # Surface the cached AeroAPI route to _select as a candidate (via
                 # fa_origin/fa_dest) for LOCAL routes too.  Previously only the non-local
                 # branch below bridged these, so a cached AeroAPI *local* route never became
                 # a candidate — _select then resolved the flight to "none" (or to a wrong
                 # non-local source).  _select's local-first tiering now picks it correctly.
-                fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
-                if (_al_held_nonlocal
+                ctx.fa_origin, ctx.fa_dest = _fa_cached_origin, _fa_cached_dest
+                if (ctx._al_held_nonlocal
                         and _fa_cached_origin and _fa_cached_dest
                         and _has_local_endpoint(_fa_cached_origin, _fa_cached_dest)):
                     # AirLabs gave a complete non-local route; AeroAPI cache has a
                     # local-airport route — prefer it.
-                    if al2_origin and al2_dest:
-                        _al_nl_o, _al_nl_d = al2_origin, al2_dest
+                    if ctx.al2_origin and ctx.al2_dest:
+                        _al_nl_o, _al_nl_d = ctx.al2_origin, ctx.al2_dest
                     else:
-                        _al_nl_o, _al_nl_d = al_origin, al_dest
-                    _log(f"[aeroapi] {callsign}: AirLabs {_route_display(_al_nl_o, _al_nl_d)} non-local "
+                        _al_nl_o, _al_nl_d = ctx.al_origin, ctx.al_dest
+                    _log(f"[aeroapi] {ctx.callsign}: AirLabs {_route_display(_al_nl_o, _al_nl_d)} non-local "
                          f"— preferring AeroAPI local route {_route_display(_fa_cached_origin, _fa_cached_dest)}")
-                    origin      = _fa_cached_origin
-                    destination = _fa_cached_dest
-                    source = "aeroapi:cached"
+                    ctx.origin      = _fa_cached_origin
+                    ctx.destination = _fa_cached_dest
+                    ctx.source = "aeroapi:cached"
                 else:
                     _fa_cached_nonlocal = _is_nonlocal(_fa_cached_origin, _fa_cached_dest)
                     if not _fa_cached_nonlocal:
-                        if not origin:
-                            origin = _fa_cached_origin
-                        if not destination:
-                            destination = _fa_cached_dest
-                        source = source or "aeroapi:cached"
+                        if not ctx.origin:
+                            ctx.origin = _fa_cached_origin
+                        if not ctx.destination:
+                            ctx.destination = _fa_cached_dest
+                        ctx.source = ctx.source or "aeroapi:cached"
                     else:
                         # Non-local cached AeroAPI route — surface it through the live
                         # held vars (fa_origin/fa_dest) so the last-resort picker can
                         # serve it, mirroring the live-call path.  (Without this a
                         # cached non-local AeroAPI result was silently dropped.)
-                        fa_origin, fa_dest = _fa_cached_origin, _fa_cached_dest
+                        ctx.fa_origin, ctx.fa_dest = _fa_cached_origin, _fa_cached_dest
                 # Capture coords for the resolved-cache plausibility check.
                 # Use _fa_cached_origin (the AeroAPI-returned airport code) as the iata
                 # tag — NOT the 'origin' variable, which may be set by an earlier
                 # source (e.g. AirLabs).  The resolved-cache write guard checks that
                 # _coord_origin_iata == origin; a mismatch blocks a bad write.
-                if _cached_fa[2] is not None:
-                    _coord_olat, _coord_olon = _cached_fa[2], _cached_fa[3]
-                    _coord_dlat, _coord_dlon = _cached_fa[4], _cached_fa[5]
-                    _coord_origin_iata = _fa_cached_origin  # the airport these coords actually belong to
+                if ctx._cached_fa[2] is not None:
+                    ctx._coord_olat, ctx._coord_olon = ctx._cached_fa[2], ctx._cached_fa[3]
+                    ctx._coord_dlat, ctx._coord_dlon = ctx._cached_fa[4], ctx._cached_fa[5]
+                    ctx._coord_origin_iata = _fa_cached_origin  # the airport these coords actually belong to
             else:
-                _cache_db_delete_route(callsign, 'aeroapi')
-                _log(f"[aeroapi] {callsign}: cached {_cached_fa[0]}->{_cached_fa[1]} fails geometry check — busting stale entry")
-                _cached_fa = None  # signal that live call should fire this same poll
+                _cache_db_delete_route(ctx.callsign, 'aeroapi')
+                _log(f"[aeroapi] {ctx.callsign}: cached {ctx._cached_fa[0]}->{ctx._cached_fa[1]} fails geometry check — busting stale entry")
+                ctx._cached_fa = None  # signal that live call should fire this same poll
             # No log for normal cache hits — suppress spam; live fetches log below
         # Restore a persisted over-budget probe backoff (anchored across restarts) and
         # clear it at the billing reset — same daily-probe model as the AirLabs keys.
         _check_period_reset("aeroapi", AEROAPI_RESET_DAY)
         _restore_persisted_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
-        if not _cached_fa and not _in_backoff("aeroapi"):
+        if not ctx._cached_fa and not _in_backoff("aeroapi"):
             try:
                 r = _session.get(
-                    AEROAPI_URL.format(callsign.strip()),
+                    AEROAPI_URL.format(ctx.callsign.strip()),
                     headers={"x-apikey": FLIGHTAWARE_API_KEY},
                     timeout=10,
                 )
@@ -2549,7 +2535,7 @@ def _route_aeroapi_tier(origin, destination, source, callsign, plane_lat, plane_
                     # billing reset); persisted so restarts don't drift it — same model
                     # as the AirLabs keys.
                     _set_quota_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY,
-                                       "aeroapi", f"{callsign}: 402 — over budget / no credit remaining")
+                                       "aeroapi", f"{ctx.callsign}: 402 — over budget / no credit remaining")
                 elif r.status_code in (401, 403):
                     _set_backoff("aeroapi", secs=BACKOFF_AUTH_SECS)
                     _log(f"[aeroapi] auth error ({r.status_code}) — check FLIGHTAWARE_API_KEY")
@@ -2559,172 +2545,157 @@ def _route_aeroapi_tier(origin, destination, source, callsign, plane_lat, plane_
                     active = [f for f in flights if not f.get("actual_on")]
                     active.sort(key=lambda f: f.get("scheduled_out") or f.get("actual_off") or "", reverse=True)
                     f = active[0] if active else (flights[0] if flights else None)
-                    fa_origin = fa_dest = ""
+                    ctx.fa_origin = ctx.fa_dest = ""
                     fa_olat = fa_olon = fa_dlat = fa_dlon = None
                     if f:
                         _fa_orig  = f.get("origin") or {}
                         _fa_dest  = f.get("destination") or {}
-                        fa_origin = _fa_orig.get("code_iata", "") or ""
-                        fa_dest   = _fa_dest.get("code_iata", "") or ""
+                        ctx.fa_origin = _fa_orig.get("code_iata", "") or ""
+                        ctx.fa_dest   = _fa_dest.get("code_iata", "") or ""
                         fa_olat   = _fa_orig.get("latitude")
                         fa_olon   = _fa_orig.get("longitude")
                         fa_dlat   = _fa_dest.get("latitude")
                         fa_dlon   = _fa_dest.get("longitude")
-                        _remember_airport(fa_origin, fa_olat, fa_olon)
-                        _remember_airport(fa_dest,   fa_dlat, fa_dlon)
+                        _remember_airport(ctx.fa_origin, fa_olat, fa_olon)
+                        _remember_airport(ctx.fa_dest,   fa_dlat, fa_dlon)
                     _aeroapi_increment()  # logs running spend
-                    if not (fa_origin or fa_dest):
-                        _log(f"[aeroapi] {callsign}: no flights returned")
+                    if not (ctx.fa_origin or ctx.fa_dest):
+                        _log(f"[aeroapi] {ctx.callsign}: no flights returned")
                     # When checking for a local-route alternative (_al_held_nonlocal),
                     # use ROUTE_TTL_DEFAULT (1 hr) for empty results instead of ROUTE_MISS_TTL
                     # (5 min) — the flight won't gain a local endpoint mid-flight, so
                     # re-querying every 5 min would burn AeroAPI quota needlessly.
-                    _fa_miss_ttl = ROUTE_TTL_DEFAULT if _al_held_nonlocal else ROUTE_MISS_TTL
-                    _fa_is_nonlocal_cache = _is_nonlocal(fa_origin, fa_dest)
+                    _fa_miss_ttl = ROUTE_TTL_DEFAULT if ctx._al_held_nonlocal else ROUTE_MISS_TTL
+                    _fa_is_nonlocal_cache = _is_nonlocal(ctx.fa_origin, ctx.fa_dest)
                     # Non-local complete routes → ROUTE_MISS_TTL (5 min); they're almost
                     # certainly wrong for this zone and must not persist.
                     # Local or partial results → ROUTE_TTL_DEFAULT (1 hr).
                     _fa_ttl = (
                         ROUTE_MISS_TTL if _fa_is_nonlocal_cache
-                        else ROUTE_TTL_DEFAULT if (fa_origin or fa_dest)
+                        else ROUTE_TTL_DEFAULT if (ctx.fa_origin or ctx.fa_dest)
                         else _fa_miss_ttl
                     )
-                    _cache_db_set_route(callsign, 'aeroapi',
-                                        fa_origin, fa_dest,
+                    _cache_db_set_route(ctx.callsign, 'aeroapi',
+                                        ctx.fa_origin, ctx.fa_dest,
                                         fa_olat, fa_olon, fa_dlat, fa_dlon,
                                         int(time.time()) + _fa_ttl,
                                         source="aeroapi")
-                    if fa_origin or fa_dest:
-                        fa_plausible = _route_plausible(plane_lat, plane_lon,
+                    if ctx.fa_origin or ctx.fa_dest:
+                        fa_plausible = _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                                          fa_olat, fa_olon,
                                                          fa_dlat, fa_dlon)
                         if fa_plausible:
                             # Paid APIs trust any plausible route — no origin-local restriction.
                             _fa_applied   = False   # tracks whether AeroAPI route was actually adopted
-                            _fa_filled_dest = not destination
+                            _fa_filled_dest = not ctx.destination
                             # Compute non-local status once, before the branch split.  A
                             # non-local AeroAPI route (neither endpoint local) is NEVER
                             # committed to origin/destination — it is held for FR24 §5 /
                             # final-acceptance instead (the no-cache-non-local rule).
-                            _fa_is_nonlocal = _is_nonlocal(fa_origin, fa_dest)
-                            if source and _fa_filled_dest and fa_dest:  # fa_dest guard — see AirLabs-1
+                            _fa_is_nonlocal = _is_nonlocal(ctx.fa_origin, ctx.fa_dest)
+                            if ctx.source and _fa_filled_dest and ctx.fa_dest:  # fa_dest guard — see AirLabs-1
                                 # A prior source set origin only; AeroAPI fills the missing
                                 # destination.  Only commit when the AeroAPI route keeps a
                                 # local endpoint — otherwise defer (never commit non-local).
                                 if _fa_is_nonlocal:
                                     # AeroAPI's complete route is non-local — don't overwrite
                                     # the prior origin.  Hold for FR24 / final-acceptance.
-                                    _log(f"[aeroapi] {callsign}: {_route_display(fa_origin, fa_dest)} non-local — deferring to FR24")
-                                elif fa_origin and origin and fa_origin.upper() != origin.upper():
-                                    _log(f"[aeroapi] origin conflict ({origin} vs {fa_origin}) — preferring AeroAPI complete route")
-                                    origin = fa_origin
-                                    destination = fa_dest
-                                    source = "aeroapi"
+                                    _log(f"[aeroapi] {ctx.callsign}: {_route_display(ctx.fa_origin, ctx.fa_dest)} non-local — deferring to FR24")
+                                elif ctx.fa_origin and ctx.origin and ctx.fa_origin.upper() != ctx.origin.upper():
+                                    _log(f"[aeroapi] origin conflict ({ctx.origin} vs {ctx.fa_origin}) — preferring AeroAPI complete route")
+                                    ctx.origin = ctx.fa_origin
+                                    ctx.destination = ctx.fa_dest
+                                    ctx.source = "aeroapi"
                                     _fa_applied = True
                                 else:
-                                    if not origin:
-                                        origin = fa_origin
-                                    destination = fa_dest
-                                    source = f"{source}+aeroapi"
+                                    if not ctx.origin:
+                                        ctx.origin = ctx.fa_origin
+                                    ctx.destination = ctx.fa_dest
+                                    ctx.source = f"{ctx.source}+aeroapi"
                                     _fa_applied = True
                             else:
-                                if (_al_held_nonlocal
-                                        and fa_origin and fa_dest
-                                        and _has_local_endpoint(fa_origin, fa_dest)):
+                                if (ctx._al_held_nonlocal
+                                        and ctx.fa_origin and ctx.fa_dest
+                                        and _has_local_endpoint(ctx.fa_origin, ctx.fa_dest)):
                                     # AirLabs returned a complete non-local route; AeroAPI
                                     # has a local-airport route — prefer it.
-                                    origin      = fa_origin
-                                    destination = fa_dest
-                                    source = "aeroapi"
+                                    ctx.origin      = ctx.fa_origin
+                                    ctx.destination = ctx.fa_dest
+                                    ctx.source = "aeroapi"
                                     _fa_applied = True
                                 else:
                                     if _fa_is_nonlocal:
                                         # Non-local AeroAPI result — don't commit; hold for
                                         # FR24 §5 to try, then final-acceptance picks best.
-                                        _log(f"[aeroapi] {callsign}: {_route_display(fa_origin, fa_dest)} non-local — deferring to FR24")
+                                        _log(f"[aeroapi] {ctx.callsign}: {_route_display(ctx.fa_origin, ctx.fa_dest)} non-local — deferring to FR24")
                                     else:
-                                        if not origin:
-                                            origin = fa_origin
+                                        if not ctx.origin:
+                                            ctx.origin = ctx.fa_origin
                                             _fa_applied = True
-                                        if not destination:
-                                            destination = fa_dest
+                                        if not ctx.destination:
+                                            ctx.destination = ctx.fa_dest
                                             _fa_applied = True
-                                        source = source or "aeroapi"
+                                        ctx.source = ctx.source or "aeroapi"
                             if _fa_applied:
-                                _log(f"[aeroapi] {_airline_display(callsign)}: {_route_display(fa_origin, fa_dest)} accepted")
+                                _log(f"[aeroapi] {_airline_display(ctx.callsign)}: {_route_display(ctx.fa_origin, ctx.fa_dest)} accepted")
                             # Capture coords for the resolved-cache plausibility check.
                             # Use fa_origin (the AeroAPI-returned airport code) as the
                             # iata tag — NOT the 'origin' variable, which may be from
                             # an earlier source (e.g. AirLabs).
                             if fa_olat is not None:
-                                _coord_olat, _coord_olon = fa_olat, fa_olon
-                                _coord_dlat, _coord_dlon = fa_dlat, fa_dlon
-                                _coord_origin_iata = fa_origin  # the airport these coords actually belong to
+                                ctx._coord_olat, ctx._coord_olon = fa_olat, fa_olon
+                                ctx._coord_dlat, ctx._coord_dlon = fa_dlat, fa_dlon
+                                ctx._coord_origin_iata = ctx.fa_origin  # the airport these coords actually belong to
                         else:
-                            _log(f"[aeroapi] {callsign}: {fa_origin}->{fa_dest} rejected — implausible route")
+                            _log(f"[aeroapi] {ctx.callsign}: {ctx.fa_origin}->{ctx.fa_dest} rejected — implausible route")
                             # Overwrite the route just cached above with a short negative
                             # entry.  Otherwise the next poll re-reads it, the geometry
                             # check busts+deletes it, and a fresh AeroAPI call fires again
                             # (AeroAPI returns the same leg for minutes) — re-billing on a
                             # loop.  The 5-min negative entry rate-limits the refetch; the
                             # route self-heals on the next expiry.
-                            _cache_db_set_route(callsign, 'aeroapi', "", "", None, None, None, None,
+                            _cache_db_set_route(ctx.callsign, 'aeroapi', "", "", None, None, None, None,
                                                 int(time.time()) + ROUTE_MISS_TTL, source="aeroapi")
                 else:
                     # Unexpected status (4xx/5xx other than explicitly handled codes) —
                     # negatively cache for ROUTE_MISS_TTL to prevent per-poll retries.
-                    _log(f"[aeroapi] unexpected status {r.status_code} for {callsign} — negative caching")
-                    _cache_db_set_route(callsign, 'aeroapi',
+                    _log(f"[aeroapi] unexpected status {r.status_code} for {ctx.callsign} — negative caching")
+                    _cache_db_set_route(ctx.callsign, 'aeroapi',
                                         "", "", None, None, None, None,
                                         int(time.time()) + ROUTE_MISS_TTL,
                                         source="aeroapi")
             except Exception as e:
-                _log(f"[aeroapi] {callsign}: request error — {e}")
+                _log(f"[aeroapi] {ctx.callsign}: request error — {e}")
         # else: in backoff — already logged when backoff was set
-    return (origin, destination, source, fa_origin, fa_dest, _cached_fa,
-            _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
-            _al_held_nonlocal)
 
 
-def _route_select_authority(origin, destination, source,
-                            coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata,
-                            *, fr24_origin, fr24_dest,
-                            al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon,
-                            al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon,
-                            fa_origin, fa_dest,
-                            fr24_com_origin, fr24_com_dest,
-                            adsbdb_commercial, plane_lat, plane_lon,
-                            adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
-                            adsbdb_dlat, adsbdb_dlon, sky_origin, sky_dest,
-                            al_src, al2_src, cached_fa,
-                            fr24_com_src, fr24_src, adsbdb_src, sky_src):
+def _route_select_authority(ctx):
     """_select() is the route authority: gather every source's candidate, let _select()
     pick the winner by (tier, SOURCE_PRIORITY) + geometry, reconstruct the cached-aware
     source label, and commit.  Called ONLY when not override-partial (the caller keeps that
-    decision).  Returns the possibly-updated
-    (origin, destination, source, coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata);
-    when _select finds no winner the caller-supplied values are returned unchanged."""
+    decision).  Writes ctx.origin/destination/source and ctx._coord_* in place; when _select
+    finds no winner the existing ctx values are left unchanged."""
     _cands = []
     # Normalise every per-source code once at construction (strip/upper + BLANK_FIELDS
     # -> '') so the same-airport reject and tier completeness in _select() are robust to
     # whitespace/junk no matter which source produced the code.
-    if fr24_origin or fr24_dest:
-        _cands.append(_Cand(_norm_code(fr24_origin), _norm_code(fr24_dest), None, None, None, None, "fr24"))
-    if al_origin or al_dest:
-        _cands.append(_Cand(_norm_code(al_origin), _norm_code(al_dest), al_olat, al_olon, al_dlat, al_dlon, "airlabs"))
-    if al2_origin or al2_dest:
-        _cands.append(_Cand(_norm_code(al2_origin), _norm_code(al2_dest), al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2"))
-    if fa_origin or fa_dest:
+    if ctx._fr24_origin or ctx._fr24_dest:
+        _cands.append(_Cand(_norm_code(ctx._fr24_origin), _norm_code(ctx._fr24_dest), None, None, None, None, "fr24"))
+    if ctx.al_origin or ctx.al_dest:
+        _cands.append(_Cand(_norm_code(ctx.al_origin), _norm_code(ctx.al_dest), ctx.al_olat, ctx.al_olon, ctx.al_dlat, ctx.al_dlon, "airlabs"))
+    if ctx.al2_origin or ctx.al2_dest:
+        _cands.append(_Cand(_norm_code(ctx.al2_origin), _norm_code(ctx.al2_dest), ctx.al2_olat, ctx.al2_olon, ctx.al2_dlat, ctx.al2_dlon, "airlabs2"))
+    if ctx.fa_origin or ctx.fa_dest:
         # AeroAPI's per-call coord locals (fa_olat…) aren't function-scoped, so look the
         # endpoint coords back up from the harvested airport table (populated by AeroAPI's
         # own _remember_airport, live or cached).  Without real coords here the resolved-
         # cache write guard would skip AeroAPI-resolved ARRIVALS (non-local origin -> home
         # airport), silently re-billing the paid chain every poll.
-        _fa_o = _airport_coords(fa_origin) or (None, None)
-        _fa_d = _airport_coords(fa_dest) or (None, None)
-        _cands.append(_Cand(_norm_code(fa_origin), _norm_code(fa_dest), _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi"))
-    if fr24_com_origin or fr24_com_dest:
-        _cands.append(_Cand(_norm_code(fr24_com_origin), _norm_code(fr24_com_dest), None, None, None, None, "fr24"))
+        _fa_o = _airport_coords(ctx.fa_origin) or (None, None)
+        _fa_d = _airport_coords(ctx.fa_dest) or (None, None)
+        _cands.append(_Cand(_norm_code(ctx.fa_origin), _norm_code(ctx.fa_dest), _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi"))
+    if ctx._fr24_com_origin or ctx._fr24_com_dest:
+        _cands.append(_Cand(_norm_code(ctx._fr24_com_origin), _norm_code(ctx._fr24_com_dest), None, None, None, None, "fr24"))
     # Free sources (adsbdb, OpenSky) carry the COMMERCIAL-distrust constraint the inline
     # chain enforces (docstring "Trust rule") into the candidate model.  For a COMMERCIAL
     # callsign the paid APIs (and FR24) are the authority: a free route must not COMPETE
@@ -2737,53 +2708,135 @@ def _route_select_authority(origin, destination, source,
     # appends on whether _select already finds a plausible TRUSTED winner.  GA / non-
     # commercial routes always flow through (geometry-checked in _select); GLOBAL mode is
     # never commercial-blocked here.  (_cands holds ONLY the trusted candidates here.)
-    _free_ok = (not adsbdb_commercial
-                or _select(list(_cands), plane_lat, plane_lon) is None)
-    if (adsbdb_origin and sky_origin and adsbdb_origin.upper() == sky_origin.upper()
-            and adsbdb_dest and sky_dest and adsbdb_dest.upper() == sky_dest.upper()
+    _free_ok = (not ctx._adsbdb_commercial
+                or _select(list(_cands), ctx.plane_lat, ctx.plane_lon) is None)
+    if (ctx.adsbdb_origin and ctx._sky_origin and ctx.adsbdb_origin.upper() == ctx._sky_origin.upper()
+            and ctx.adsbdb_dest and ctx._sky_dest and ctx.adsbdb_dest.upper() == ctx._sky_dest.upper()
             and _free_ok):
-        _cands.append(_Cand(_norm_code(adsbdb_origin), _norm_code(adsbdb_dest), adsbdb_olat, adsbdb_olon,
-                            adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky"))
-    if (adsbdb_origin or adsbdb_dest) and _free_ok:
-        _cands.append(_Cand(_norm_code(adsbdb_origin), _norm_code(adsbdb_dest), adsbdb_olat, adsbdb_olon,
-                            adsbdb_dlat, adsbdb_dlon, "adsbdb"))
-    if (sky_origin or sky_dest) and _free_ok:
-        _cands.append(_Cand(_norm_code(sky_origin), _norm_code(sky_dest), None, None, None, None, "opensky"))
-    _best = _select(_cands, plane_lat, plane_lon)
+        _cands.append(_Cand(_norm_code(ctx.adsbdb_origin), _norm_code(ctx.adsbdb_dest), ctx.adsbdb_olat, ctx.adsbdb_olon,
+                            ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb+opensky"))
+    if (ctx.adsbdb_origin or ctx.adsbdb_dest) and _free_ok:
+        _cands.append(_Cand(_norm_code(ctx.adsbdb_origin), _norm_code(ctx.adsbdb_dest), ctx.adsbdb_olat, ctx.adsbdb_olon,
+                            ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb"))
+    if (ctx._sky_origin or ctx._sky_dest) and _free_ok:
+        _cands.append(_Cand(_norm_code(ctx._sky_origin), _norm_code(ctx._sky_dest), None, None, None, None, "opensky"))
+    _best = _select(_cands, ctx.plane_lat, ctx.plane_lon)
 
-    origin, destination = (_best.origin, _best.dest) if _best else ("", "")
+    ctx.origin, ctx.destination = (_best.origin, _best.dest) if _best else ("", "")
     if _best:
-        source = _reconstruct_select_label(
+        ctx.source = _reconstruct_select_label(
             _best.source,
-            al_src=al_src, al2_src=al2_src, cached_fa=cached_fa,
-            fr24_com_src=fr24_com_src, fr24_com_origin=fr24_com_origin,
-            fr24_com_dest=fr24_com_dest, fr24_src=fr24_src,
-            adsbdb_src=adsbdb_src, sky_src=sky_src,
+            al_src=ctx._al_src, al2_src=ctx._al2_src, cached_fa=ctx._cached_fa,
+            fr24_com_src=ctx._fr24_com_src, fr24_com_origin=ctx._fr24_com_origin,
+            fr24_com_dest=ctx._fr24_com_dest, fr24_src=ctx._fr24_src,
+            adsbdb_src=ctx._adsbdb_src, sky_src=ctx._sky_src,
         )
-        coord_olat, coord_olon = _best.olat, _best.olon
-        coord_dlat, coord_dlon = _best.dlat, _best.dlon
-        coord_origin_iata = _best.origin
-
-    return (origin, destination, source,
-            coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata)
+        ctx._coord_olat, ctx._coord_olon = _best.olat, _best.olon
+        ctx._coord_dlat, ctx._coord_dlon = _best.dlat, _best.dlon
+        ctx._coord_origin_iata = _best.origin
 
 
-def _route_commit_fr24(origin, destination, source, *,
-                       fr24_origin, fr24_dest, fr24_src, registration):
+def _route_commit_fr24(ctx):
     """§1 acceptance/commit glue for the FR24 GA tier.  The FR24 query already ran;
-    this fills any blank origin/destination from its result and adopts its source label
-    (preserving any endpoint a prior partial override already set).  Logs acceptance for
-    live (non-cached) results only.  Returns the possibly-updated (origin, destination,
-    source); mutates nothing else."""
-    if fr24_origin or fr24_dest:
-        if fr24_src != "fr24:cached":
-            _log(f"[fr24] {registration}: {_route_display(fr24_origin, fr24_dest)} accepted")
-        if not origin:
-            origin = fr24_origin
-        if not destination:
-            destination = fr24_dest
-        source = source or fr24_src
-    return origin, destination, source
+    this fills any blank ctx.origin/ctx.destination from its result and adopts its source
+    label (preserving any endpoint a prior partial override already set).  Logs acceptance
+    for live (non-cached) results only.  Writes ctx.origin/destination/source in place."""
+    if ctx._fr24_origin or ctx._fr24_dest:
+        if ctx._fr24_src != "fr24:cached":
+            _log(f"[fr24] {ctx.registration}: {_route_display(ctx._fr24_origin, ctx._fr24_dest)} accepted")
+        if not ctx.origin:
+            ctx.origin = ctx._fr24_origin
+        if not ctx.destination:
+            ctx.destination = ctx._fr24_dest
+        ctx.source = ctx.source or ctx._fr24_src
+
+
+@dataclass
+class _RouteCtx:
+    """Mutable context threaded through get_route() and its extracted §-helpers.
+
+    Every per-lookup local that get_route() used to thread by explicit args + return-and-
+    reassign now lives here under its EXACT former name (leading underscores preserved).
+    The inputs (hex_code … vrs_dest) are constructor params; everything else defaults to the
+    value it received at its first inline assignment, so building the ctx reproduces the old
+    top-of-function initialisation.  Helpers read AND write these fields in place: an un-taken
+    branch leaves a field unchanged, exactly reproducing the old 'return the value untouched'
+    semantics of return-and-reassign threading."""
+    # ── inputs (constructor params) ──
+    hex_code: str
+    callsign: str
+    registration: str
+    plane_lat: float | None
+    plane_lon: float | None
+    vrs_origin: str
+    vrs_dest: str
+    # ── resolved route + bookkeeping ──
+    origin: str = ""
+    destination: str = ""
+    source: str = ""
+    now: int = 0
+    _apis_disabled: bool = False
+    _coord_olat: float | None = None
+    _coord_olon: float | None = None
+    _coord_dlat: float | None = None
+    _coord_dlon: float | None = None
+    _coord_origin_iata: str = ""
+    # ── override fields ──
+    _ov_plane: str = ""
+    _ov_display: str = ""
+    ov_origin: str = ""
+    ov_dest: str = ""
+    _override_partial: bool = False
+    # ── classification flags ──
+    _adsbdb_commercial: bool = False
+    _is_n_number: bool = False
+    _need_airlabs: bool = False
+    _skip_paid: bool = False
+    # ── §1 FR24 GA ──
+    _fr24_origin: str = ""
+    _fr24_dest: str = ""
+    _fr24_src: str = ""
+    # ── §2 adsbdb ──
+    adsbdb_origin: str = ""
+    adsbdb_dest: str = ""
+    adsbdb_olat: float | None = None
+    adsbdb_olon: float | None = None
+    adsbdb_dlat: float | None = None
+    adsbdb_dlon: float | None = None
+    _adsbdb_src: str = ""
+    # ── §2a OpenSky ──
+    _sky_origin: str = ""
+    _sky_dest: str = ""
+    _sky_src: str = ""
+    # ── §3 AirLabs-1 ──
+    al_origin: str = ""
+    al_dest: str = ""
+    al_olat: float | None = None
+    al_olon: float | None = None
+    al_dlat: float | None = None
+    al_dlon: float | None = None
+    _al_src: str = "airlabs"
+    _al_count: int = 0
+    _al1_cache_was_implausible: bool = False
+    # ── §3b AirLabs-2 ──
+    al2_origin: str = ""
+    al2_dest: str = ""
+    al2_olat: float | None = None
+    al2_olon: float | None = None
+    al2_dlat: float | None = None
+    al2_dlon: float | None = None
+    _al2_src: str = "airlabs2"
+    _al2_count: int = 0
+    # ── §4 AeroAPI ──
+    fa_origin: str = ""
+    fa_dest: str = ""
+    _cached_fa: object = None
+    _al_held_nonlocal: bool = False
+    # ── §5 FR24 commercial ──
+    _fr24_com_origin: str = ""
+    _fr24_com_dest: str = ""
+    _fr24_com_src: str = ""
+    _all_paid_nonlocal: bool = False
 
 
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
@@ -2831,22 +2884,10 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     plane_lat/plane_lon: aircraft's current position, used for plausibility checks.
     vertical_speed: kept for API compatibility; no longer used in trust logic.
     """
-    origin, destination, source = "", "", ""
-    now = int(time.time())
-    _apis_disabled = os.path.exists(APIS_DISABLED_FLAG)  # evaluate once — two callers below
-    # Best origin/dest coords seen during this lookup — stored in the resolved cache
-    # so future hits can run a geometry plausibility check even without a live API call.
-    _coord_olat = _coord_olon = _coord_dlat = _coord_dlon = None
-    _coord_origin_iata = ""  # tracks which airport _coord_olat belongs to
-
-    # Override display/type fields — populated if any override rule matches;
-    # returned at the end so partial overrides (missing endpoints) still carry
-    # display name and aircraft type through the free-API fill-in path.
-    _ov_plane   = ""
-    _ov_display = ""
-    ov_origin   = ""
-    ov_dest     = ""
-    _override_partial = False  # True → skip paid APIs but still try free APIs
+    ctx = _RouteCtx(hex_code, callsign, registration, plane_lat, plane_lon,
+                    vrs_origin, vrs_dest)
+    ctx.now = int(time.time())
+    ctx._apis_disabled = os.path.exists(APIS_DISABLED_FLAG)  # evaluate once — two callers below
 
     # ── 0. Override rules — bypass ALL API lookups for known callsigns ─────────
     # Rules are defined in ft_overrides.json and managed via the web UI.
@@ -2857,41 +2898,41 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     #   continue through the free APIs (adsbdb, OpenSky) to fill blanks, but
     #   skip paid APIs (AirLabs, AeroAPI) — overrides are typically GA/special
     #   flights that paid APIs won't have on record anyway.
-    _ov = _match_override(callsign)
+    _ov = _match_override(ctx.callsign)
     if _ov:
-        ov_origin   = (_ov.get("origin")      or "").strip().upper()
-        ov_dest     = (_ov.get("destination") or "").strip().upper()
-        _ov_plane   = (_ov.get("plane")       or "").strip()
-        _ov_display = (_ov.get("display")     or "").strip()
+        ctx.ov_origin   = (_ov.get("origin")      or "").strip().upper()
+        ctx.ov_dest     = (_ov.get("destination") or "").strip().upper()
+        ctx._ov_plane   = (_ov.get("plane")       or "").strip()
+        ctx._ov_display = (_ov.get("display")     or "").strip()
         # Log the match only on first sighting or when the rule/result changes — not every
         # poll — so a lingering override flight doesn't repeat identical [override] lines
         # every ~15 s.  No-cache/test lookups always log (full diagnostic).  The [overhead]
         # alt= tracking line still prints every poll either way.
-        _ov_sig = (_ov.get("pattern"), ov_origin, ov_dest, _ov_display, _ov_plane, _ov.get("note"))
+        _ov_sig = (_ov.get("pattern"), ctx.ov_origin, ctx.ov_dest, ctx._ov_display, ctx._ov_plane, _ov.get("note"))
         if getattr(_cache_bypass, "on", False):
             _ov_first = True
         else:
-            _ov_first = _last_override_log.get(callsign) != _ov_sig
+            _ov_first = _last_override_log.get(ctx.callsign) != _ov_sig
             if _ov_first:
-                _bounded_put(_last_override_log, callsign, _ov_sig)
+                _bounded_put(_last_override_log, ctx.callsign, _ov_sig)
         if _ov_first:
             _log(
-                f"[override] {callsign} matched '{_ov['pattern']}'"
-                f" → {ov_origin or '?'}->{ov_dest or '?'}"
-                + (f"  display='{_ov_display}'" if _ov_display else "")
-                + (f"  type='{_ov_plane}'" if _ov_plane else "")
+                f"[override] {ctx.callsign} matched '{_ov['pattern']}'"
+                f" → {ctx.ov_origin or '?'}->{ctx.ov_dest or '?'}"
+                + (f"  display='{ctx._ov_display}'" if ctx._ov_display else "")
+                + (f"  type='{ctx._ov_plane}'" if ctx._ov_plane else "")
                 + (f"  ({_ov['note']})" if _ov.get("note") else "")
             )
-        if ov_origin and ov_dest:
+        if ctx.ov_origin and ctx.ov_dest:
             # Both endpoints known — no API calls needed.
-            return ov_origin, ov_dest, "override", _ov_plane, _ov_display
+            return ctx.ov_origin, ctx.ov_dest, "override", ctx._ov_plane, ctx._ov_display
         # Partial — seed available endpoints and fall through to free APIs.
-        origin      = ov_origin
-        destination = ov_dest
-        source      = "override" if (ov_origin or ov_dest) else ""
-        _override_partial = bool(ov_origin or ov_dest)
+        ctx.origin      = ctx.ov_origin
+        ctx.destination = ctx.ov_dest
+        ctx.source      = "override" if (ctx.ov_origin or ctx.ov_dest) else ""
+        ctx._override_partial = bool(ctx.ov_origin or ctx.ov_dest)
         if _ov_first:
-            _log(f"[override] {callsign}: partial override — polling free APIs to fill missing endpoint(s)")
+            _log(f"[override] {ctx.callsign}: partial override — polling free APIs to fill missing endpoint(s)")
 
     # ── 0.5. Resolved-route cache (scheduled airlines only) ───────────────────
     # When we successfully resolve both endpoints for a scheduled airline
@@ -2910,8 +2951,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     #     busts the entry and falls through to a fresh lookup.
     #   • Non-local entries without coordinates (written before this fix) are
     #     also busted so they get re-resolved and stored with coordinates.
-    if callsign and _route_ttl(callsign) == ROUTE_TTL_SCHEDULED and not (_override_partial and (ov_origin or ov_dest)):
-        _resolved = _cache_db_get_route(callsign, 'resolved')
+    if ctx.callsign and _route_ttl(ctx.callsign) == ROUTE_TTL_SCHEDULED and not (ctx._override_partial and (ctx.ov_origin or ctx.ov_dest)):
+        _resolved = _cache_db_get_route(ctx.callsign, 'resolved')
         if _resolved and _resolved[0] and _resolved[1]:
             _rsrc           = _resolved[6].removesuffix(":cached")
             _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
@@ -2923,27 +2964,27 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             # away from the cached dest.  _route_plausible returns True when any coord is
             # missing, so a coordless local entry keeps its unconditional fast path.
             if _res_origin in _LOCAL_AIRPORTS:
-                if _route_plausible(plane_lat, plane_lon,
+                if _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                     _resolved[2], _resolved[3],
                                     _resolved[4], _resolved[5]):
-                    return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
-                _cache_db_delete_route(callsign, 'resolved')
-                _log(f"[resolved] {callsign}: cached {_resolved[0]}->{_resolved[1]} (local "
+                    return _resolved[0], _resolved[1], _resolved_label, ctx._ov_plane, ctx._ov_display
+                _cache_db_delete_route(ctx.callsign, 'resolved')
+                _log(f"[resolved] {ctx.callsign}: cached {_resolved[0]}->{_resolved[1]} (local "
                      f"origin) fails geometry check — busting stale entry, re-resolving")
                 _resolved = None  # fall through to a fresh lookup below
             # Non-local: validate with stored coordinates, or bust if none.
             elif _resolved[2] is not None:
-                if _route_plausible(plane_lat, plane_lon,
+                if _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                     _resolved[2], _resolved[3],
                                     _resolved[4], _resolved[5]):
-                    return _resolved[0], _resolved[1], _resolved_label, _ov_plane, _ov_display
-                _cache_db_delete_route(callsign, 'resolved')
-                _log(f"[resolved] {callsign}: cached {_resolved[0]}->{_resolved[1]} fails "
+                    return _resolved[0], _resolved[1], _resolved_label, ctx._ov_plane, ctx._ov_display
+                _cache_db_delete_route(ctx.callsign, 'resolved')
+                _log(f"[resolved] {ctx.callsign}: cached {_resolved[0]}->{_resolved[1]} fails "
                      f"geometry check — busting stale entry, re-resolving")
             else:
                 # No coordinates stored — bust so the fresh lookup stores them.
-                _cache_db_delete_route(callsign, 'resolved')
-                _log(f"[resolved] {callsign}: cached {_resolved[0]}->{_resolved[1]} has no "
+                _cache_db_delete_route(ctx.callsign, 'resolved')
+                _log(f"[resolved] {ctx.callsign}: cached {_resolved[0]}->{_resolved[1]} has no "
                      f"coordinates — busting to re-resolve with plausibility data")
 
     # ── 0.75 VRS live route hint ───────────────────────────────────────────────
@@ -2952,13 +2993,13 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # endpoint is a configured local airport — same rule as OpenSky free API.
     # Treated as a short-lived (1 hr) route cache entry so it doesn't interfere
     # with the 7-day resolved cache used for scheduled airlines.
-    if vrs_origin and vrs_dest and not _override_partial:
-        if _has_local_endpoint(vrs_origin, vrs_dest):
-            _log(f"[vrs] {callsign}: {vrs_origin}->{vrs_dest} (local endpoint — accepted)")
+    if ctx.vrs_origin and ctx.vrs_dest and not ctx._override_partial:
+        if _has_local_endpoint(ctx.vrs_origin, ctx.vrs_dest):
+            _log(f"[vrs] {ctx.callsign}: {ctx.vrs_origin}->{ctx.vrs_dest} (local endpoint — accepted)")
             # VRS is live feed data — no DB cache write needed.  The route is
             # re-read from the ADS-B feed on every poll so persistence adds nothing,
             # and writing to cache_type='route' would collide with adsbdb's cache key.
-            return vrs_origin, vrs_dest, "vrs", _ov_plane, _ov_display
+            return ctx.vrs_origin, ctx.vrs_dest, "vrs", ctx._ov_plane, ctx._ov_display
 
     # ── N-number callsign → registration fallback ────────────────────────────
     # GA aircraft that don't transmit a registration in their ADS-B message
@@ -2966,8 +3007,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # here so §1 FR24 (and all registration-keyed cache lookups) use the right
     # value.  The same promotion happens in _grab_data() for display purposes,
     # but that runs AFTER get_route() returns — too late for §1.
-    if not registration and callsign and _N_NUMBER_RE.match(callsign):
-        registration = callsign.upper()
+    if not ctx.registration and ctx.callsign and _N_NUMBER_RE.match(ctx.callsign):
+        ctx.registration = ctx.callsign.upper()
 
     # The ADS-B feed often omits the tail number; get_aircraft_type() caches a permanent
     # hex->reg mapping — fall back to it so BOTH FR24 paths see the tail.  This MUST run
@@ -2978,8 +3019,8 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # gated on `not _adsbdb_commercial`.  (In no-cache test mode this read is bypassed;
     # run_test_lookup() resolves the tail from this same cache before enabling the bypass
     # and passes it in explicitly — keeping the diagnostic faithful to a real flight.)
-    if not registration and hex_code:
-        registration = _cache_db_get_reg(hex_code) or ""
+    if not ctx.registration and ctx.hex_code:
+        ctx.registration = _cache_db_get_reg(ctx.hex_code) or ""
 
     # Proactive OpenSky-metadata tail resolution for ANY flight still missing a tail — so
     # BOTH FR24 paths can run on the FIRST poll: §1 (GA / charter, by N-number reg) and §5
@@ -2987,15 +3028,15 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # way to query it at all.  Permanent cache, backoff-guarded, no-op once known;
     # get_aircraft_type() resolves the same tail later this poll regardless, so this adds
     # no net API calls — it just makes the tail available before the FR24 stages run.
-    if not registration and hex_code:
-        _try_opensky_reg(hex_code)
-        registration = _cache_db_get_reg(hex_code) or ""
+    if not ctx.registration and ctx.hex_code:
+        _try_opensky_reg(ctx.hex_code)
+        ctx.registration = _cache_db_get_reg(ctx.hex_code) or ""
 
     # Compute once — AFTER the tail is fully resolved, so _is_n_number reflects it (a
     # GA/charter aircraft whose tail arrived via cache or OpenSky must read as an N-number).
-    _adsbdb_commercial = (bool(callsign) and len(callsign) >= 3
-                          and callsign[:3].upper() in _SCHEDULED_PREFIXES)
-    _is_n_number = bool(registration) and bool(_N_NUMBER_RE.match(registration))
+    ctx._adsbdb_commercial = (bool(ctx.callsign) and len(ctx.callsign) >= 3
+                              and ctx.callsign[:3].upper() in _SCHEDULED_PREFIXES)
+    ctx._is_n_number = bool(ctx.registration) and bool(_N_NUMBER_RE.match(ctx.registration))
 
     # ── 1. FlightRadar24 (GA / N-number — first resort) ──────────────────────
     # Queried first for N-number registrations — real-time, registration-based
@@ -3004,18 +3045,15 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # so through-traffic and arrivals are trustworthy.  No API key required.
     # Commercial callsigns are excluded here; FR24 serves them at §5 (last resort).
     # adsbdb / OpenSky still run after as fallbacks if FR24 has no data.
-    (_fr24_origin, _fr24_dest, _fr24_src) = _query_fr24_ga(
-        callsign, hex_code, registration, origin, destination,
-        plane_lat, plane_lon, _is_n_number, _adsbdb_commercial)
+    (ctx._fr24_origin, ctx._fr24_dest, ctx._fr24_src) = _query_fr24_ga(
+        ctx.callsign, ctx.hex_code, ctx.registration, ctx.origin, ctx.destination,
+        ctx.plane_lat, ctx.plane_lon, ctx._is_n_number, ctx._adsbdb_commercial)
 
-    origin, destination, source = _route_commit_fr24(
-        origin, destination, source,
-        fr24_origin=_fr24_origin, fr24_dest=_fr24_dest, fr24_src=_fr24_src,
-        registration=registration)
+    _route_commit_fr24(ctx)
 
     # ── 2. adsbdb (static historical DB) ──────────────────────────────────────
-    (adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
-     adsbdb_dlat, adsbdb_dlon, _adsbdb_src) = _query_adsbdb(callsign, origin, destination)
+    (ctx.adsbdb_origin, ctx.adsbdb_dest, ctx.adsbdb_olat, ctx.adsbdb_olon,
+     ctx.adsbdb_dlat, ctx.adsbdb_dlon, ctx._adsbdb_src) = _query_adsbdb(ctx.callsign, ctx.origin, ctx.destination)
 
     # Trust adsbdb only for GA / non-commercial flights.
     # Scheduled airlines (callsign prefix in _SCHEDULED_PREFIXES) are NOT trusted from
@@ -3025,33 +3063,33 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # AirLabs / AeroAPI must be the authority — they run regardless and their answer wins.
     # For GA (N-numbers, non-scheduled prefixes) adsbdb remains trusted as before.
     # (_adsbdb_commercial already computed above, before the FR24 step.)
-    _adsbdb_origin_local = adsbdb_origin.upper() in _LOCAL_AIRPORTS if adsbdb_origin else False
+    _adsbdb_origin_local = ctx.adsbdb_origin.upper() in _LOCAL_AIRPORTS if ctx.adsbdb_origin else False
     adsbdb_ok = (
-        not _adsbdb_commercial           # commercial flights require paid-API confirmation
+        not ctx._adsbdb_commercial       # commercial flights require paid-API confirmation
         and _adsbdb_origin_local
-        and _route_plausible(plane_lat, plane_lon,
-                             adsbdb_olat, adsbdb_olon,
-                             adsbdb_dlat, adsbdb_dlon)
+        and _route_plausible(ctx.plane_lat, ctx.plane_lon,
+                             ctx.adsbdb_olat, ctx.adsbdb_olon,
+                             ctx.adsbdb_dlat, ctx.adsbdb_dlon)
     )
     if adsbdb_ok:
         # Fill blanks only — preserve any endpoint already set by a partial override.
-        if not origin:
-            origin = adsbdb_origin
-        if not destination:
-            destination = adsbdb_dest
-        source = source or _adsbdb_src
-        if _adsbdb_src != "adsbdb:cached":
-            _log(f"[adsbdb] {_airline_display(callsign)}: {_route_display(adsbdb_origin, adsbdb_dest)} accepted")
-    elif adsbdb_origin or adsbdb_dest:
-        if _adsbdb_src != "adsbdb:cached":
-            if _adsbdb_commercial:
-                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} not trusted — commercial; deferring to AirLabs/AeroAPI")
+        if not ctx.origin:
+            ctx.origin = ctx.adsbdb_origin
+        if not ctx.destination:
+            ctx.destination = ctx.adsbdb_dest
+        ctx.source = ctx.source or ctx._adsbdb_src
+        if ctx._adsbdb_src != "adsbdb:cached":
+            _log(f"[adsbdb] {_airline_display(ctx.callsign)}: {_route_display(ctx.adsbdb_origin, ctx.adsbdb_dest)} accepted")
+    elif ctx.adsbdb_origin or ctx.adsbdb_dest:
+        if ctx._adsbdb_src != "adsbdb:cached":
+            if ctx._adsbdb_commercial:
+                _log(f"[adsbdb] {ctx.callsign}: {ctx.adsbdb_origin or '?'}->{ctx.adsbdb_dest or '?'} not trusted — commercial; deferring to AirLabs/AeroAPI")
             elif not _adsbdb_origin_local:
-                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — origin not local")
+                _log(f"[adsbdb] {ctx.callsign}: {ctx.adsbdb_origin or '?'}->{ctx.adsbdb_dest or '?'} skipped — origin not local")
             else:
-                _log(f"[adsbdb] {callsign}: {adsbdb_origin or '?'}->{adsbdb_dest or '?'} skipped — plausibility failed")
-    elif _adsbdb_src == "adsbdb":  # live call that returned nothing (not a cached negative)
-        _log(f"[adsbdb] {callsign}: no data")
+                _log(f"[adsbdb] {ctx.callsign}: {ctx.adsbdb_origin or '?'}->{ctx.adsbdb_dest or '?'} skipped — plausibility failed")
+    elif ctx._adsbdb_src == "adsbdb":  # live call that returned nothing (not a cached negative)
+        _log(f"[adsbdb] {ctx.callsign}: no data")
 
     # ── 2a. OpenSky by hex (free, unlimited — queried before AirLabs) ───────────
     # OpenSky doesn't return airport coordinates, so geometry plausibility isn't
@@ -3059,31 +3097,31 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # If trusted, the destination is also accepted from the same result; a missing
     # dest falls through to AirLabs.  Arrival-only and through-traffic are skipped.
     #
-    (_sky_origin, _sky_dest, _sky_src) = _query_opensky(hex_code, callsign, origin, destination, now)
+    (ctx._sky_origin, ctx._sky_dest, ctx._sky_src) = _query_opensky(ctx.hex_code, ctx.callsign, ctx.origin, ctx.destination, ctx.now)
 
     # Computed unconditionally so it is in scope at the _select() candidate-append site
     # (the same trust gate must follow the route into the candidate model — see §picker).
-    _sky_origin_local = _sky_origin.upper() in _LOCAL_AIRPORTS if _sky_origin else False
-    if _sky_origin or _sky_dest:
+    _sky_origin_local = ctx._sky_origin.upper() in _LOCAL_AIRPORTS if ctx._sky_origin else False
+    if ctx._sky_origin or ctx._sky_dest:
         # Only trust when the origin is a local airport (departing local).
         # For commercial callsigns, log what OpenSky found but don't commit —
         # AirLabs / AeroAPI are the authority (same policy as adsbdb above).
         if _sky_origin_local:
-            if _sky_src != "opensky:cached":
-                if _adsbdb_commercial:
-                    _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} found (commercial — deferring to AirLabs/AeroAPI)")
+            if ctx._sky_src != "opensky:cached":
+                if ctx._adsbdb_commercial:
+                    _log(f"[opensky] {_airline_display(ctx.callsign)}: {_route_display(ctx._sky_origin, ctx._sky_dest)} found (commercial — deferring to AirLabs/AeroAPI)")
                 else:
-                    _log(f"[opensky] {_airline_display(callsign)}: {_route_display(_sky_origin, _sky_dest)} accepted")
-            if not _adsbdb_commercial:
+                    _log(f"[opensky] {_airline_display(ctx.callsign)}: {_route_display(ctx._sky_origin, ctx._sky_dest)} accepted")
+            if not ctx._adsbdb_commercial:
                 # GA / non-scheduled: commit origin and destination
-                if not origin:
-                    origin = _sky_origin
-                if _sky_dest and not destination:
-                    destination = _sky_dest
-                source = source or _sky_src
+                if not ctx.origin:
+                    ctx.origin = ctx._sky_origin
+                if ctx._sky_dest and not ctx.destination:
+                    ctx.destination = ctx._sky_dest
+                ctx.source = ctx.source or ctx._sky_src
             # Commercial: data is logged above but not committed — AirLabs/AeroAPI confirm
-        elif _sky_src != "opensky:cached":
-            _log(f"[opensky] {callsign}: {_sky_origin or '?'}->{_sky_dest or '?'} skipped — origin not local")
+        elif ctx._sky_src != "opensky:cached":
+            _log(f"[opensky] {ctx.callsign}: {ctx._sky_origin or '?'}->{ctx._sky_dest or '?'} skipped — origin not local")
 
     # ── 2b. Free-API consensus (non-local departures / arrivals) ─────────────────
     # adsbdb keys by callsign; OpenSky keys by hex code — two independent KEYS.
@@ -3100,26 +3138,26 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # independence isn't achievable from these two free feeds, so consensus is a
     # cost-saving optimisation, not gospel — the paid APIs still run whenever it
     # doesn't fire.
-    if not (origin and destination) and not _adsbdb_commercial:
-        if (adsbdb_origin and _sky_origin
-                and adsbdb_origin.upper() == _sky_origin.upper()
-                and adsbdb_dest and _sky_dest
-                and adsbdb_dest.upper() == _sky_dest.upper()):
+    if not (ctx.origin and ctx.destination) and not ctx._adsbdb_commercial:
+        if (ctx.adsbdb_origin and ctx._sky_origin
+                and ctx.adsbdb_origin.upper() == ctx._sky_origin.upper()
+                and ctx.adsbdb_dest and ctx._sky_dest
+                and ctx.adsbdb_dest.upper() == ctx._sky_dest.upper()):
             _consensus_plausible = _route_plausible(
-                plane_lat, plane_lon,
-                adsbdb_olat, adsbdb_olon,
-                adsbdb_dlat, adsbdb_dlon,
+                ctx.plane_lat, ctx.plane_lon,
+                ctx.adsbdb_olat, ctx.adsbdb_olon,
+                ctx.adsbdb_dlat, ctx.adsbdb_dlon,
             )
             if _consensus_plausible:
-                origin      = adsbdb_origin
-                destination = adsbdb_dest
+                ctx.origin      = ctx.adsbdb_origin
+                ctx.destination = ctx.adsbdb_dest
                 # Mark as cached when both underlying sources were cache hits —
                 # _is_live() uses this to skip the inter-flight rate-limit delay.
-                _consensus_cached = (_adsbdb_src == "adsbdb:cached" and _sky_src == "opensky:cached")
-                source      = "adsbdb+opensky:cached" if _consensus_cached else "adsbdb+opensky"
-                _log(f"[route] {_airline_display(callsign)}: {_route_display(origin, destination)} accepted — free APIs agree")
+                _consensus_cached = (ctx._adsbdb_src == "adsbdb:cached" and ctx._sky_src == "opensky:cached")
+                ctx.source      = "adsbdb+opensky:cached" if _consensus_cached else "adsbdb+opensky"
+                _log(f"[route] {_airline_display(ctx.callsign)}: {_route_display(ctx.origin, ctx.destination)} accepted — free APIs agree")
             else:
-                _log(f"[route] {callsign}: free APIs agree on {adsbdb_origin}->{adsbdb_dest} but route implausible — escalating to paid")
+                _log(f"[route] {ctx.callsign}: free APIs agree on {ctx.adsbdb_origin}->{ctx.adsbdb_dest} but route implausible — escalating to paid")
 
     # ── 2c. GA cross-check: adsbdb / OpenSky accuracy vs FR24 ───────────────────
     # For N-number aircraft, FR24 is treated as the ground truth.  When both FR24
@@ -3131,86 +3169,77 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     #     results would produce false mismatches against fully-resolved free API data.
     #   • Require FR24 to be a *live* call this invocation — cached FR24 data is not
     #     valid ground truth when comparing against a freshly-fetched free API result.
-    _route_ga_crosscheck(fr24_src=_fr24_src, is_n_number=_is_n_number,
-                         fr24_origin=_fr24_origin, fr24_dest=_fr24_dest,
-                         adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
-                         sky_origin=_sky_origin, sky_dest=_sky_dest,
-                         callsign=callsign, registration=registration)
+    _route_ga_crosscheck(ctx)
 
     # ── 3. AirLabs (real-time, 1,000 calls/month — now mainly through-traffic) ──
     # Only called when free APIs didn't resolve the route (no data, disagreement,
     # or implausible geometry).  Returns airport coordinates for plausibility check.
     # Skipped when the callsign is in _paid_miss_cache — both paid APIs already
     # confirmed empty within ROUTE_PAID_MISS_TTL (2 h), no point burning quota.
-    _need_airlabs = not (origin and destination)
+    ctx._need_airlabs = not (ctx.origin and ctx.destination)
     # N-numbers, military, and callsigns that have hit both paid APIs with empty results
     # recently are all skipped — compute once up front to avoid re-evaluating inside guards.
-    _skip_paid = _skip_paid_apis(callsign) or _override_partial or (
-        bool(callsign) and _cache_db_check_paid_miss(callsign)
+    ctx._skip_paid = _skip_paid_apis(ctx.callsign) or ctx._override_partial or (
+        bool(ctx.callsign) and _cache_db_check_paid_miss(ctx.callsign)
     )
-    al_origin = al_dest = ""
-    al_olat = al_olon = al_dlat = al_dlon = None
-    _al_src   = "airlabs"
-    _al_count = 0  # tracks live call count; > 0 means a real API call was made
 
-    if _need_airlabs and AIRLABS_API_KEY and callsign and not _apis_disabled and not os.path.exists(AIRLABS_DISABLED_FLAG) and not _skip_paid:
-        (al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon,
-         _al_src, _al_count) = _query_airlabs(
-            callsign, plane_lat, plane_lon,
-            api_key=AIRLABS_API_KEY, cache_key=f"airlabs:{callsign}", backoff_name="airlabs",
+    if ctx._need_airlabs and AIRLABS_API_KEY and ctx.callsign and not ctx._apis_disabled and not os.path.exists(AIRLABS_DISABLED_FLAG) and not ctx._skip_paid:
+        (ctx.al_origin, ctx.al_dest, ctx.al_olat, ctx.al_olon, ctx.al_dlat, ctx.al_dlon,
+         ctx._al_src, ctx._al_count) = _query_airlabs(
+            ctx.callsign, ctx.plane_lat, ctx.plane_lon,
+            api_key=AIRLABS_API_KEY, cache_key=f"airlabs:{ctx.callsign}", backoff_name="airlabs",
             usage_file=AIRLABS_USAGE_FILE, reset_day=AIRLABS_RESET_DAY,
             monthly_limit=AIRLABS_MONTHLY_LIMIT, increment_fn=_airlabs_increment, log_tag="airlabs-1")
 
     # AirLabs returns coordinates — apply geometry plausibility only.
     # Paid APIs trust any plausible route (arrivals and through-traffic included);
     # origin-local restriction applies only to free APIs (adsbdb, OpenSky).
-    _al1_cache_was_implausible = False
-    if al_origin or al_dest:
-        al_plausible = _route_plausible(plane_lat, plane_lon,
-                                         al_olat, al_olon, al_dlat, al_dlon)
+    if ctx.al_origin or ctx.al_dest:
+        al_plausible = _route_plausible(ctx.plane_lat, ctx.plane_lon,
+                                         ctx.al_olat, ctx.al_olon, ctx.al_dlat, ctx.al_dlon)
         if al_plausible:
-            _al_is_nonlocal = _is_nonlocal(al_origin, al_dest)
+            _al_is_nonlocal = _is_nonlocal(ctx.al_origin, ctx.al_dest)
             if _al_is_nonlocal:
                 # Non-local route — do NOT commit to origin/dest yet.
                 # Hold in al_origin/al_dest so the verification chain (AeroAPI, FR24)
                 # can try to find a local route first.  The non-local result is used
                 # as a fallback in the final-acceptance block at the end of get_route().
-                _log(f"[airlabs-1] {callsign}: {_route_display(al_origin, al_dest)} non-local — deferring to AeroAPI/FR24 verification")
+                _log(f"[airlabs-1] {ctx.callsign}: {_route_display(ctx.al_origin, ctx.al_dest)} non-local — deferring to AeroAPI/FR24 verification")
             else:
-                _al_filled_dest = not destination
+                _al_filled_dest = not ctx.destination
                 # Require al_dest to be set before treating this as a dest-fill/conflict.
                 # An origin-only partial (al_dest == "") must NOT enter here — otherwise
                 # it clobbers an already-committed LOCAL origin with a non-local one and
                 # mislabels it a "complete route"; it falls to the else (fill-blanks) path.
-                if source and _al_filled_dest and al_dest:
-                    if al_origin and origin and al_origin.upper() != origin.upper():
-                        _log(f"[airlabs-1] origin conflict ({origin} vs {al_origin}) — preferring AirLabs-1 complete route")
-                        origin = al_origin
-                        destination = al_dest
-                        source = _al_src
+                if ctx.source and _al_filled_dest and ctx.al_dest:
+                    if ctx.al_origin and ctx.origin and ctx.al_origin.upper() != ctx.origin.upper():
+                        _log(f"[airlabs-1] origin conflict ({ctx.origin} vs {ctx.al_origin}) — preferring AirLabs-1 complete route")
+                        ctx.origin = ctx.al_origin
+                        ctx.destination = ctx.al_dest
+                        ctx.source = ctx._al_src
                     else:
-                        if not origin:
-                            origin = al_origin
-                        destination = al_dest
-                        source = f"{source}+airlabs"
+                        if not ctx.origin:
+                            ctx.origin = ctx.al_origin
+                        ctx.destination = ctx.al_dest
+                        ctx.source = f"{ctx.source}+airlabs"
                 else:
-                    if not origin:
-                        origin = al_origin
-                    if not destination:
-                        destination = al_dest
-                    source = source or _al_src
-                if _al_src != "airlabs:cached":
-                    _count_suffix = f" [call #{_al_count}]" if _al_count else ""
-                    _log(f"[airlabs-1] {_airline_display(callsign)}: {_route_display(al_origin, al_dest)} accepted{_count_suffix}")
-                if al_olat is not None:
-                    _coord_olat, _coord_olon = al_olat, al_olon
-                    _coord_dlat, _coord_dlon = al_dlat, al_dlon
-                    _coord_origin_iata = origin
+                    if not ctx.origin:
+                        ctx.origin = ctx.al_origin
+                    if not ctx.destination:
+                        ctx.destination = ctx.al_dest
+                    ctx.source = ctx.source or ctx._al_src
+                if ctx._al_src != "airlabs:cached":
+                    _count_suffix = f" [call #{ctx._al_count}]" if ctx._al_count else ""
+                    _log(f"[airlabs-1] {_airline_display(ctx.callsign)}: {_route_display(ctx.al_origin, ctx.al_dest)} accepted{_count_suffix}")
+                if ctx.al_olat is not None:
+                    ctx._coord_olat, ctx._coord_olon = ctx.al_olat, ctx.al_olon
+                    ctx._coord_dlat, ctx._coord_dlon = ctx.al_dlat, ctx.al_dlon
+                    ctx._coord_origin_iata = ctx.origin
         else:
-            if _al_src == "airlabs:cached":
-                _cache_db_delete_route(f"airlabs:{callsign}", 'route')
-                _al1_cache_was_implausible = True
-            _log(f"[airlabs-1] implausible route {al_origin}->{al_dest} rejected for {callsign}")
+            if ctx._al_src == "airlabs:cached":
+                _cache_db_delete_route(f"airlabs:{ctx.callsign}", 'route')
+                ctx._al1_cache_was_implausible = True
+            _log(f"[airlabs-1] implausible route {ctx.al_origin}->{ctx.al_dest} rejected for {ctx.callsign}")
 
     # ── 3b. AirLabs 2 (secondary key — fallback when AirLabs 1 has no usable result) ──
     # Tried when AirLabs 1 either:
@@ -3225,89 +3254,78 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     #     possibly-misclassified empty.
     # Skipped when AirLabs 1 made a live call and returned empty within quota
     # (both keys share the same backend data — key 2 would return the same empty result).
-    al2_origin = al2_dest = ""
-    al2_olat = al2_olon = al2_dlat = al2_dlon = None
-    _al2_src   = "airlabs2"
-    _al2_count = 0
-
-    _al1_over_quota = _al_count >= AIRLABS_MONTHLY_LIMIT
-    _al1_cache_was_empty = (_al_src == "airlabs:cached" and not al_origin and not al_dest)
+    _al1_over_quota = ctx._al_count >= AIRLABS_MONTHLY_LIMIT
+    _al1_cache_was_empty = (ctx._al_src == "airlabs:cached" and not ctx.al_origin and not ctx.al_dest)
     # Skip AL-2 whenever AL-1's cache has a non-local result.
     # Both keys share the same backend — AL-2 would return the same data.
     # With the new system, non-local routes are only cached at ROUTE_MISS_TTL (5 min)
     # so a cached non-local result is always fresh and trustworthy; no need to verify.
     _al1_cache_was_nonlocal = (
-        _al_src == "airlabs:cached"
-        and _is_nonlocal(al_origin, al_dest)
+        ctx._al_src == "airlabs:cached"
+        and _is_nonlocal(ctx.al_origin, ctx.al_dest)
     )
-    if (not (origin and destination)
+    if (not (ctx.origin and ctx.destination)
             and (_al1_over_quota
                  or _al1_cache_was_empty
-                 or (_al_count == 0
-                     and not _al1_cache_was_implausible
+                 or (ctx._al_count == 0
+                     and not ctx._al1_cache_was_implausible
                      and not _al1_cache_was_nonlocal))
-            and AIRLABS_API_KEY_2 and callsign
-            and not _apis_disabled and not os.path.exists(AIRLABS2_DISABLED_FLAG)
-            and not _skip_paid):
-        (al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon,
-         _al2_src, _al2_count) = _query_airlabs(
-            callsign, plane_lat, plane_lon,
-            api_key=AIRLABS_API_KEY_2, cache_key=f"airlabs2:{callsign}", backoff_name="airlabs2",
+            and AIRLABS_API_KEY_2 and ctx.callsign
+            and not ctx._apis_disabled and not os.path.exists(AIRLABS2_DISABLED_FLAG)
+            and not ctx._skip_paid):
+        (ctx.al2_origin, ctx.al2_dest, ctx.al2_olat, ctx.al2_olon, ctx.al2_dlat, ctx.al2_dlon,
+         ctx._al2_src, ctx._al2_count) = _query_airlabs(
+            ctx.callsign, ctx.plane_lat, ctx.plane_lon,
+            api_key=AIRLABS_API_KEY_2, cache_key=f"airlabs2:{ctx.callsign}", backoff_name="airlabs2",
             usage_file=AIRLABS2_USAGE_FILE, reset_day=AIRLABS2_RESET_DAY,
             monthly_limit=AIRLABS2_MONTHLY_LIMIT, increment_fn=_airlabs2_increment, log_tag="airlabs-2")
 
-    if al2_origin or al2_dest:
-        al2_plausible = _route_plausible(plane_lat, plane_lon,
-                                          al2_olat, al2_olon, al2_dlat, al2_dlon)
+    if ctx.al2_origin or ctx.al2_dest:
+        al2_plausible = _route_plausible(ctx.plane_lat, ctx.plane_lon,
+                                          ctx.al2_olat, ctx.al2_olon, ctx.al2_dlat, ctx.al2_dlon)
         if al2_plausible:
-            _al2_is_nonlocal = _is_nonlocal(al2_origin, al2_dest)
+            _al2_is_nonlocal = _is_nonlocal(ctx.al2_origin, ctx.al2_dest)
             if _al2_is_nonlocal:
-                _log(f"[airlabs-2] {callsign}: {_route_display(al2_origin, al2_dest)} non-local — deferring to AeroAPI/FR24 verification")
+                _log(f"[airlabs-2] {ctx.callsign}: {_route_display(ctx.al2_origin, ctx.al2_dest)} non-local — deferring to AeroAPI/FR24 verification")
             else:
-                _al2_filled_dest = not destination
-                if source and _al2_filled_dest and al2_dest:  # al2_dest guard — see AirLabs-1
-                    if al2_origin and origin and al2_origin.upper() != origin.upper():
-                        _log(f"[airlabs-2] origin conflict ({origin} vs {al2_origin}) — preferring AirLabs-2 complete route")
-                        origin = al2_origin
-                        destination = al2_dest
-                        source = _al2_src
+                _al2_filled_dest = not ctx.destination
+                if ctx.source and _al2_filled_dest and ctx.al2_dest:  # al2_dest guard — see AirLabs-1
+                    if ctx.al2_origin and ctx.origin and ctx.al2_origin.upper() != ctx.origin.upper():
+                        _log(f"[airlabs-2] origin conflict ({ctx.origin} vs {ctx.al2_origin}) — preferring AirLabs-2 complete route")
+                        ctx.origin = ctx.al2_origin
+                        ctx.destination = ctx.al2_dest
+                        ctx.source = ctx._al2_src
                     else:
-                        if not origin:
-                            origin = al2_origin
-                        destination = al2_dest
-                        source = f"{source}+airlabs2"
+                        if not ctx.origin:
+                            ctx.origin = ctx.al2_origin
+                        ctx.destination = ctx.al2_dest
+                        ctx.source = f"{ctx.source}+airlabs2"
                 else:
-                    if not origin:
-                        origin = al2_origin
-                    if not destination:
-                        destination = al2_dest
-                    source = source or _al2_src
-                if _al2_src != "airlabs2:cached":
-                    _count_suffix = f" [call #{_al2_count}]" if _al2_count else ""
-                    _log(f"[airlabs-2] {_airline_display(callsign)}: {_route_display(al2_origin, al2_dest)} accepted{_count_suffix}")
-                if al2_olat is not None:
-                    _coord_olat, _coord_olon = al2_olat, al2_olon
-                    _coord_dlat, _coord_dlon = al2_dlat, al2_dlon
-                    _coord_origin_iata = origin
+                    if not ctx.origin:
+                        ctx.origin = ctx.al2_origin
+                    if not ctx.destination:
+                        ctx.destination = ctx.al2_dest
+                    ctx.source = ctx.source or ctx._al2_src
+                if ctx._al2_src != "airlabs2:cached":
+                    _count_suffix = f" [call #{ctx._al2_count}]" if ctx._al2_count else ""
+                    _log(f"[airlabs-2] {_airline_display(ctx.callsign)}: {_route_display(ctx.al2_origin, ctx.al2_dest)} accepted{_count_suffix}")
+                if ctx.al2_olat is not None:
+                    ctx._coord_olat, ctx._coord_olon = ctx.al2_olat, ctx.al2_olon
+                    ctx._coord_dlat, ctx._coord_dlon = ctx.al2_dlat, ctx.al2_dlon
+                    ctx._coord_origin_iata = ctx.origin
         else:
-            if _al2_src == "airlabs2:cached":
-                _cache_db_delete_route(f"airlabs2:{callsign}", 'route')
-            _log(f"[airlabs-2] implausible route {al2_origin}->{al2_dest} rejected for {callsign}")
+            if ctx._al2_src == "airlabs2:cached":
+                _cache_db_delete_route(f"airlabs2:{ctx.callsign}", 'route')
+            _log(f"[airlabs-2] implausible route {ctx.al2_origin}->{ctx.al2_dest} rejected for {ctx.callsign}")
 
     # ── 4. FlightAware AeroAPI (paid — last resort, capped at monthly limit) ───
-    # Extracted to _route_aeroapi_tier (byte-identical).  fa_origin/fa_dest/_cached_fa
-    # and _al_held_nonlocal are pre-initialised inside and returned on EVERY path;
-    # _al_held_nonlocal is read by §5 below.
-    (origin, destination, source, fa_origin, fa_dest, _cached_fa,
-     _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
-     _al_held_nonlocal) = _route_aeroapi_tier(
-        origin, destination, source, callsign, plane_lat, plane_lon,
-        _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
-        al_origin=al_origin, al_dest=al_dest, al2_origin=al2_origin, al2_dest=al2_dest,
-        skip_paid=_skip_paid, apis_disabled=_apis_disabled)
+    # Extracted to _route_aeroapi_tier (byte-identical).  ctx.fa_origin/fa_dest/_cached_fa
+    # and ctx._al_held_nonlocal are (re)initialised inside and written on EVERY path;
+    # ctx._al_held_nonlocal is read by §5 below.
+    _route_aeroapi_tier(ctx)
 
-    origin      = origin      if origin.upper()      not in BLANK_FIELDS else ""
-    destination = destination if destination.upper() not in BLANK_FIELDS else ""
+    ctx.origin      = ctx.origin      if ctx.origin.upper()      not in BLANK_FIELDS else ""
+    ctx.destination = ctx.destination if ctx.destination.upper() not in BLANK_FIELDS else ""
 
     # ── 5. FlightRadar24 (commercial — free, last resort after all paid APIs) ──
     # Reached only when AirLabs and AeroAPI both returned no route for a commercial
@@ -3316,68 +3334,51 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # scheduled flight is recognised across polls.
     # _all_paid_nonlocal: all paid APIs (AirLabs + AeroAPI) held non-local results;
     # give FR24 a chance to return a local route before final acceptance.
-    _all_paid_nonlocal = _al_held_nonlocal and not (origin and destination)
+    ctx._all_paid_nonlocal = ctx._al_held_nonlocal and not (ctx.origin and ctx.destination)
     # _query_fr24_com() always returns all three vars (empties when its internal guard is
     # false), so they're defined on every path for the gating + final-acceptance below.
-    (_fr24_com_origin, _fr24_com_dest, _fr24_com_src) = _query_fr24_com(
-        callsign, hex_code, registration, origin, destination,
-        plane_lat, plane_lon, _adsbdb_commercial, _all_paid_nonlocal)
+    (ctx._fr24_com_origin, ctx._fr24_com_dest, ctx._fr24_com_src) = _query_fr24_com(
+        ctx.callsign, ctx.hex_code, ctx.registration, ctx.origin, ctx.destination,
+        ctx.plane_lat, ctx.plane_lon, ctx._adsbdb_commercial, ctx._all_paid_nonlocal)
 
-    if _fr24_com_origin or _fr24_com_dest:
-        _fr24_com_is_nonlocal = _is_nonlocal(_fr24_com_origin, _fr24_com_dest)
-        if _all_paid_nonlocal and not _fr24_com_is_nonlocal:
+    if ctx._fr24_com_origin or ctx._fr24_com_dest:
+        _fr24_com_is_nonlocal = _is_nonlocal(ctx._fr24_com_origin, ctx._fr24_com_dest)
+        if ctx._all_paid_nonlocal and not _fr24_com_is_nonlocal:
             # All paid APIs were non-local; FR24 returned a local route — use it.
-            _log(f"[fr24] {_airline_display(callsign)}: "
-                 f"{_route_display(_fr24_com_origin, _fr24_com_dest)} local — overriding non-local paid results")
-            origin      = _fr24_com_origin
-            destination = _fr24_com_dest
-            source      = _fr24_com_src
+            _log(f"[fr24] {_airline_display(ctx.callsign)}: "
+                 f"{_route_display(ctx._fr24_com_origin, ctx._fr24_com_dest)} local — overriding non-local paid results")
+            ctx.origin      = ctx._fr24_com_origin
+            ctx.destination = ctx._fr24_com_dest
+            ctx.source      = ctx._fr24_com_src
         elif not _fr24_com_is_nonlocal:
             # Normal fill-blanks path (not all-paid-nonlocal context).
-            if _fr24_com_src != "fr24:cached":
-                _log(f"[fr24] {_airline_display(callsign)}: "
-                     f"{_route_display(_fr24_com_origin, _fr24_com_dest)} accepted (commercial)")
-            if not origin:
-                origin = _fr24_com_origin
-            if not destination:
-                destination = _fr24_com_dest
-            source = source or _fr24_com_src
+            if ctx._fr24_com_src != "fr24:cached":
+                _log(f"[fr24] {_airline_display(ctx.callsign)}: "
+                     f"{_route_display(ctx._fr24_com_origin, ctx._fr24_com_dest)} accepted (commercial)")
+            if not ctx.origin:
+                ctx.origin = ctx._fr24_com_origin
+            if not ctx.destination:
+                ctx.destination = ctx._fr24_com_dest
+            ctx.source = ctx.source or ctx._fr24_com_src
         else:
             # FR24 also non-local — hold for final acceptance.
-            if _fr24_com_src != "fr24:cached":
-                _log(f"[fr24] {_airline_display(callsign)}: "
-                     f"{_route_display(_fr24_com_origin, _fr24_com_dest)} non-local — held for final acceptance")
+            if ctx._fr24_com_src != "fr24:cached":
+                _log(f"[fr24] {_airline_display(ctx.callsign)}: "
+                     f"{_route_display(ctx._fr24_com_origin, ctx._fr24_com_dest)} non-local — held for final acceptance")
 
     # ── Last-resort selection: walk the full hierarchy for any usable route ────
-    origin, destination, source = _route_last_resort_pick(
-        origin, destination, source,
-        al_origin=al_origin, al_dest=al_dest, al2_origin=al2_origin, al2_dest=al2_dest,
-        fa_origin=fa_origin, fa_dest=fa_dest,
-        fr24_com_origin=_fr24_com_origin, fr24_com_dest=_fr24_com_dest,
-        adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
-        sky_origin=_sky_origin, sky_dest=_sky_dest,
-        plane_lat=plane_lat, plane_lon=plane_lon, callsign=callsign,
-        al_src=_al_src, al2_src=_al2_src, cached_fa=_cached_fa,
-        fr24_com_src=_fr24_com_src, adsbdb_src=_adsbdb_src, sky_src=_sky_src,
-    )
+    _route_last_resort_pick(ctx)
 
 
     # If still no route and all eligible paid APIs returned empty, record a combined
     # paid-miss so none are called again for ROUTE_PAID_MISS_TTL.
-    _route_record_paid_miss(
-        callsign, need_airlabs=_need_airlabs, skip_paid=_skip_paid, apis_disabled=_apis_disabled,
-        al_origin=al_origin, al_dest=al_dest, al2_origin=al2_origin, al2_dest=al2_dest,
-        fa_origin=fa_origin, fa_dest=fa_dest,
-    )
+    _route_record_paid_miss(ctx)
 
     # Cross-check log — for commercial flights where adsbdb had data, report whether
     # the paid APIs confirmed or overrode it (GA flights never enter this branch).
     # Skip when FR24 was the source — it's free, not a paid API, and the log/stats
     # would misleadingly attribute its result to AirLabs/AeroAPI.
-    _route_adsbdb_crosscheck(adsbdb_commercial=_adsbdb_commercial,
-                             adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
-                             origin=origin, destination=destination,
-                             source=source, callsign=callsign)
+    _route_adsbdb_crosscheck(ctx)
 
     # ── _select() is the route authority (Phase-3 flip, now permanent) ──────────
     # The 4-day shadow soak proved _select()'s route matches the live inline pick on
@@ -3388,31 +3389,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # been retired.  _select() DRIVES the result: gather candidates, pick, reconstruct the
     # cached-aware label, commit.  The inline chain above still runs ONLY to (a) short-circuit
     # paid calls and (b) seed override-partial — it no longer decides the final route.
-    if not _override_partial:
-        (origin, destination, source,
-         _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata) = _route_select_authority(
-            origin, destination, source,
-            _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
-            fr24_origin=_fr24_origin, fr24_dest=_fr24_dest,
-            al_origin=al_origin, al_dest=al_dest, al_olat=al_olat, al_olon=al_olon, al_dlat=al_dlat, al_dlon=al_dlon,
-            al2_origin=al2_origin, al2_dest=al2_dest, al2_olat=al2_olat, al2_olon=al2_olon, al2_dlat=al2_dlat, al2_dlon=al2_dlon,
-            fa_origin=fa_origin, fa_dest=fa_dest,
-            fr24_com_origin=_fr24_com_origin, fr24_com_dest=_fr24_com_dest,
-            adsbdb_commercial=_adsbdb_commercial, plane_lat=plane_lat, plane_lon=plane_lon,
-            adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest, adsbdb_olat=adsbdb_olat, adsbdb_olon=adsbdb_olon,
-            adsbdb_dlat=adsbdb_dlat, adsbdb_dlon=adsbdb_dlon, sky_origin=_sky_origin, sky_dest=_sky_dest,
-            al_src=_al_src, al2_src=_al2_src, cached_fa=_cached_fa,
-            fr24_com_src=_fr24_com_src, fr24_src=_fr24_src, adsbdb_src=_adsbdb_src, sky_src=_sky_src,
-        )
+    if not ctx._override_partial:
+        _route_select_authority(ctx)
 
     # ── Resolved-route cache write ─────────────────────────────────────────────
     # If both endpoints are now known for a scheduled airline, persist the final
     # result so future sightings of the same daily flight skip the full API chain —
     # even when individual upstream caches (e.g. OpenSky's 1-hour TTL) have expired.
-    _route_write_resolved_cache(
-        origin, destination, callsign,
-        _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata, source,
-    )
+    _route_write_resolved_cache(ctx)
 
     # (The Phase-2 read-only shadow and the Phase-3 [flip-check] backstop that compared
     # _select() to the inline logic have both been retired now that _select() is the proven
@@ -3420,23 +3404,16 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # short-circuiting and override-partial completion.)
 
     if _trace is not None:
-        _route_fill_trace(
-            _trace,
-            adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
-            sky_origin=_sky_origin, sky_dest=_sky_dest,
-            al_origin=al_origin, al_dest=al_dest,
-            al2_origin=al2_origin, al2_dest=al2_dest,
-            fa_origin=fa_origin, fa_dest=fa_dest,
-        )
+        _route_fill_trace(ctx, _trace)
 
     # Drop non-IATA airport codes (e.g. OpenSky FAA identifiers like "NV98") to "?" — real
     # IATA codes are 3 letters and a 4-char code doesn't fit the display.  Done at the
     # boundary (after the shadow), so internal resolution/diagnostics keep the raw code.
     # If both endpoints drop out there's no usable route, so the source label becomes "none".
-    origin, destination = _clean_iata(origin), _clean_iata(destination)
-    if not (origin or destination):
-        source = "none"
-    return origin, destination, source or "none", _ov_plane, _ov_display
+    ctx.origin, ctx.destination = _clean_iata(ctx.origin), _clean_iata(ctx.destination)
+    if not (ctx.origin or ctx.destination):
+        ctx.source = "none"
+    return ctx.origin, ctx.destination, ctx.source or "none", ctx._ov_plane, ctx._ov_display
 
 
 def _try_opensky_reg(hex_code: str) -> None:
