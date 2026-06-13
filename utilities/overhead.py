@@ -2709,19 +2709,31 @@ def _route_select_authority(ctx):
     # appends on whether _select already finds a plausible TRUSTED winner.  GA / non-
     # commercial routes always flow through (geometry-checked in _select); GLOBAL mode is
     # never commercial-blocked here.  (_cands holds ONLY the trusted candidates here.)
-    _free_ok = (not ctx._adsbdb_commercial
-                or _select(list(_cands), ctx.plane_lat, ctx.plane_lon) is None)
-    if (ctx.adsbdb_origin and ctx._sky_origin and ctx.adsbdb_origin.upper() == ctx._sky_origin.upper()
-            and ctx.adsbdb_dest and ctx._sky_dest and ctx.adsbdb_dest.upper() == ctx._sky_dest.upper()
-            and _free_ok):
-        _cands.append(_Cand(_norm_code(ctx.adsbdb_origin), _norm_code(ctx.adsbdb_dest), ctx.adsbdb_olat, ctx.adsbdb_olon,
-                            ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb+opensky"))
-    if (ctx.adsbdb_origin or ctx.adsbdb_dest) and _free_ok:
-        _cands.append(_Cand(_norm_code(ctx.adsbdb_origin), _norm_code(ctx.adsbdb_dest), ctx.adsbdb_olat, ctx.adsbdb_olon,
-                            ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb"))
-    if (ctx._sky_origin or ctx._sky_dest) and _free_ok:
-        _cands.append(_Cand(_norm_code(ctx._sky_origin), _norm_code(ctx._sky_dest), None, None, None, None, "opensky"))
-    _best = _select(_cands, ctx.plane_lat, ctx.plane_lon)
+    # Compute the trusted-only pick at most ONCE and reuse it.  For a COMMERCIAL callsign the
+    # free sources are gated on whether a plausible TRUSTED route already exists — and that gate
+    # IS the trusted-only _select, so when a trusted winner exists we reuse it as the final pick
+    # instead of running _select a second time over the identical candidate list.  Non-commercial
+    # / GLOBAL flights flow straight through to the full _select with the free candidates appended
+    # (one _select, exactly as before).  _select never mutates its argument (it builds + sorts a
+    # fresh `usable` list), so the old defensive list() copy is unnecessary and dropped.
+    if ctx._adsbdb_commercial:
+        _trusted_best = _select(_cands, ctx.plane_lat, ctx.plane_lon)
+        _free_ok = _trusted_best is None
+    else:
+        _trusted_best, _free_ok = None, True
+    if _free_ok:
+        if (ctx.adsbdb_origin and ctx._sky_origin and ctx.adsbdb_origin.upper() == ctx._sky_origin.upper()
+                and ctx.adsbdb_dest and ctx._sky_dest and ctx.adsbdb_dest.upper() == ctx._sky_dest.upper()):
+            _cands.append(_Cand(_norm_code(ctx.adsbdb_origin), _norm_code(ctx.adsbdb_dest), ctx.adsbdb_olat, ctx.adsbdb_olon,
+                                ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb+opensky"))
+        if (ctx.adsbdb_origin or ctx.adsbdb_dest):
+            _cands.append(_Cand(_norm_code(ctx.adsbdb_origin), _norm_code(ctx.adsbdb_dest), ctx.adsbdb_olat, ctx.adsbdb_olon,
+                                ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb"))
+        if (ctx._sky_origin or ctx._sky_dest):
+            _cands.append(_Cand(_norm_code(ctx._sky_origin), _norm_code(ctx._sky_dest), None, None, None, None, "opensky"))
+        _best = _select(_cands, ctx.plane_lat, ctx.plane_lon)
+    else:
+        _best = _trusted_best
 
     ctx.origin, ctx.destination = (_best.origin, _best.dest) if _best else ("", "")
     if _best:
@@ -3885,12 +3897,15 @@ class Overhead:
             # A single read prevents a race where the file expires or changes
             # between the two uses.
             _td_cached = None
-            try:
-                _td_parsed = json.loads(_pathlib.Path(TEST_DISPLAY_FILE).read_text())
-                if _td_parsed.get("expires", 0) > int(time.time()):
-                    _td_cached = _td_parsed
-            except Exception:
-                pass
+            # Almost always absent (a test flight is rarely armed) — skip the read_text() +
+            # FileNotFoundError churn on the per-poll hot path with a cheap existence check.
+            if os.path.exists(TEST_DISPLAY_FILE):
+                try:
+                    _td_parsed = json.loads(_pathlib.Path(TEST_DISPLAY_FILE).read_text())
+                    if _td_parsed.get("expires", 0) > int(time.time()):
+                        _td_cached = _td_parsed
+                except Exception:
+                    pass
             _test_cs = (_td_cached.get("callsign") or "").strip().upper() if _td_cached else ""
 
             for i, flight in enumerate(flights[:MAX_FLIGHT_LOOKUP]):

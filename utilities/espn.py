@@ -70,7 +70,11 @@ def _label_nba(period: int, status: str) -> str:
     if status == "STATUS_HALFTIME":
         return "HALF"
     if period <= 4:
-        base = {1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"}[period]
+        # .get(), not a hard subscript: a scheduled-but-not-started game reports period 0
+        # (which satisfies period <= 4); a bare [0] would KeyError, and the swallowing caller
+        # would drop the game to None instead of showing the pre-game slot. The label is
+        # unused for FUT/PRE anyway, so any sane default is fine.
+        base = {1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"}.get(period, "Q1")
     elif period == 5:
         base = "OT"
     else:

@@ -91,6 +91,11 @@ def _fetch_scoreboard_data():
         return v if v is not None else default
 
     priority = cfg.get("SCOREBOARD_PRIORITY", ["NHL", "NFL", "MLB", "NBA", "MLS"])
+    # Normalise to canonical uppercase league keys + dedupe: _SPORT_DEFS is keyed uppercase
+    # and the LED scene resolves via league.upper(), so a hand-edited config with a lowercase
+    # or duplicated entry (e.g. "nhl" or ["NHL","NFL","NHL"]) would otherwise be silently
+    # dropped here / fetched twice — selecting a different game on the web than on the panel.
+    priority = list(dict.fromkeys(str(p).upper() for p in priority))
 
     _SPORT_DEFS = {
         "NHL": {

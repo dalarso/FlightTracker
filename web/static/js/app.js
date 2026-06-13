@@ -678,7 +678,10 @@ function initLog() {
     evtSource.close();
     evtSource = null;
     setTimeout(() => {
-      if (document.getElementById('log-tab').classList.contains('active')) initLog();
+      // Don't reconnect while the tab is hidden — visibilitychange pauses the stream to
+      // save Pi load and re-opens it on return; without this, a backgrounded tab keeps
+      // reconnecting the SSE log every 5s.
+      if (!document.hidden && document.getElementById('log-tab').classList.contains('active')) initLog();
     }, 5000);
   };
 }

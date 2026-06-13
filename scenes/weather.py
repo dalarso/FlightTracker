@@ -494,9 +494,13 @@ class WeatherScene(object):
         # Temperature is fetched on the background thread (_weather_refresh_loop);
         # here we only render the latest published value.
 
+        # Snapshot the shared value ONCE: the background _weather_refresh_loop can flip
+        # self.current_temperature to None (stale-window blank) between reads, so re-reading
+        # it at temperature_to_colour() below could pass None -> round(None) -> TypeError.
+        temp = self.current_temperature
         # Compute the string we *want* to show (None if no data)
-        if self.current_temperature is not None:
-            temp_str = f"{round(self.current_temperature)}°".rjust(4, " ")
+        if temp is not None:
+            temp_str = f"{round(temp)}°".rjust(4, " ")
         else:
             temp_str = None
 
@@ -514,7 +518,7 @@ class WeatherScene(object):
                 )
 
             if temp_str is not None:
-                temp_colour = self.temperature_to_colour(self.current_temperature)
+                temp_colour = self.temperature_to_colour(temp)
 
                 # Draw temperature
                 _ = graphics.DrawText(
