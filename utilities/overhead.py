@@ -2686,6 +2686,88 @@ def _route_aeroapi_tier(origin, destination, source, callsign, plane_lat, plane_
             _al_held_nonlocal)
 
 
+def _route_select_authority(origin, destination, source,
+                            coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata,
+                            *, fr24_origin, fr24_dest,
+                            al_origin, al_dest, al_olat, al_olon, al_dlat, al_dlon,
+                            al2_origin, al2_dest, al2_olat, al2_olon, al2_dlat, al2_dlon,
+                            fa_origin, fa_dest,
+                            fr24_com_origin, fr24_com_dest,
+                            adsbdb_commercial, plane_lat, plane_lon,
+                            adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
+                            adsbdb_dlat, adsbdb_dlon, sky_origin, sky_dest,
+                            al_src, al2_src, cached_fa,
+                            fr24_com_src, fr24_src, adsbdb_src, sky_src):
+    """_select() is the route authority: gather every source's candidate, let _select()
+    pick the winner by (tier, SOURCE_PRIORITY) + geometry, reconstruct the cached-aware
+    source label, and commit.  Called ONLY when not override-partial (the caller keeps that
+    decision).  Returns the possibly-updated
+    (origin, destination, source, coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata);
+    when _select finds no winner the caller-supplied values are returned unchanged."""
+    _cands = []
+    # Normalise every per-source code once at construction (strip/upper + BLANK_FIELDS
+    # -> '') so the same-airport reject and tier completeness in _select() are robust to
+    # whitespace/junk no matter which source produced the code.
+    if fr24_origin or fr24_dest:
+        _cands.append(_Cand(_norm_code(fr24_origin), _norm_code(fr24_dest), None, None, None, None, "fr24"))
+    if al_origin or al_dest:
+        _cands.append(_Cand(_norm_code(al_origin), _norm_code(al_dest), al_olat, al_olon, al_dlat, al_dlon, "airlabs"))
+    if al2_origin or al2_dest:
+        _cands.append(_Cand(_norm_code(al2_origin), _norm_code(al2_dest), al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2"))
+    if fa_origin or fa_dest:
+        # AeroAPI's per-call coord locals (fa_olat…) aren't function-scoped, so look the
+        # endpoint coords back up from the harvested airport table (populated by AeroAPI's
+        # own _remember_airport, live or cached).  Without real coords here the resolved-
+        # cache write guard would skip AeroAPI-resolved ARRIVALS (non-local origin -> home
+        # airport), silently re-billing the paid chain every poll.
+        _fa_o = _airport_coords(fa_origin) or (None, None)
+        _fa_d = _airport_coords(fa_dest) or (None, None)
+        _cands.append(_Cand(_norm_code(fa_origin), _norm_code(fa_dest), _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi"))
+    if fr24_com_origin or fr24_com_dest:
+        _cands.append(_Cand(_norm_code(fr24_com_origin), _norm_code(fr24_com_dest), None, None, None, None, "fr24"))
+    # Free sources (adsbdb, OpenSky) carry the COMMERCIAL-distrust constraint the inline
+    # chain enforces (docstring "Trust rule") into the candidate model.  For a COMMERCIAL
+    # callsign the paid APIs (and FR24) are the authority: a free route must not COMPETE
+    # with a PLAUSIBLE trusted route, otherwise a stale LOCAL-origin adsbdb/OpenSky entry
+    # (which _route_tier ranks above a non-local paid route) would beat the live paid
+    # answer — the exact regression the trust rule exists to prevent.  But the inline
+    # "safety net" must be preserved: when the trusted chain produced NO usable route
+    # (paid empty/in-backoff, or every trusted route geometry-implausible), a commercial
+    # flight still falls back to whatever adsbdb/OpenSky has.  So gate the commercial free
+    # appends on whether _select already finds a plausible TRUSTED winner.  GA / non-
+    # commercial routes always flow through (geometry-checked in _select); GLOBAL mode is
+    # never commercial-blocked here.  (_cands holds ONLY the trusted candidates here.)
+    _free_ok = (not adsbdb_commercial
+                or _select(list(_cands), plane_lat, plane_lon) is None)
+    if (adsbdb_origin and sky_origin and adsbdb_origin.upper() == sky_origin.upper()
+            and adsbdb_dest and sky_dest and adsbdb_dest.upper() == sky_dest.upper()
+            and _free_ok):
+        _cands.append(_Cand(_norm_code(adsbdb_origin), _norm_code(adsbdb_dest), adsbdb_olat, adsbdb_olon,
+                            adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky"))
+    if (adsbdb_origin or adsbdb_dest) and _free_ok:
+        _cands.append(_Cand(_norm_code(adsbdb_origin), _norm_code(adsbdb_dest), adsbdb_olat, adsbdb_olon,
+                            adsbdb_dlat, adsbdb_dlon, "adsbdb"))
+    if (sky_origin or sky_dest) and _free_ok:
+        _cands.append(_Cand(_norm_code(sky_origin), _norm_code(sky_dest), None, None, None, None, "opensky"))
+    _best = _select(_cands, plane_lat, plane_lon)
+
+    origin, destination = (_best.origin, _best.dest) if _best else ("", "")
+    if _best:
+        source = _reconstruct_select_label(
+            _best.source,
+            al_src=al_src, al2_src=al2_src, cached_fa=cached_fa,
+            fr24_com_src=fr24_com_src, fr24_com_origin=fr24_com_origin,
+            fr24_com_dest=fr24_com_dest, fr24_src=fr24_src,
+            adsbdb_src=adsbdb_src, sky_src=sky_src,
+        )
+        coord_olat, coord_olon = _best.olat, _best.olon
+        coord_dlat, coord_dlon = _best.dlat, _best.dlon
+        coord_origin_iata = _best.origin
+
+    return (origin, destination, source,
+            coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata)
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -3293,65 +3375,21 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # cached-aware label, commit.  The inline chain above still runs ONLY to (a) short-circuit
     # paid calls and (b) seed override-partial — it no longer decides the final route.
     if not _override_partial:
-        _cands = []
-        # Normalise every per-source code once at construction (strip/upper + BLANK_FIELDS
-        # -> '') so the same-airport reject and tier completeness in _select() are robust to
-        # whitespace/junk no matter which source produced the code.
-        if _fr24_origin or _fr24_dest:
-            _cands.append(_Cand(_norm_code(_fr24_origin), _norm_code(_fr24_dest), None, None, None, None, "fr24"))
-        if al_origin or al_dest:
-            _cands.append(_Cand(_norm_code(al_origin), _norm_code(al_dest), al_olat, al_olon, al_dlat, al_dlon, "airlabs"))
-        if al2_origin or al2_dest:
-            _cands.append(_Cand(_norm_code(al2_origin), _norm_code(al2_dest), al2_olat, al2_olon, al2_dlat, al2_dlon, "airlabs2"))
-        if fa_origin or fa_dest:
-            # AeroAPI's per-call coord locals (fa_olat…) aren't function-scoped, so look the
-            # endpoint coords back up from the harvested airport table (populated by AeroAPI's
-            # own _remember_airport, live or cached).  Without real coords here the resolved-
-            # cache write guard would skip AeroAPI-resolved ARRIVALS (non-local origin -> home
-            # airport), silently re-billing the paid chain every poll.
-            _fa_o = _airport_coords(fa_origin) or (None, None)
-            _fa_d = _airport_coords(fa_dest) or (None, None)
-            _cands.append(_Cand(_norm_code(fa_origin), _norm_code(fa_dest), _fa_o[0], _fa_o[1], _fa_d[0], _fa_d[1], "aeroapi"))
-        if _fr24_com_origin or _fr24_com_dest:
-            _cands.append(_Cand(_norm_code(_fr24_com_origin), _norm_code(_fr24_com_dest), None, None, None, None, "fr24"))
-        # Free sources (adsbdb, OpenSky) carry the COMMERCIAL-distrust constraint the inline
-        # chain enforces (docstring "Trust rule") into the candidate model.  For a COMMERCIAL
-        # callsign the paid APIs (and FR24) are the authority: a free route must not COMPETE
-        # with a PLAUSIBLE trusted route, otherwise a stale LOCAL-origin adsbdb/OpenSky entry
-        # (which _route_tier ranks above a non-local paid route) would beat the live paid
-        # answer — the exact regression the trust rule exists to prevent.  But the inline
-        # "safety net" must be preserved: when the trusted chain produced NO usable route
-        # (paid empty/in-backoff, or every trusted route geometry-implausible), a commercial
-        # flight still falls back to whatever adsbdb/OpenSky has.  So gate the commercial free
-        # appends on whether _select already finds a plausible TRUSTED winner.  GA / non-
-        # commercial routes always flow through (geometry-checked in _select); GLOBAL mode is
-        # never commercial-blocked here.  (_cands holds ONLY the trusted candidates here.)
-        _free_ok = (not _adsbdb_commercial
-                    or _select(list(_cands), plane_lat, plane_lon) is None)
-        if (adsbdb_origin and _sky_origin and adsbdb_origin.upper() == _sky_origin.upper()
-                and adsbdb_dest and _sky_dest and adsbdb_dest.upper() == _sky_dest.upper()
-                and _free_ok):
-            _cands.append(_Cand(_norm_code(adsbdb_origin), _norm_code(adsbdb_dest), adsbdb_olat, adsbdb_olon,
-                                adsbdb_dlat, adsbdb_dlon, "adsbdb+opensky"))
-        if (adsbdb_origin or adsbdb_dest) and _free_ok:
-            _cands.append(_Cand(_norm_code(adsbdb_origin), _norm_code(adsbdb_dest), adsbdb_olat, adsbdb_olon,
-                                adsbdb_dlat, adsbdb_dlon, "adsbdb"))
-        if (_sky_origin or _sky_dest) and _free_ok:
-            _cands.append(_Cand(_norm_code(_sky_origin), _norm_code(_sky_dest), None, None, None, None, "opensky"))
-        _best = _select(_cands, plane_lat, plane_lon)
-
-        origin, destination = (_best.origin, _best.dest) if _best else ("", "")
-        if _best:
-            source = _reconstruct_select_label(
-                _best.source,
-                al_src=_al_src, al2_src=_al2_src, cached_fa=_cached_fa,
-                fr24_com_src=_fr24_com_src, fr24_com_origin=_fr24_com_origin,
-                fr24_com_dest=_fr24_com_dest, fr24_src=_fr24_src,
-                adsbdb_src=_adsbdb_src, sky_src=_sky_src,
-            )
-            _coord_olat, _coord_olon = _best.olat, _best.olon
-            _coord_dlat, _coord_dlon = _best.dlat, _best.dlon
-            _coord_origin_iata = _best.origin
+        (origin, destination, source,
+         _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata) = _route_select_authority(
+            origin, destination, source,
+            _coord_olat, _coord_olon, _coord_dlat, _coord_dlon, _coord_origin_iata,
+            fr24_origin=_fr24_origin, fr24_dest=_fr24_dest,
+            al_origin=al_origin, al_dest=al_dest, al_olat=al_olat, al_olon=al_olon, al_dlat=al_dlat, al_dlon=al_dlon,
+            al2_origin=al2_origin, al2_dest=al2_dest, al2_olat=al2_olat, al2_olon=al2_olon, al2_dlat=al2_dlat, al2_dlon=al2_dlon,
+            fa_origin=fa_origin, fa_dest=fa_dest,
+            fr24_com_origin=_fr24_com_origin, fr24_com_dest=_fr24_com_dest,
+            adsbdb_commercial=_adsbdb_commercial, plane_lat=plane_lat, plane_lon=plane_lon,
+            adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest, adsbdb_olat=adsbdb_olat, adsbdb_olon=adsbdb_olon,
+            adsbdb_dlat=adsbdb_dlat, adsbdb_dlon=adsbdb_dlon, sky_origin=_sky_origin, sky_dest=_sky_dest,
+            al_src=_al_src, al2_src=_al2_src, cached_fa=_cached_fa,
+            fr24_com_src=_fr24_com_src, fr24_src=_fr24_src, adsbdb_src=_adsbdb_src, sky_src=_sky_src,
+        )
 
     # ── Resolved-route cache write ─────────────────────────────────────────────
     # If both endpoints are now known for a scheduled airline, persist the final
