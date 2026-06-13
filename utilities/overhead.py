@@ -12,7 +12,7 @@ import time
 import traceback
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -2673,8 +2673,9 @@ def _route_select_authority(ctx):
     """_select() is the route authority: gather every source's candidate, let _select()
     pick the winner by (tier, SOURCE_PRIORITY) + geometry, reconstruct the cached-aware
     source label, and commit.  Called ONLY when not override-partial (the caller keeps that
-    decision).  Writes ctx.origin/destination/source and ctx._coord_* in place; when _select
-    finds no winner the existing ctx values are left unchanged."""
+    decision).  Writes ctx.origin/destination/source in place (clearing origin/destination to
+    "" when _select finds no winner, as before); ctx._coord_* are written only when there is
+    a winner."""
     _cands = []
     # Normalise every per-source code once at construction (strip/upper + BLANK_FIELDS
     # -> '') so the same-airport reject and tier completeness in _select() are robust to
