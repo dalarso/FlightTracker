@@ -13,7 +13,7 @@ A heavily extended fork of [Colin Waddell's](https://blog.colinwaddell.com/fligh
 
 ## What this fork adds
 
-This version takes the original display concept and builds a full flight intelligence stack around it — a multi-tier API routing engine, a SQLite-backed data layer, and a web-based management UI. The goal is to show not just *what* is overhead, but *where it came from and where it's going* — reliably, efficiently, and with minimal API spend.
+This version takes the original display concept and builds a full flight intelligence stack around it — a multi-tier API routing engine (with a single `_select()` route authority), a SQLite-backed data layer, and a web-based management UI. The goal is to show not just *what* is overhead, but *where it came from and where it's going* — reliably, efficiently, and with minimal API spend. When the sky is quiet the panel falls back to idle scenes — clock, date, and live weather — or an optional **multi-sport live scoreboard**.
 
 ### My specific use case
 
@@ -63,9 +63,9 @@ get_route() get_aircraft_type()
 
 ---
 
-## Route Resolution — API Hierarchy
+## Route Resolution — Source Hierarchy + `_select()`
 
-For each overhead flight, the route engine works through a prioritized stack, stopping as soon as a trusted result is found. Every result is cached in SQLite to avoid redundant calls.
+For each overhead flight the route engine queries a prioritized stack of sources, then a single authority — `_select()` — picks the winning route from everything they returned. Every result is cached in SQLite to avoid redundant calls.
 
 ### Step 0 — Override Rules
 User-defined rules stored in SQLite. Pattern-match by callsign (wildcards supported). Overrides return immediately — no API calls are made. Example: `JANET*` → always display "Janet Airlines" departing LAS.
@@ -76,14 +76,20 @@ For commercial flights (recognized by ICAO 3-letter prefix), once both endpoints
 ### Step 0.75 — VRS Live Route Hint *(Virtual Radar Server only)*
 When the receiver is Virtual Radar Server, it may supply departure and arrival airport codes directly in the feed. Trusted immediately if at least one endpoint is a configured local airport. Stored with a 1-hour TTL so it doesn't interfere with the 7-day resolved cache.
 
-### Step 1 — adsbdb *(free, unlimited)*
-Static historical database queried by callsign. Reliable for GA flights — a callsign like `N12345` consistently maps to the same aircraft. For commercial airlines, the result is cached and logged but **not committed** — the historical DB can't know today's specific routing. Cached for 1 hour.
+### Step 1 — FlightRadar24 *(free, registration-based — GA first resort)*
+Real-time lookup by aircraft **registration** via the [FlightRadarAPI](https://pypi.org/project/FlightRadarAPI/) library (no API key required). Queried first for N-number / GA registrations, where a registration-based lookup is more accurate than adsbdb's static history. Commercial callsigns are served by FR24 later, at Step 5.
 
-### Step 2 — OpenSky Flights API *(free, unlimited)*
-Queries the last 6 hours of flight history by hex code (aircraft radio ID). Returns estimated departure and arrival airports. Trusted only when the departure is a configured local airport. Like adsbdb, **not committed for commercial flights** — paid APIs are authoritative. Cached for 1 hour.
+### Step 2 — adsbdb *(free, unlimited)*
+Static historical database queried by callsign. Reliable for GA flights — a callsign like `N12345` consistently maps to the same aircraft. For commercial airlines the result is trusted only with a **local origin** — the historical DB can't know today's specific routing. Cached for 1 hour.
+
+### Step 2a — OpenSky Flights API *(free, unlimited)*
+Queries the last 6 hours of flight history by hex code (aircraft radio ID). Returns estimated departure and arrival airports. Trusted only when the departure is a configured **local airport**. Like adsbdb, distrusted for commercial flights unless local-origin. Cached for 1 hour.
 
 ### Step 2b — Free-API Consensus
-If adsbdb and OpenSky independently return the **exact same route** (using completely different lookup keys — callsign vs. hex) and geometry plausibility passes, the route is trusted without burning a paid API call. Only applies to GA flights.
+If adsbdb and OpenSky independently return the **exact same route** (using completely different lookup keys — callsign vs. hex) and geometry plausibility passes, the route is trusted without burning a paid API call.
+
+### Step 2c — GA Cross-Check
+For GA flights, the free sources' results are compared against FR24 and recorded for the accuracy stats — no extra API spend.
 
 ### Step 3 — AirLabs Primary Key *(1,000 calls/month free)*
 Real-time route lookup by callsign. Returns airport coordinates enabling geometry plausibility checks. Trusted for any plausible route regardless of origin — paid APIs are not restricted to local departures. Results cached at the scheduled-airline TTL (7 days) or GA TTL (1 hour). Automatically disables on 402 with 24-hour backoff; resumes immediately when the billing period resets.
@@ -93,6 +99,12 @@ A second AirLabs API key used as overflow. Fires only when the primary key did n
 
 ### Step 4 — FlightAware AeroAPI *(paid, last resort)*
 Paid real-time route lookup, capped and tracked monthly. Only called when all free/freemium APIs failed to resolve the route. Geometry plausibility is applied even on cache hits since the same callsign can fly a different route on a different day.
+
+### Step 5 — FlightRadar24 *(commercial — free, after the paid APIs)*
+A final free fallback for commercial callsigns the paid APIs couldn't resolve (or only returned a non-local route for) — a registration-based FR24 lookup, cached by callsign.
+
+### The Final Pick — `_select()`
+The steps above don't each decide the route on their own; they gather every source's candidate and a single authority, **`_select()`**, picks the winner. It ranks candidates by **route tier** (a local endpoint beats a non-local guess; a complete route beats a partial one), breaks ties by a fixed **source priority**, and rejects any candidate whose geometry is implausible for the aircraft's current position. The free-source **trust rule travels into the candidate set**: for a *commercial* callsign a stale local-origin adsbdb/OpenSky route is never allowed to outrank a live paid route — but it still serves as a safety net when the paid chain is empty or every paid route is geometrically implausible.
 
 ### Paid-Miss Cache
 When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppression entry is written. Prevents repeated quota burns on GA or obscure flights that will never have a filed route.
@@ -124,8 +136,22 @@ Parallel to route lookup, a separate thread resolves the aircraft type for displ
 2. **adsbdb** type endpoint — fallback if airplanes.live misses
 3. **OpenSky metadata** (`/api/aircraft/HEX`) — registration and model by hex; permanent mapping cached indefinitely
 4. **airplanes.live /v2/reg** — registration-only fallback
+5. **FlightRadar24** — `get_flights(registration=…)` as a free last resort by tail number
 
 Type codes (e.g. `B738`) are translated to human-readable names (e.g. `Boeing 737-800`) via a built-in lookup table covering airliners, regional jets, business jets, GA aircraft, and helicopters.
+
+---
+
+## Live Scoreboard *(optional)*
+
+When no aircraft is overhead, the panel can show a **live sports scoreboard** instead of the idle clock / date / weather. It supports **NHL, NFL, MLB, NBA, and MLS** simultaneously — each configured with its own team and toggled independently. The board takes over the moment a configured team's game goes live, yields back to overhead flights (flights always win), and returns to the idle scenes once the game is over.
+
+- **Free data sources, no keys** — NHL (`api-web.nhle.com`), MLB (`statsapi.mlb.com`), and NFL / NBA / MLS (ESPN's public API).
+- **Priority** — if several configured teams are live at once, `SCOREBOARD_PRIORITY` decides which is shown; a LIVE game always beats a finished one. The LED scene and the web `/api/scoreboard` endpoint pick the game through one shared selector, so they can't disagree.
+- **Celebrations** — a full-screen scroll on a goal/score, and a one-shot "{TEAM} WINS!" at the final. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board.
+- **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume.
+
+Enable with `SCOREBOARD_ENABLED = True` and set each sport's team ID/name — see the config block below.
 
 ---
 
@@ -270,10 +296,19 @@ LOADING_LED_ENABLED  = False      # external LED that pulses while loading
 LOADING_LED_GPIO_PIN = 25         # BCM pin number
 
 # ── Weather ───────────────────────────────────────────────────────────────────
-WEATHER_LOCATION    = "your%20city,state,us"  # spaces as %20
+WEATHER_LOCATION    = "your city,state,us"    # encoded automatically — plain text is fine
 OPENWEATHER_API_KEY = ""          # free tier at openweathermap.org (optional)
 TEMPERATURE_UNITS   = "imperial"  # "imperial" (°F) or "metric" (°C)
 RAINFALL_ENABLED    = False       # experimental — requires local taps-aff service
+
+# ── Scoreboard (optional multi-sport live score — see "Live Scoreboard" above) ─
+SCOREBOARD_ENABLED        = False                          # master switch
+SCOREBOARD_PRIORITY       = ["NHL", "NFL", "MLB", "NBA", "MLS"]
+SCOREBOARD_NHL_ENABLED    = True
+SCOREBOARD_NHL_TEAM_ID    = 0                              # your team's numeric NHL id
+SCOREBOARD_NHL_TEAM_NAME  = "NHL"                          # ≤4 chars, shown on the LED
+# NFL / MLB / NBA / MLS each take the same _ENABLED / _TEAM_ID / _TEAM_NAME trio
+SCOREBOARD_GOAL_HORN_HOST = ""                             # e.g. "192.168.1.30"; "" = off
 
 # ── OpenSky Network — free route history and aircraft registration ─────────────
 OPENSKY_CLIENT_ID     = ""        # opensky-network.org
@@ -297,7 +332,7 @@ AEROAPI_RESET_DAY      = 1
 # OPENSKY_CACHE_TTL    = 3600     # OpenSky result cache (default 1 hour)
 # ROUTE_TTL_SCHEDULED  = 604800   # Resolved commercial route (default 7 days)
 # ROUTE_TTL_DEFAULT    = 3600     # Resolved GA/other route (default 1 hour)
-# ROUTE_MISS_TTL       = 3600     # No-route suppression (default 1 hour)
+# ROUTE_MISS_TTL       = 300      # No-route suppression (default 5 min)
 # ROUTE_PAID_MISS_TTL  = 7200     # Paid API miss suppression (default 2 hours)
 ```
 
@@ -325,6 +360,18 @@ tail -f /home/pi/plane.log
 
 ---
 
+## Testing
+
+The repo ships a test suite (hardware-free — the LED matrix is stubbed, and a temp `FT_DATA_DIR` keeps the real DB untouched). It covers the route-resolution cascade end-to-end (a scenario battery asserting on call counts, cache writes, and the chosen route), the scoreboard selection, the web layer, and the display scenes.
+
+```bash
+source env/bin/activate
+pip install -r requirements-test.txt
+python -m pytest tests/ -q
+```
+
+---
+
 ## Override Rules
 
 Override rules let you hard-code routing and display info for specific aircraft, bypassing the entire API stack. Rules are managed in the web UI and stored in SQLite.
@@ -342,14 +389,14 @@ Override rules let you hard-code routing and display info for specific aircraft,
 
 ## Trust Rules Summary
 
-| Callsign type | adsbdb | OpenSky | AirLabs | AeroAPI |
-|---|---|---|---|---|
-| **Commercial** (SWA, DAL, etc.) | Cached + logged only | Logged only | ✅ Trusted | ✅ Trusted (last resort) |
-| **GA** (N-numbers) | ✅ If local origin | ✅ If local origin | ⛔ Skipped | ⛔ Skipped |
-| **Military/Gov** (RCH, SAM…) | ✅ If local origin | ✅ If local origin | ⛔ Skipped | ⛔ Skipped |
-| **Override match** | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped |
+| Callsign type | FR24 | adsbdb | OpenSky | AirLabs | AeroAPI |
+|---|---|---|---|---|---|
+| **Commercial** (SWA, DAL, etc.) | ✅ Last resort (Step 5) | Local-origin safety net | Local-origin safety net | ✅ Trusted | ✅ Trusted (last resort) |
+| **GA** (N-numbers) | ✅ By registration (Step 1) | ✅ If local origin | ✅ If local origin | ⛔ Skipped | ⛔ Skipped |
+| **Military/Gov** (RCH, SAM…) | — | ✅ If local origin | ✅ If local origin | ⛔ Skipped | ⛔ Skipped |
+| **Override match** | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped |
 
-GA and military callsigns skip paid APIs because N-numbers don't file instrument flight plans that AirLabs or AeroAPI would have on record. Commercial flights don't trust the free historical DBs because the same callsign can fly different specific routings on different days.
+GA and military callsigns skip the paid APIs because N-numbers don't file the instrument flight plans AirLabs or AeroAPI would have on record. For commercial flights the free historical DBs are only a **safety net** — `_select()` never lets a stale local-origin free route outrank a live paid route, since the same callsign can fly different routings on different days.
 
 ---
 
