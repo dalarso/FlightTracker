@@ -47,10 +47,40 @@ app.config["MAX_CONTENT_LENGTH"] = 256 * 1024
 # dashboard's own JS sets this header on every fetch.
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+
+def _is_lan_origin(origin: str) -> bool:
+    """True if a browser Origin header is a LAN/loopback address — the only places this
+    GUI is legitimately reached from.  Defends against DNS rebinding: a public hostname
+    rebound to the Pi's LAN IP arrives with a foreign Origin (e.g. http://evil.com), which
+    this rejects even though it carries the (publicly-known) X-Requested-With header.
+    Absent Origin (curl, same-origin GETs) is allowed — X-Requested-With still gates those."""
+    if not origin:
+        return True
+    host = origin.split("://", 1)[-1].split("/", 1)[0].strip().lower()
+    host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host  # strip :port (keep IPv6)
+    host = host.strip("[]")
+    if not host or host == "localhost":
+        return True
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        pass
+    if "." not in host:                       # bare LAN hostname, e.g. "raspberrypi"
+        return True
+    return host.rsplit(".", 1)[-1] in ("local", "lan", "home", "internal", "localdomain")
+
+
 @app.before_request
 def _csrf_guard():
-    if request.method in _MUTATING_METHODS and request.headers.get("X-Requested-With") != "FlightTracker":
-        return jsonify({"error": "missing or invalid X-Requested-With header"}), 403
+    if request.method in _MUTATING_METHODS:
+        if request.headers.get("X-Requested-With") != "FlightTracker":
+            return jsonify({"error": "missing or invalid X-Requested-With header"}), 403
+        # Reject a state-changing request whose browser Origin is not on the LAN (DNS
+        # rebinding) — the static X-Requested-With header alone can't catch that.
+        if not _is_lan_origin(request.headers.get("Origin", "")):
+            return jsonify({"error": "cross-origin request rejected"}), 403
     # Reject oversized bodies up front with 413, before any handler reads/parses them —
     # MAX_CONTENT_LENGTH is otherwise enforced lazily and the handlers' broad excepts
     # would turn the resulting RequestEntityTooLarge into a generic 500.
@@ -107,6 +137,7 @@ _API_FLAGS: dict[str, Path] = {
     "fr24":        FR24_DISABLED_FLAG,
 }
 FLIGHT_DATA_FILE = Path("/tmp/ft_data.json")
+HEALTH_FILE = Path("/tmp/ft_health.json")   # liveness snapshot written by the display process
 
 AIRLABS_USAGE_FILE  = BASE_DIR / "airlabs_usage.json"
 AIRLABS2_USAGE_FILE = BASE_DIR / "airlabs2_usage.json"
@@ -404,6 +435,30 @@ def get_config():
         return jsonify(cfg)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/health", methods=["GET"])
+def get_health():
+    """Liveness for "is my Pi healthy?" — reads the snapshot the display process writes to
+    HEALTH_FILE each poll (last successful poll age, in-flight status, thread count, cache
+    write failures).  ok=False if the snapshot is stale or polling has fallen behind."""
+    h = {}
+    try:
+        h = json.loads(HEALTH_FILE.read_text())
+    except Exception:
+        return jsonify({"ok": False, "error": "no health snapshot yet"}), 200
+    try:
+        snap_age = max(0, int(time.time()) - int(h.get("ts", 0))) if h.get("ts") else None
+        h["snapshot_age_sec"] = snap_age
+        poll_age = h.get("last_poll_age_sec")
+        # Healthy = the display wrote a fresh snapshot AND a poll succeeded recently.
+        h["ok"] = bool(
+            snap_age is not None and snap_age < 90
+            and poll_age is not None and poll_age < 120
+        )
+    except Exception:
+        h.setdefault("ok", False)
+    return jsonify(h)
 
 
 @app.route("/api/config/reveal", methods=["POST"])

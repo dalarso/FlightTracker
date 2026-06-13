@@ -24,6 +24,16 @@ ROUTE_PAID_MISS_TTL = 7200    # overridden from config by bind()
 
 REG_CACHE_TTL = 365 * 24 * 3600  # 1 year — hex codes are permanent but evict if unseen
 
+# Count of swallowed cache-WRITE failures (SQLITE_BUSY, disk-full, read-only SD card …).
+# A slowly-failing SD card manifests as routes/types re-resolving every flyover; this
+# counter (surfaced via the /api/health endpoint) makes that visible instead of silent.
+_write_failures = 0
+
+
+def write_failure_count() -> int:
+    """Total cache-write failures since start — read by the health snapshot."""
+    return _write_failures
+
 
 def _log(_msg):   # replaced by overhead's real logger in bind()
     pass
@@ -78,6 +88,8 @@ def _cache_db_set_route(key: str, cache_type: str,
         # (Issue B): if the resolved-cache INSERT throws, the route silently re-resolves
         # every flyover.  Surface it instead of failing invisibly so a genuine DB-write
         # problem shows up in the log rather than as a phantom cache miss.
+        global _write_failures
+        _write_failures += 1
         _log(f"[cache] write failed for {cache_type}:{key} — {type(_e).__name__}: {_e}")
 
 
@@ -127,8 +139,10 @@ def _cache_db_set_aircraft(hex_code: str, type_str: str,
                 (hex_code, type_str or '', source or '', expires),
             )
             _cache_conn.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        global _write_failures
+        _write_failures += 1
+        _log(f"[cache] aircraft write failed for {hex_code} — {type(_e).__name__}: {_e}")
 
 
 def _cache_db_get_reg(hex_code: str) -> str:
@@ -159,8 +173,10 @@ def _cache_db_set_reg(hex_code: str, reg: str) -> None:
                 (hex_code, reg, int(time.time()) + REG_CACHE_TTL),
             )
             _cache_conn.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        global _write_failures
+        _write_failures += 1
+        _log(f"[cache] reg write failed for {hex_code} — {type(_e).__name__}: {_e}")
 
 
 def _cache_db_check_paid_miss(callsign: str) -> bool:
@@ -198,5 +214,7 @@ def _cache_db_set_paid_miss(callsign: str) -> None:
                 (callsign, expires),
             )
             _cache_conn.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        global _write_failures
+        _write_failures += 1
+        _log(f"[cache] paid_miss write failed for {callsign} — {type(_e).__name__}: {_e}")

@@ -184,11 +184,12 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
 
 ### Security & network exposure
 
-The web UI is a convenience dashboard for a **trusted LAN** — it has **no password** by design. Harden it for your network:
+**Trust model (read this):** the dashboard is single-user, **LAN-only, and has no authentication** by design. The header/Origin checks below are **anti-CSRF, not a login** — anyone who can reach `:5000` on your network has full control (toggle night mode, edit config, restart the service). That's an acceptable model for a home LAN behind a router; it is **not** safe to expose to the internet. Harden it for your network:
 
 - **Binds `0.0.0.0:5000`** (reachable from any device on your LAN). Keep the Pi behind your router/firewall — do **not** port-forward `:5000` to the internet.
 - **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The dashboard's 👁 button reveals one key on demand (one request per field).
-- **CSRF-guarded:** every state-changing request must carry an `X-Requested-With` header (the dashboard sends it automatically), so a malicious page you happen to visit can't drive the dashboard through your browser.
+- **CSRF-guarded, two layers:** every state-changing request must carry an `X-Requested-With: FlightTracker` header (the dashboard sends it automatically), so a malicious page you happen to visit can't drive the dashboard through your browser. In addition, a request whose browser `Origin` resolves to a **non-LAN** host is rejected — this blocks DNS-rebinding (where a public name is rebound to the Pi's LAN IP), which the static header alone can't catch. LAN/loopback/`*.local`/bare-hostname origins (and header-less clients like `curl`) are allowed.
+- **Health endpoint:** `GET /api/health` returns a liveness snapshot the display process writes each poll — `last_poll_age_sec`, `processing`, `active_threads`, `cache_write_failures`, `uptime_sec`, and an `ok` flag. Point a uptime monitor at it to catch a wedged poll or a failing SD card (rising `cache_write_failures`) before the panel visibly goes stale.
 - **Production server:** served by [`waitress`](https://pypi.org/project/waitress/) when installed (it's in `requirements.txt`); falls back to the Flask dev server otherwise.
 - **Service control needs sudo** (the Save & Restart and service buttons run `systemctl`). Grant a **narrow** rule — never `NOPASSWD: ALL`:
   ```

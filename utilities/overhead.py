@@ -5,13 +5,14 @@ import logging
 import math
 import os
 import re
+import socket
 import sqlite3
 import sys
 import tempfile
 import time
 import traceback
 import warnings
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -47,7 +48,7 @@ from utilities.cache import (
     _cache_db_get_reg, _cache_db_set_reg,
     _cache_db_check_paid_miss, _cache_db_set_paid_miss,
 )
-from threading import Thread, Lock, local
+from threading import Thread, Lock, local, active_count
 _cache_bypass = local()  # set .on=True to make cache READS miss (test-flight no-cache mode)
 
 # FlightRadar24 — unofficial public API; used for GA (N-number) route lookups.
@@ -75,6 +76,17 @@ _fr24_lock = Lock()
 # own clients — localhost handshakes are free and FR24 doesn't use requests.)
 _session = requests.Session()
 
+# The FlightRadarAPI library sets NO request timeout of its own, so get_flights() could
+# block a route-lookup thread forever — and because the call runs under _fr24_lock, one
+# hung connection serialises and stalls every other FR24 lookup behind it.  We bound it at
+# the socket layer: socket.setdefaulttimeout() only affects sockets created WITHOUT an
+# explicit timeout, which is exactly the FR24 library's — every requests/urlopen call we
+# make passes timeout= and so overrides it.  Set lazily inside _get_fr24_api() (below) so it
+# applies ONLY in the display process, the only one that ever resolves routes; the web
+# process imports overhead but never calls this path, so waitress's sockets are untouched.
+FR24_HTTP_TIMEOUT = 12   # seconds
+
+
 def _get_fr24_api():
     """Return a shared FlightRadar24API instance, lazy-initialised on first call."""
     global _fr24_instance
@@ -83,6 +95,11 @@ def _get_fr24_api():
     if _fr24_instance is None:
         with _fr24_lock:
             if _fr24_instance is None:
+                # Bound the library's otherwise-unbounded sockets before it opens any
+                # connection (see FR24_HTTP_TIMEOUT).  Guarded so we never stomp a timeout
+                # something else may have set.
+                if socket.getdefaulttimeout() is None:
+                    socket.setdefaulttimeout(FR24_HTTP_TIMEOUT)
                 try:
                     _fr24_instance = _FlightRadar24API()
                 except Exception:
@@ -205,6 +222,19 @@ FR24_CALLSIGN = 16
 
 RATE_LIMIT_DELAY   = 1
 FLIGHT_DATA_FILE   = "/tmp/ft_data.json"
+HEALTH_FILE        = "/tmp/ft_health.json"   # liveness snapshot for the web /api/health endpoint
+
+# Hard caps on how long one flight's route / aircraft-type future may take before the poll
+# gives up on it and shows "no route" for that flight this cycle.  These are BACKSTOPS — with
+# every network call now timeout-bounded (FR24 via FR24_HTTP_TIMEOUT, the rest via explicit
+# timeout=), a lookup should finish well inside these; they only fire on a true wedge, and
+# they keep one slow flight from holding _processing True and wedging all future polls.
+ROUTE_LOOKUP_TIMEOUT = 60   # seconds (full cold cascade across every tier is far shorter)
+TYPE_LOOKUP_TIMEOUT  = 30   # seconds
+# Watchdog: if a poll somehow runs longer than this, clear _processing so the next cycle can
+# re-poll instead of the display silently freezing on stale flight data forever.
+POLL_STALL_TIMEOUT   = 180  # seconds
+_WATCHDOG_INTERVAL   = 30   # seconds between watchdog ticks / health-file refreshes
 APIS_DISABLED_FLAG    = "/tmp/ft_apis_disabled"   # combined kill-switch (AirLabs + AeroAPI)
 ADSBDB_DISABLED_FLAG  = "/tmp/ft_adsbdb_disabled"
 OPENSKY_DISABLED_FLAG = "/tmp/ft_opensky_disabled"
@@ -3848,6 +3878,12 @@ class Overhead:
         self._data = []
         self._new_data = False
         self._processing = False
+        # ── Liveness / health (see HEALTH_FILE, POLL_STALL_TIMEOUT) ──────────────
+        self._start_ts = time.time()
+        self._last_poll_start_ts = 0.0   # when the in-flight poll began (0 = none yet)
+        self._last_poll_ok_ts = 0.0      # when a poll last fully succeeded
+        # Daemon watchdog: refreshes the health snapshot and clears a wedged _processing.
+        Thread(target=self._watchdog, daemon=True).start()
 
     def grab_data(self):
         """Spawn a background fetch. No-ops if one is already in progress."""
@@ -3867,6 +3903,7 @@ class Overhead:
     def _grab_data(self):
         with self._lock:
             self._new_data = False
+            self._last_poll_start_ts = time.time()
 
         _purge_expired_cache()   # time-gated (~6 h); reclaims expired cache rows off the SD card
 
@@ -3928,8 +3965,21 @@ class Overhead:
                     flight.registration,
                 )
                 _type_fut = _lookup_executor.submit(get_aircraft_type, flight.hex_code)
-                origin, destination, route_src, override_plane, override_display = _route_fut.result()
-                plane, type_src = _type_fut.result()
+                # Bounded waits (see ROUTE_LOOKUP_TIMEOUT / TYPE_LOOKUP_TIMEOUT): a single
+                # wedged lookup must never block the poll thread — and thus _processing —
+                # indefinitely.  On timeout, degrade this flight to "no route"/"no type" for
+                # the cycle; it resolves normally next poll once the upstream recovers.
+                _who = flight.callsign or flight.hex_code
+                try:
+                    origin, destination, route_src, override_plane, override_display = _route_fut.result(timeout=ROUTE_LOOKUP_TIMEOUT)
+                except _FutureTimeout:
+                    _log(f"[overhead] route lookup exceeded {ROUTE_LOOKUP_TIMEOUT}s for {_who} — showing no route this poll")
+                    origin, destination, route_src, override_plane, override_display = "", "", "", "", ""
+                try:
+                    plane, type_src = _type_fut.result(timeout=TYPE_LOOKUP_TIMEOUT)
+                except _FutureTimeout:
+                    _log(f"[overhead] type lookup exceeded {TYPE_LOOKUP_TIMEOUT}s for {_who}")
+                    plane, type_src = "", ""
 
                 # override_plane: replaces the stored aircraft type (stats + DB).
                 # override_display: shown on the flight display only — real type still logged.
@@ -4000,6 +4050,7 @@ class Overhead:
                             "vertical_speed": _td.get("vertical_speed", 0),
                             "altitude":       _td.get("altitude", 10000),
                             "callsign":       _td.get("callsign", ""),
+                            "hex":            "TEST",   # keep the (callsign, hex) dedup contract real flights use
                             "test":           True,
                         })
                 except (KeyError, AttributeError, TypeError):
@@ -4031,7 +4082,73 @@ class Overhead:
             with self._lock:
                 if success:
                     self._new_data = True  # only signal new data when the poll actually succeeded
+                    self._last_poll_ok_ts = time.time()
                 self._processing = False
+            self._write_health()   # refresh the liveness snapshot at the end of every poll
+
+    # ── Health / watchdog ───────────────────────────────────────────────────────
+    def _health_dict(self):
+        now = time.time()
+        with self._lock:
+            processing = self._processing
+            last_ok    = self._last_poll_ok_ts
+            started    = self._start_ts
+        return {
+            "ts":                   int(now),
+            "uptime_sec":           int(now - started),
+            "processing":           processing,
+            "last_poll_ok_ts":      int(last_ok) if last_ok else 0,
+            "last_poll_age_sec":    int(now - last_ok) if last_ok else None,
+            "active_threads":       active_count(),
+            "cache_write_failures": cache.write_failure_count(),
+        }
+
+    def health(self):
+        """In-process liveness snapshot (also written to HEALTH_FILE for the web endpoint)."""
+        return self._health_dict()
+
+    def _write_health(self):
+        # Best-effort; HEALTH_FILE lives on tmpfs (/tmp) so this never touches the SD card.
+        try:
+            tmp = HEALTH_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self._health_dict(), f)
+            os.replace(tmp, HEALTH_FILE)
+        except Exception:
+            pass
+
+    def _clear_if_stalled(self, now=None):
+        """If a poll has been in flight past POLL_STALL_TIMEOUT, clear _processing so the
+        next cycle can re-poll.  Returns True if it cleared a stall.  Extracted from the
+        watchdog loop so it is directly unit-testable."""
+        now = now if now is not None else time.time()
+        with self._lock:
+            stalled = bool(
+                self._processing
+                and self._last_poll_start_ts
+                and now - self._last_poll_start_ts > POLL_STALL_TIMEOUT
+            )
+            stuck_for = int(now - self._last_poll_start_ts) if self._last_poll_start_ts else 0
+            if stalled:
+                self._processing = False
+        if stalled:
+            _log(f"[overhead] WATCHDOG: poll stuck {stuck_for}s (> {POLL_STALL_TIMEOUT}s) — "
+                 f"cleared _processing so the next cycle can re-poll")
+        return stalled
+
+    def _watchdog(self):
+        """Refresh the health snapshot periodically and recover a wedged poll.
+
+        With every lookup now timeout-bounded a poll cannot hang indefinitely, so the stall
+        recovery is defence-in-depth: if _processing is ever stuck True past
+        POLL_STALL_TIMEOUT, clear it rather than freezing the display on stale data."""
+        while True:
+            time.sleep(_WATCHDOG_INTERVAL)
+            try:
+                self._clear_if_stalled()
+                self._write_health()
+            except Exception:
+                pass
 
     @property
     def new_data(self):

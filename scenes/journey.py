@@ -49,8 +49,12 @@ class JourneyScene(object):
         if getattr(self, "_goal_celebration_active", False):
             return
 
-        origin = self._data[self._data_index]["origin"]
-        destination = self._data[self._data_index]["destination"]
+        # .get() not bare [] — a malformed/partial flight dict (missing origin/destination)
+        # must degrade to the blank filler, not raise KeyError that the animator swallows
+        # into a ~60 s blank scene.
+        _flight = self._data[self._data_index]
+        origin = _flight.get("origin", "")
+        destination = _flight.get("destination", "")
 
         # Draw background
         self.draw_square(

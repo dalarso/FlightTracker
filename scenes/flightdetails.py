@@ -46,13 +46,13 @@ class FlightDetailsScene(object):
             colours.BLACK,
         )
 
-        # Draw flight number if available
+        # Draw flight number if available.  .get() not bare [] — a malformed/partial flight
+        # dict (missing callsign) must skip the flight number, not raise KeyError that the
+        # animator swallows into a ~60 s blank scene.
         flight_no_text_length = 0
-        if (
-            self._data[self._data_index]["callsign"]
-            and self._data[self._data_index]["callsign"] != "N/A"
-        ):
-            flight_no = self._data[self._data_index]["callsign"]
+        _callsign = self._data[self._data_index].get("callsign", "")
+        if _callsign and _callsign != "N/A":
+            flight_no = _callsign
 
             for ch in flight_no:
                 ch_length = graphics.DrawText(

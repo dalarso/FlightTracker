@@ -349,5 +349,81 @@ class RevealEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class OriginCsrfGuard(unittest.TestCase):
+    """DNS-rebinding defence: a mutating request carrying the (publicly-known)
+    X-Requested-With header but a non-LAN browser Origin is rejected, while LAN /
+    loopback / header-less requests pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def test_is_lan_origin_classification(self):
+        f = self.srv._is_lan_origin
+        for good in ("", "http://192.168.1.50:5000", "http://raspberrypi.local",
+                     "http://localhost:5000", "http://127.0.0.1", "http://192.168.1.9",
+                     "http://10.42.0.6", "http://raspberrypi"):
+            self.assertTrue(f(good), good)
+        for bad in ("http://evil.com", "https://attacker.example.com", "http://8.8.8.8"):
+            self.assertFalse(f(bad), bad)
+
+    def test_foreign_origin_rejected(self):
+        r = self.client.post("/api/display/night",
+                             headers={**_CSRF, "Origin": "http://evil.com"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_lan_origin_allowed(self):
+        r = self.client.post("/api/display/night",
+                             headers={**_CSRF, "Origin": "http://192.168.1.50:5000"})
+        self.assertNotEqual(r.status_code, 403)
+
+    def test_missing_origin_allowed(self):
+        r = self.client.post("/api/display/night", headers=_CSRF)
+        self.assertNotEqual(r.status_code, 403)
+
+
+class HealthEndpoint(unittest.TestCase):
+    """/api/health surfaces the display process's liveness snapshot for monitoring."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def test_fresh_snapshot_reports_ok(self):
+        d = tempfile.mkdtemp()
+        p = Path(d) / "ft_health.json"
+        p.write_text(json.dumps({
+            "ts": int(time.time()), "uptime_sec": 100, "processing": False,
+            "last_poll_ok_ts": int(time.time()), "last_poll_age_sec": 8,
+            "active_threads": 12, "cache_write_failures": 0,
+        }))
+        with mock.patch.object(self.srv, "HEALTH_FILE", p):
+            r = self.client.get("/api/health")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["ok"])
+        self.assertIn("snapshot_age_sec", body)
+
+    def test_stale_poll_reports_not_ok(self):
+        d = tempfile.mkdtemp()
+        p = Path(d) / "ft_health.json"
+        p.write_text(json.dumps({
+            "ts": int(time.time()), "last_poll_age_sec": 999,   # polling fell behind
+            "processing": False, "active_threads": 12, "cache_write_failures": 3,
+        }))
+        with mock.patch.object(self.srv, "HEALTH_FILE", p):
+            r = self.client.get("/api/health")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.get_json()["ok"])
+
+    def test_missing_snapshot_reports_not_ok(self):
+        with mock.patch.object(self.srv, "HEALTH_FILE", Path("/nonexistent/ft_health.json")):
+            r = self.client.get("/api/health")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.get_json()["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
