@@ -2355,6 +2355,94 @@ def _route_adsbdb_crosscheck(*, adsbdb_commercial, adsbdb_origin, adsbdb_dest,
         _record_free_api_check(callsign, _db_route, _paid_route, _matched)
 
 
+def _route_last_resort_pick(origin, destination, source, *,
+                            al_origin, al_dest, al2_origin, al2_dest,
+                            fa_origin, fa_dest,
+                            fr24_com_origin, fr24_com_dest,
+                            adsbdb_origin, adsbdb_dest, sky_origin, sky_dest,
+                            plane_lat, plane_lon, callsign,
+                            al_src, al2_src, cached_fa,
+                            fr24_com_src, adsbdb_src, sky_src):
+    """Last-resort selection: walk the full hierarchy for any usable route.
+
+    Local routes already committed inline and short-circuited.  If we're still
+    here, NO trusted source returned a local route — so continue down the
+    hierarchy (AirLabs -> AeroAPI -> FR24 -> adsbdb/OpenSky) and pick from everything
+    that was deferred: the trusted held non-local routes AND the free historical
+    DBs.  Candidates are re-validated for geometry, then ranked by
+    (tier, SOURCE_PRIORITY).  Reached only as a last resort; result is short-TTL
+    and never written to the resolved cache (no coordinates captured), so an
+    unreliable guess can't persist.  Returns (origin, destination, source)."""
+    if not (origin and destination):
+        # Candidates include PARTIALS (origin OR dest) so a LOCAL partial — e.g.
+        # OpenSky finding only the departure airport (LAS->?) — competes against and,
+        # via the tier sort below, BEATS a stale non-local complete (e.g. a previous
+        # leg SYR->CHS) returned by another source.  Geometry filtering still applies.
+        _cands = []
+        if al_origin or al_dest:
+            _cands.append(("airlabs", al_origin, al_dest))
+        if al2_origin or al2_dest:
+            _cands.append(("airlabs2", al2_origin, al2_dest))
+        if fa_origin or fa_dest:
+            _cands.append(("aeroapi", fa_origin, fa_dest))
+        if fr24_com_origin or fr24_com_dest:
+            _cands.append(("fr24", fr24_com_origin, fr24_com_dest))
+        # Consensus of the two free feeds (both COMPLETE and agreeing) is the
+        # strongest free signal; for commercial these were recorded but deferred.
+        if (adsbdb_origin and sky_origin and adsbdb_origin.upper() == sky_origin.upper()
+                and adsbdb_dest and sky_dest and adsbdb_dest.upper() == sky_dest.upper()):
+            _cands.append(("adsbdb+opensky", adsbdb_origin, adsbdb_dest))
+        if adsbdb_origin or adsbdb_dest:
+            _cands.append(("adsbdb", adsbdb_origin, adsbdb_dest))
+        if sky_origin or sky_dest:
+            _cands.append(("opensky", sky_origin, sky_dest))
+        # Re-validate geometry here.  A route an inline check already rejected as
+        # implausible leaves its held vars set, so without this filter the picker
+        # could resurrect and serve it — exactly the stale/wrong-leg ("random PHX")
+        # routes the system exists to reject.  Validation uses the harvested
+        # airport-coords table; airports it doesn't know get benefit of the doubt,
+        # matching each source's own inline coordless behavior.
+        _cands = [c for c in _cands
+                  if _fr24_route_plausible(plane_lat, plane_lon, c[1], c[2])]
+        if _cands:
+            # Tier: 0 local-complete, 1 local-partial, 2 non-local-complete,
+            # 3 non-local-partial.  A LOCAL endpoint outranks completeness (your
+            # "1. local") so a known home endpoint beats a probably-wrong non-local
+            # route; within a locality, a complete route beats a partial one.
+            def _route_tier(o, d):
+                return (0 if _has_local_endpoint(o, d) else 2) + (0 if (o and d) else 1)
+            _cands.sort(key=lambda c: (_route_tier(c[1], c[2]), SOURCE_PRIORITY.get(c[0], 99)))
+            _best = _cands[0]
+            # Only override the inline-committed state when the candidate is a
+            # STRICTLY better tier — so a held NON-LOCAL complete cannot clobber an
+            # already-committed LOCAL partial (a known home endpoint beats a non-local
+            # guess).  A LOCAL complete still upgrades a local partial.
+            _cur_tier = _route_tier(origin, destination) if (origin or destination) else 99
+            if _route_tier(_best[1], _best[2]) < _cur_tier:
+                _tier_label = ("local" if _has_local_endpoint(_best[1], _best[2])
+                               else "non-local (no local found anywhere)")
+                origin, destination = _best[1], _best[2]
+                # Preserve the :cached marker the picker otherwise drops — a cached
+                # last-resort route was served under a bare source name and looked live
+                # (e.g. a cached OpenSky NV98->? read as [route:opensky], not :cached).
+                _bs = _best[0]
+                if   _bs == "airlabs":  source = al_src
+                elif _bs == "airlabs2": source = al2_src
+                elif _bs == "aeroapi":  source = "aeroapi:cached" if cached_fa else "aeroapi"
+                elif _bs == "fr24":     source = fr24_com_src
+                elif _bs == "adsbdb":   source = adsbdb_src
+                elif _bs == "opensky":  source = sky_src
+                elif _bs == "adsbdb+opensky":
+                    source = ("adsbdb+opensky:cached"
+                              if adsbdb_src.endswith(":cached") and sky_src.endswith(":cached")
+                              else "adsbdb+opensky")
+                else:                   source = _bs
+                _log(f"[route] {_airline_display(callsign)}: no committed local route — "
+                     f"serving {_tier_label} {_route_display(origin, destination)} from {source} "
+                     f"(short-TTL; not written to resolved cache)")
+    return origin, destination, source
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -3139,86 +3227,17 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
                      f"{_route_display(_fr24_com_origin, _fr24_com_dest)} non-local — held for final acceptance")
 
     # ── Last-resort selection: walk the full hierarchy for any usable route ────
-    # Local routes already committed inline and short-circuited.  If we're still
-    # here, NO trusted source returned a local route — so continue down the
-    # hierarchy (AirLabs → AeroAPI → FR24 → adsbdb/OpenSky) and pick from everything
-    # that was deferred: the trusted held non-local routes AND the free historical
-    # DBs.  Candidates are re-validated for geometry, then ranked by
-    # (tier, SOURCE_PRIORITY):
-    #   • tier: local-complete < local-partial < non-local-complete < non-local-partial
-    #     — a LOCAL endpoint outranks completeness, so a free LOCAL route beats a
-    #     trusted NON-LOCAL one (prefer-local intent);
-    #   • within a tier, SOURCE_PRIORITY orders airlabs > aeroapi > fr24 > free.
-    # An inline-committed LOCAL partial is only overridden by a strictly-better tier.
-    # Reached only as a last resort; result is short-TTL and never written to the
-    # resolved cache (no coordinates captured), so an unreliable guess can't persist.
-    if not (origin and destination):
-        # Candidates include PARTIALS (origin OR dest) so a LOCAL partial — e.g.
-        # OpenSky finding only the departure airport (LAS->?) — competes against and,
-        # via the tier sort below, BEATS a stale non-local complete (e.g. a previous
-        # leg SYR->CHS) returned by another source.  Geometry filtering still applies.
-        _cands = []
-        if al_origin or al_dest:
-            _cands.append(("airlabs", al_origin, al_dest))
-        if al2_origin or al2_dest:
-            _cands.append(("airlabs2", al2_origin, al2_dest))
-        if fa_origin or fa_dest:
-            _cands.append(("aeroapi", fa_origin, fa_dest))
-        if _fr24_com_origin or _fr24_com_dest:
-            _cands.append(("fr24", _fr24_com_origin, _fr24_com_dest))
-        # Consensus of the two free feeds (both COMPLETE and agreeing) is the
-        # strongest free signal; for commercial these were recorded but deferred.
-        if (adsbdb_origin and _sky_origin and adsbdb_origin.upper() == _sky_origin.upper()
-                and adsbdb_dest and _sky_dest and adsbdb_dest.upper() == _sky_dest.upper()):
-            _cands.append(("adsbdb+opensky", adsbdb_origin, adsbdb_dest))
-        if adsbdb_origin or adsbdb_dest:
-            _cands.append(("adsbdb", adsbdb_origin, adsbdb_dest))
-        if _sky_origin or _sky_dest:
-            _cands.append(("opensky", _sky_origin, _sky_dest))
-        # Re-validate geometry here.  A route an inline check already rejected as
-        # implausible leaves its held vars set, so without this filter the picker
-        # could resurrect and serve it — exactly the stale/wrong-leg ("random PHX")
-        # routes the system exists to reject.  Validation uses the harvested
-        # airport-coords table; airports it doesn't know get benefit of the doubt,
-        # matching each source's own inline coordless behavior.
-        _cands = [c for c in _cands
-                  if _fr24_route_plausible(plane_lat, plane_lon, c[1], c[2])]
-        if _cands:
-            # Tier: 0 local-complete, 1 local-partial, 2 non-local-complete,
-            # 3 non-local-partial.  A LOCAL endpoint outranks completeness (your
-            # "1. local") so a known home endpoint beats a probably-wrong non-local
-            # route; within a locality, a complete route beats a partial one.
-            def _route_tier(o, d):
-                return (0 if _has_local_endpoint(o, d) else 2) + (0 if (o and d) else 1)
-            _cands.sort(key=lambda c: (_route_tier(c[1], c[2]), SOURCE_PRIORITY.get(c[0], 99)))
-            _best = _cands[0]
-            # Only override the inline-committed state when the candidate is a
-            # STRICTLY better tier — so a held NON-LOCAL complete cannot clobber an
-            # already-committed LOCAL partial (a known home endpoint beats a non-local
-            # guess).  A LOCAL complete still upgrades a local partial.
-            _cur_tier = _route_tier(origin, destination) if (origin or destination) else 99
-            if _route_tier(_best[1], _best[2]) < _cur_tier:
-                _tier_label = ("local" if _has_local_endpoint(_best[1], _best[2])
-                               else "non-local (no local found anywhere)")
-                origin, destination = _best[1], _best[2]
-                # Preserve the :cached marker the picker otherwise drops — a cached
-                # last-resort route was served under a bare source name and looked live
-                # (e.g. a cached OpenSky NV98->? read as [route:opensky], not :cached).
-                _bs = _best[0]
-                if   _bs == "airlabs":  source = _al_src
-                elif _bs == "airlabs2": source = _al2_src
-                elif _bs == "aeroapi":  source = "aeroapi:cached" if _cached_fa else "aeroapi"
-                elif _bs == "fr24":     source = _fr24_com_src
-                elif _bs == "adsbdb":   source = _adsbdb_src
-                elif _bs == "opensky":  source = _sky_src
-                elif _bs == "adsbdb+opensky":
-                    source = ("adsbdb+opensky:cached"
-                              if _adsbdb_src.endswith(":cached") and _sky_src.endswith(":cached")
-                              else "adsbdb+opensky")
-                else:                   source = _bs
-                _log(f"[route] {_airline_display(callsign)}: no committed local route — "
-                     f"serving {_tier_label} {_route_display(origin, destination)} from {source} "
-                     f"(short-TTL; not written to resolved cache)")
+    origin, destination, source = _route_last_resort_pick(
+        origin, destination, source,
+        al_origin=al_origin, al_dest=al_dest, al2_origin=al2_origin, al2_dest=al2_dest,
+        fa_origin=fa_origin, fa_dest=fa_dest,
+        fr24_com_origin=_fr24_com_origin, fr24_com_dest=_fr24_com_dest,
+        adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
+        sky_origin=_sky_origin, sky_dest=_sky_dest,
+        plane_lat=plane_lat, plane_lon=plane_lon, callsign=callsign,
+        al_src=_al_src, al2_src=_al2_src, cached_fa=_cached_fa,
+        fr24_com_src=_fr24_com_src, adsbdb_src=_adsbdb_src, sky_src=_sky_src,
+    )
 
 
     # If still no route and all eligible paid APIs returned empty, record a combined
