@@ -144,9 +144,9 @@ Type codes (e.g. `B738`) are translated to human-readable names (e.g. `Boeing 73
 
 ## Live Scoreboard *(optional)*
 
-When no aircraft is overhead, the panel can show a **live sports scoreboard** instead of the idle clock / date / weather. It supports **NHL, NFL, MLB, NBA, MLS, and the FIFA World Cup** simultaneously — each configured with its own team and toggled independently. The board takes over the moment a configured team's game goes live, yields back to overhead flights (flights always win), and returns to the idle scenes once the game is over.
+When no aircraft is overhead, the panel can show a **live sports scoreboard** instead of the idle clock / date / weather. It supports **NHL, NFL, MLB, NBA, WNBA, MLS, and the FIFA World Cup** simultaneously — each configured with its own team and toggled independently. The board takes over the moment a configured team's game goes live, yields back to overhead flights (flights always win), and returns to the idle scenes once the game is over.
 
-- **Free data sources, no keys** — NHL (`api-web.nhle.com`), MLB (`statsapi.mlb.com`), and NFL / NBA / MLS / **FIFA World Cup** (ESPN's public API — `soccer/fifa.world`, follow any national team).
+- **Free data sources, no keys** — NHL (`api-web.nhle.com`), MLB (`statsapi.mlb.com`), and NFL / NBA / WNBA / MLS / **FIFA World Cup** (ESPN's public API — e.g. `basketball/wnba`, `soccer/fifa.world`; follow any team or nation).
 - **Priority** — if several configured teams are live at once, `SCOREBOARD_PRIORITY` decides which is shown; a LIVE game always beats a finished one. The LED scene and the web `/api/scoreboard` endpoint pick the game through one shared selector, so they can't disagree.
 - **Celebrations** — a full-screen scroll on a goal/score, and a one-shot "{TEAM} WINS!" at the final. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board.
 - **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume.
@@ -307,8 +307,9 @@ SCOREBOARD_PRIORITY       = ["NHL", "NFL", "MLB", "NBA", "MLS"]
 SCOREBOARD_NHL_ENABLED    = True
 SCOREBOARD_NHL_TEAM_ID    = 0                              # your team's numeric NHL id
 SCOREBOARD_NHL_TEAM_NAME  = "NHL"                          # ≤4 chars, shown on the LED
-# NFL / MLB / NBA / MLS / FIFA each take the same _ENABLED / _TEAM_ID / _TEAM_NAME trio
-# (FIFA = the World Cup — set SCOREBOARD_FIFA_TEAM_ID to your nation, e.g. 660 = USA)
+# NFL / MLB / NBA / WNBA / MLS / FIFA each take the same _ENABLED / _TEAM_ID / _TEAM_NAME trio
+# (FIFA = the World Cup — set SCOREBOARD_FIFA_TEAM_ID to your nation, e.g. 660 = USA;
+#  WNBA team IDs e.g. 17 = Las Vegas Aces, 5 = Indiana Fever)
 SCOREBOARD_GOAL_HORN_HOST = ""                             # e.g. "192.168.1.30"; "" = off
 
 # ── OpenSky Network — free route history and aircraft registration ─────────────

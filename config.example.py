@@ -84,7 +84,7 @@ SCOREBOARD_GOAL_CELEBRATION_SECONDS = 30
 SCOREBOARD_WIN_CELEBRATION_SECONDS = 180
 
 # Priority order — when multiple sports are live, the first entry wins
-SCOREBOARD_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "MLS", "FIFA"]
+SCOREBOARD_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "WNBA", "MLS", "FIFA"]
 
 # ── NHL ───────────────────────────────────────────────────────────────────────
 # Team IDs: use the link below and look for the numeric "id" field next to your team.
@@ -112,6 +112,14 @@ SCOREBOARD_MLB_TEAM_NAME = ""
 SCOREBOARD_NBA_ENABLED   = False
 SCOREBOARD_NBA_TEAM_ID   = 0        # set your team's ID here
 SCOREBOARD_NBA_TEAM_NAME = ""
+
+# ── WNBA ──────────────────────────────────────────────────────────────────────
+# ESPN team IDs: https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams
+# Example: 17 = Las Vegas Aces, 5 = Indiana Fever, 9 = New York Liberty
+# Note: like the NBA, celebration is disabled — scores happen too frequently.
+SCOREBOARD_WNBA_ENABLED   = False
+SCOREBOARD_WNBA_TEAM_ID   = 0        # set your team's ID here
+SCOREBOARD_WNBA_TEAM_NAME = ""
 
 # ── MLS ───────────────────────────────────────────────────────────────────────
 # ESPN team IDs: https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/teams

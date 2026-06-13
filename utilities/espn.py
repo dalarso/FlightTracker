@@ -91,6 +91,7 @@ def _label_mls(period: int, status: str) -> str:
 _PERIOD_LABEL_FN: dict = {
     "football/nfl":    _label_nfl,
     "basketball/nba":  _label_nba,
+    "basketball/wnba": _label_nba,   # WNBA — 4 quarters, identical period labels to the NBA
     "soccer/usa.1":    _label_mls,   # _label_mls is a generic soccer labeler (1st/2nd/HLF/ET)
     "soccer/fifa.world": _label_mls,  # FIFA World Cup — same period labels as any soccer match
 }

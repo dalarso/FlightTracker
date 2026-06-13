@@ -373,6 +373,9 @@ function populateForm() {
   document.getElementById('sb_nba_enabled').checked    = config.SCOREBOARD_NBA_ENABLED || false;
   document.getElementById('sb_nba_team_id').value      = config.SCOREBOARD_NBA_TEAM_ID ?? '';
   document.getElementById('sb_nba_team_name').value    = (config.SCOREBOARD_NBA_TEAM_NAME || '').toUpperCase();
+  document.getElementById('sb_wnba_enabled').checked   = config.SCOREBOARD_WNBA_ENABLED || false;
+  document.getElementById('sb_wnba_team_id').value     = config.SCOREBOARD_WNBA_TEAM_ID ?? '';
+  document.getElementById('sb_wnba_team_name').value   = (config.SCOREBOARD_WNBA_TEAM_NAME || '').toUpperCase();
   document.getElementById('sb_mls_enabled').checked    = config.SCOREBOARD_MLS_ENABLED || false;
   document.getElementById('sb_mls_team_id').value      = config.SCOREBOARD_MLS_TEAM_ID ?? '';
   document.getElementById('sb_mls_team_name').value    = (config.SCOREBOARD_MLS_TEAM_NAME || '').toUpperCase();
@@ -382,7 +385,7 @@ function populateForm() {
   // Reorder table rows to match saved priority
   const _sbPriority = Array.isArray(config.SCOREBOARD_PRIORITY)
     ? config.SCOREBOARD_PRIORITY
-    : ['NHL', 'NFL', 'MLB', 'NBA', 'MLS', 'FIFA'];
+    : ['NHL', 'NFL', 'MLB', 'NBA', 'WNBA', 'MLS', 'FIFA'];
   const _sbTbody = document.querySelector('.sb-table tbody');
   _sbPriority.forEach(league => {
     const row = _sbTbody.querySelector(`tr[data-league="${league}"]`);
@@ -457,6 +460,9 @@ function buildConfigPayload() {
     SCOREBOARD_NBA_ENABLED:  document.getElementById('sb_nba_enabled').checked,
     SCOREBOARD_NBA_TEAM_ID:  parseInt(document.getElementById('sb_nba_team_id').value)  || 0,
     SCOREBOARD_NBA_TEAM_NAME: (document.getElementById('sb_nba_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_WNBA_ENABLED:  document.getElementById('sb_wnba_enabled').checked,
+    SCOREBOARD_WNBA_TEAM_ID:  parseInt(document.getElementById('sb_wnba_team_id').value)  || 0,
+    SCOREBOARD_WNBA_TEAM_NAME: (document.getElementById('sb_wnba_team_name').value || '').toUpperCase().slice(0, 4),
     SCOREBOARD_MLS_ENABLED:  document.getElementById('sb_mls_enabled').checked,
     SCOREBOARD_MLS_TEAM_ID:  parseInt(document.getElementById('sb_mls_team_id').value)  || 0,
     SCOREBOARD_MLS_TEAM_NAME: (document.getElementById('sb_mls_team_name').value || '').toUpperCase().slice(0, 4),

@@ -90,7 +90,7 @@ def _fetch_scoreboard_data():
             v = cfg.get(fallback_key)
         return v if v is not None else default
 
-    priority = cfg.get("SCOREBOARD_PRIORITY", ["NHL", "NFL", "MLB", "NBA", "MLS"])
+    priority = cfg.get("SCOREBOARD_PRIORITY", ["NHL", "NFL", "MLB", "NBA", "WNBA", "MLS", "FIFA"])
     # Normalise to canonical uppercase league keys + dedupe: _SPORT_DEFS is keyed uppercase
     # and the LED scene resolves via league.upper(), so a hand-edited config with a lowercase
     # or duplicated entry (e.g. "nhl" or ["NHL","NFL","NHL"]) would otherwise be silently
@@ -121,6 +121,12 @@ def _fetch_scoreboard_data():
             "team_id":   int(cfg.get("SCOREBOARD_NBA_TEAM_ID",  0)),
             "team_name": str(cfg.get("SCOREBOARD_NBA_TEAM_NAME", "")),
             "fetch_fn":  lambda tid: _sb_fetch_espn("basketball/nba", tid, tz),
+        },
+        "WNBA": {
+            "enabled":   bool(cfg.get("SCOREBOARD_WNBA_ENABLED", False)),
+            "team_id":   int(cfg.get("SCOREBOARD_WNBA_TEAM_ID",  0)),
+            "team_name": str(cfg.get("SCOREBOARD_WNBA_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_espn("basketball/wnba", tid, tz),
         },
         "MLS": {
             "enabled":   bool(cfg.get("SCOREBOARD_MLS_ENABLED", False)),

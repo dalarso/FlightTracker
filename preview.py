@@ -221,7 +221,9 @@ def _sport_fetcher(sport_key):
     return _f
 
 for _name, _key in (("_fetch_nhl", "NHL"), ("_fetch_mlb", "MLB"),
-                    ("_fetch_nfl", "NFL"), ("_fetch_nba", "NBA"), ("_fetch_mls", "MLS")):
+                    ("_fetch_nfl", "NFL"), ("_fetch_nba", "NBA"),
+                    ("_fetch_wnba", "WNBA"), ("_fetch_mls", "MLS"),
+                    ("_fetch_fifa", "FIFA")):
     if hasattr(_sb, _name):
         setattr(_sb, _name, _sport_fetcher(_key))
 

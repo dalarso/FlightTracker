@@ -60,6 +60,7 @@ from rgbmatrix import graphics
 # ── Per-sport ESPN fetch wrappers (same (team_id, tz) signature as NHL/MLB) ──
 _fetch_nfl  = partial(fetch_espn_game, "football/nfl")
 _fetch_nba  = partial(fetch_espn_game, "basketball/nba")
+_fetch_wnba = partial(fetch_espn_game, "basketball/wnba")     # WNBA (same ESPN shape as the NBA)
 _fetch_mls  = partial(fetch_espn_game, "soccer/usa.1")
 _fetch_fifa = partial(fetch_espn_game, "soccer/fifa.world")   # FIFA World Cup (national teams)
 
@@ -181,7 +182,7 @@ def _send_state(slots, now_ts: float) -> None:
 SCOREBOARD_MASTER_ENABLED = bool(_cfg("SCOREBOARD_ENABLED", True))
 
 # Priority order — first entry wins when multiple sports are active
-_DEFAULT_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "MLS", "FIFA"]
+_DEFAULT_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "WNBA", "MLS", "FIFA"]
 SCOREBOARD_PRIORITY = _cfg("SCOREBOARD_PRIORITY", _DEFAULT_PRIORITY)
 
 
@@ -390,6 +391,17 @@ def _build_slots() -> list[dict]:
             "score_font":       _SCORE_FONT,
             "score_char_px":    _SCORE_CHAR_PX,
             "celebrate":        False,           # scores too frequently
+            "celebration_text": "",
+        },
+        "WNBA": {
+            "key":              "WNBA",
+            "enabled":          bool(_sport_cfg("WNBA", "ENABLED", False)),
+            "team_id":          int(_sport_cfg("WNBA", "TEAM_ID", 0)),
+            "team_name":        str(_sport_cfg("WNBA", "TEAM_NAME", "")),
+            "fetch_fn":         _fetch_wnba,
+            "score_font":       _SCORE_FONT,
+            "score_char_px":    _SCORE_CHAR_PX,
+            "celebrate":        False,           # scores too frequently (same as the NBA)
             "celebration_text": "",
         },
         "MLS": {
