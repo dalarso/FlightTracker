@@ -847,6 +847,10 @@ SCENARIOS = [
                     "olat": 40.64, "olon": -73.78, "dlat": 36.08, "dlon": -115.15},
         "expect": ("JFK", "LAS", "aeroapi"),
         "expect_cache_types": ["resolved"],
+        # Pin the 7-day TTL: a regression writing the resolved entry at a short TTL
+        # (e.g. ROUTE_MISS_TTL) would defeat the resolved cache's purpose yet otherwise
+        # pass silently — the other key types pin their TTL, this one now does too.
+        "expect_cache_ttl": {"AAL7700": overhead.ROUTE_TTL_SCHEDULED},
     },
 ]
 
