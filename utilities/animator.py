@@ -25,7 +25,6 @@ class Animator(object):
         self._reset_keyframes = []
         self.frame = 0
         self._delay = DELAY_DEFAULT
-        self._reset_scene = True
         # Per-keyframe-name frame index of the last logged traceback (rate-limiting).
         self._keyframe_error_frames = {}
 
@@ -84,7 +83,6 @@ class Animator(object):
                     self._log_keyframe_error(keyframe)
                     continue
 
-            self._reset_scene = False
             self.frame += 1
             sleep(self._delay)
 

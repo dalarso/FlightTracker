@@ -1653,13 +1653,18 @@ def fetch_flights():
     return []
 
 
+# The home Cartesian is FIXED — precompute it once instead of re-running
+# _polar_to_cartesian(*home) for every aircraft on every poll.
+_HOME_XYZ = _polar_to_cartesian(*LOCATION_DEFAULT)
+
+
 def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
     try:
         x0, y0, z0 = _polar_to_cartesian(
             flight.latitude, flight.longitude,
             _alt_ft_to_earth_radius(flight.altitude),
         )
-        x1, y1, z1 = _polar_to_cartesian(*home)
+        x1, y1, z1 = _HOME_XYZ if home is LOCATION_DEFAULT else _polar_to_cartesian(*home)
         return math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2)
     except (AttributeError, TypeError):
         return 1e6
@@ -2398,8 +2403,7 @@ def _route_last_resort_pick(ctx):
             # 3 non-local-partial.  A LOCAL endpoint outranks completeness (your
             # "1. local") so a known home endpoint beats a probably-wrong non-local
             # route; within a locality, a complete route beats a partial one.
-            def _route_tier(o, d):
-                return (0 if _has_local_endpoint(o, d) else 2) + (0 if (o and d) else 1)
+            # (uses the module-level _route_tier — identical logic, no nested redefinition)
             _cands.sort(key=lambda c: (_route_tier(c[1], c[2]), SOURCE_PRIORITY.get(c[0], 99)))
             _best = _cands[0]
             # Only override the inline-committed state when the candidate is a

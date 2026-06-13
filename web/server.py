@@ -1004,7 +1004,10 @@ def api_weather():
     now = time.time()
     with _weather_cache_lock:
         cached = _weather_cache.copy()
-    if now - cached["ts"] < _WEATHER_CACHE_TTL and cached["temp"] is not None:
+    # Serve ANY entry within the TTL, including a None temp from a failed fetch (negative
+    # cache): otherwise a weather outage makes every request re-run the up-to-~10s upstream
+    # calls and pin a waitress worker. None just renders blank for the TTL; the next miss retries.
+    if now - cached["ts"] < _WEATHER_CACHE_TTL:
         return jsonify({"temp": cached["temp"], "unit": cached["unit"]})
 
     # Dedup the cold-cache stampede: if another thread is already fetching, don't
@@ -1015,7 +1018,7 @@ def api_weather():
         # Re-check under the fetch lock — a refresh may have just completed.
         with _weather_cache_lock:
             cached = _weather_cache.copy()
-        if now - cached["ts"] < _WEATHER_CACHE_TTL and cached["temp"] is not None:
+        if now - cached["ts"] < _WEATHER_CACHE_TTL:
             return jsonify({"temp": cached["temp"], "unit": cached["unit"]})
         return _refresh_weather(now)
     finally:
