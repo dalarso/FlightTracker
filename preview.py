@@ -17,7 +17,7 @@ Setup (Windows): install Python, `pip install -r requirements-preview.txt`, copy
 then run:  python preview.py        (set FT_PI if the Pi isn't at the default below)
 
 Env:
-    FT_PI               base URL of the Pi web UI   (default http://192.168.1.50:5000)
+    FT_PI               base URL of the Pi web UI   (default http://raspberrypi.local:5000)
     FT_PREVIEW_ADAPTER  window adapter (default: auto — 'pygame' if it's installed, for the
                         glowing 'real' LED look in a native window; else 'tkinter' with
                         'circle' dots.  'browser' serves a web/headless view on :8888.)
@@ -36,7 +36,7 @@ from unittest.mock import MagicMock
 
 import requests
 
-PI = os.environ.get("FT_PI", "http://192.168.1.50:5000").rstrip("/")
+PI = os.environ.get("FT_PI", "http://raspberrypi.local:5000").rstrip("/")
 
 
 def _auto_adapter():

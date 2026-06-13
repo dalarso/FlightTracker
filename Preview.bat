@@ -7,7 +7,7 @@ REM     pip install pygame-ce
 REM preview.py then auto-selects it.  Without it you get a tkinter window with 'circle' dots.
 REM Set FT_PI below if the Pi isn't at the default address.
 
-if "%FT_PI%"=="" set FT_PI=http://192.168.1.50:5000
+if "%FT_PI%"=="" set FT_PI=http://raspberrypi.local:5000
 cd /d "%~dp0"
 python preview.py
 echo.

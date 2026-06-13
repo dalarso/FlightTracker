@@ -42,7 +42,7 @@ everything from the Pi's web API**, so:
    auto-selects it (`real` glow, identical to the Mac); without it you get a `tkinter` window
    with `circle` dots. If the Pi isn't at the default address, set it first:
    ```
-   set FT_PI=http://192.168.1.50:5000
+   set FT_PI=http://raspberrypi.local:5000
    ```
 
 ### Double-click launch
@@ -58,7 +58,7 @@ backend instead (already in the preview venv). Two double-click launchers are pr
 - **`Preview.command`** (next to `preview.py`) — same, but runs in a Terminal window.
 
 Both `cd` to the repo, use the persistent venv at `~/.ftpreview-venv`, and pull from `FT_PI`
-(default `http://192.168.1.50:5000`). To (re)build the venv:
+(default `http://raspberrypi.local:5000`). To (re)build the venv:
 ```
 python3 -m venv ~/.ftpreview-venv
 ~/.ftpreview-venv/bin/pip install -r requirements-preview.txt pygame
@@ -70,7 +70,7 @@ If the pygame window ever misbehaves, run with `FT_PREVIEW_ADAPTER=browser` and 
 
 | Var | Default | Notes |
 |---|---|---|
-| `FT_PI` | `http://192.168.1.50:5000` | Base URL of the Pi web UI |
+| `FT_PI` | `http://raspberrypi.local:5000` | Base URL of the Pi web UI |
 | `FT_PREVIEW_ADAPTER` | _auto_ | Auto-picks `pygame` (native window, glowing `real` LED look) if installed, else `tkinter` (`circle` dots). Windows: `pip install pygame-ce`. Or force `browser` (serves `localhost:8888`). |
 
 ## Notes
