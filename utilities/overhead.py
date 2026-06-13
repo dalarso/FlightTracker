@@ -2295,6 +2295,66 @@ def _route_record_paid_miss(callsign, *, need_airlabs, skip_paid, apis_disabled,
         _log(f"[route] {callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
 
 
+def _route_ga_crosscheck(*, fr24_src, is_n_number, fr24_origin, fr24_dest,
+                         adsbdb_origin, adsbdb_dest, sky_origin, sky_dest,
+                         callsign, registration):
+    """GA cross-check: record whether the free APIs (adsbdb / OpenSky) agreed with FR24
+    ground truth for N-number aircraft.  Read-only — builds accuracy stats, mutates no
+    caller state."""
+    _fr24_live = (fr24_src == "fr24")   # True = live call this invocation
+    if is_n_number and fr24_origin and fr24_dest and _fr24_live:
+        _fr24_route_str = f"{fr24_origin}->{fr24_dest}"
+
+        if adsbdb_origin or adsbdb_dest:
+            _ga_db_route = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
+            _ga_db_matched = (
+                (adsbdb_origin or "").upper() == fr24_origin.upper()
+                and (adsbdb_dest or "").upper() == fr24_dest.upper()
+            )
+            if _ga_db_matched:
+                _log(f"[adsbdb] {callsign} ({registration}): FR24 confirmed adsbdb GA route ({_fr24_route_str})")
+            else:
+                _log(f"[adsbdb] {callsign} ({registration}): FR24 overrode adsbdb — was {_ga_db_route}, FR24 has {_fr24_route_str}")
+            _record_ga_free_api_check(registration, callsign,
+                                      "adsbdb", _ga_db_route, _fr24_route_str, _ga_db_matched)
+
+        if sky_origin or sky_dest:
+            _ga_sky_route = f"{sky_origin or '?'}->{sky_dest or '?'}"
+            _ga_sky_matched = (
+                (sky_origin or "").upper() == fr24_origin.upper()
+                and (sky_dest or "").upper() == fr24_dest.upper()
+            )
+            if _ga_sky_matched:
+                _log(f"[opensky] {callsign} ({registration}): FR24 confirmed OpenSky GA route ({_fr24_route_str})")
+            else:
+                _log(f"[opensky] {callsign} ({registration}): FR24 overrode OpenSky — was {_ga_sky_route}, FR24 has {_fr24_route_str}")
+            _record_ga_free_api_check(registration, callsign,
+                                      "opensky", _ga_sky_route, _fr24_route_str, _ga_sky_matched)
+
+
+def _route_adsbdb_crosscheck(*, adsbdb_commercial, adsbdb_origin, adsbdb_dest,
+                             origin, destination, source, callsign):
+    """Cross-check log for commercial flights where adsbdb had data — report whether the
+    paid APIs confirmed or overrode it.  Read-only — builds accuracy stats, mutates no
+    caller state."""
+    if (adsbdb_commercial and (adsbdb_origin or adsbdb_dest) and (origin or destination)
+            and "fr24" not in (source or "")
+            and source not in ("adsbdb", "opensky", "adsbdb+opensky")):
+        _db_route   = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
+        _paid_route = f"{origin or '?'}->{destination or '?'}"
+        _matched    = ((adsbdb_origin or "").upper() == (origin or "").upper()
+                       and (adsbdb_dest or "").upper() == (destination or "").upper())
+        # Only log on the first (live) resolution — suppress on cached repeat polls
+        # where the route is already known and the cross-check adds no new information.
+        _source_is_cached = bool(source) and source.endswith(":cached")
+        if not _source_is_cached:
+            if _matched:
+                _log(f"[adsbdb] {callsign}: paid APIs confirmed adsbdb route ({_paid_route})")
+            else:
+                _log(f"[adsbdb] {callsign}: paid APIs overrode adsbdb — was {_db_route}, now {_paid_route}")
+        _record_free_api_check(callsign, _db_route, _paid_route, _matched)
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -2644,35 +2704,11 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     #     results would produce false mismatches against fully-resolved free API data.
     #   • Require FR24 to be a *live* call this invocation — cached FR24 data is not
     #     valid ground truth when comparing against a freshly-fetched free API result.
-    _fr24_live = (_fr24_src == "fr24")   # True = live call this invocation
-    if _is_n_number and _fr24_origin and _fr24_dest and _fr24_live:
-        _fr24_route_str = f"{_fr24_origin}->{_fr24_dest}"
-
-        if adsbdb_origin or adsbdb_dest:
-            _ga_db_route = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
-            _ga_db_matched = (
-                (adsbdb_origin or "").upper() == _fr24_origin.upper()
-                and (adsbdb_dest or "").upper() == _fr24_dest.upper()
-            )
-            if _ga_db_matched:
-                _log(f"[adsbdb] {callsign} ({registration}): FR24 confirmed adsbdb GA route ({_fr24_route_str})")
-            else:
-                _log(f"[adsbdb] {callsign} ({registration}): FR24 overrode adsbdb — was {_ga_db_route}, FR24 has {_fr24_route_str}")
-            _record_ga_free_api_check(registration, callsign,
-                                      "adsbdb", _ga_db_route, _fr24_route_str, _ga_db_matched)
-
-        if _sky_origin or _sky_dest:
-            _ga_sky_route = f"{_sky_origin or '?'}->{_sky_dest or '?'}"
-            _ga_sky_matched = (
-                (_sky_origin or "").upper() == _fr24_origin.upper()
-                and (_sky_dest or "").upper() == _fr24_dest.upper()
-            )
-            if _ga_sky_matched:
-                _log(f"[opensky] {callsign} ({registration}): FR24 confirmed OpenSky GA route ({_fr24_route_str})")
-            else:
-                _log(f"[opensky] {callsign} ({registration}): FR24 overrode OpenSky — was {_ga_sky_route}, FR24 has {_fr24_route_str}")
-            _record_ga_free_api_check(registration, callsign,
-                                      "opensky", _ga_sky_route, _fr24_route_str, _ga_sky_matched)
+    _route_ga_crosscheck(fr24_src=_fr24_src, is_n_number=_is_n_number,
+                         fr24_origin=_fr24_origin, fr24_dest=_fr24_dest,
+                         adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
+                         sky_origin=_sky_origin, sky_dest=_sky_dest,
+                         callsign=callsign, registration=registration)
 
     # ── 3. AirLabs (real-time, 1,000 calls/month — now mainly through-traffic) ──
     # Only called when free APIs didn't resolve the route (no data, disagreement,
@@ -3197,22 +3233,10 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     # the paid APIs confirmed or overrode it (GA flights never enter this branch).
     # Skip when FR24 was the source — it's free, not a paid API, and the log/stats
     # would misleadingly attribute its result to AirLabs/AeroAPI.
-    if (_adsbdb_commercial and (adsbdb_origin or adsbdb_dest) and (origin or destination)
-            and "fr24" not in (source or "")
-            and source not in ("adsbdb", "opensky", "adsbdb+opensky")):
-        _db_route   = f"{adsbdb_origin or '?'}->{adsbdb_dest or '?'}"
-        _paid_route = f"{origin or '?'}->{destination or '?'}"
-        _matched    = ((adsbdb_origin or "").upper() == (origin or "").upper()
-                       and (adsbdb_dest or "").upper() == (destination or "").upper())
-        # Only log on the first (live) resolution — suppress on cached repeat polls
-        # where the route is already known and the cross-check adds no new information.
-        _source_is_cached = bool(source) and source.endswith(":cached")
-        if not _source_is_cached:
-            if _matched:
-                _log(f"[adsbdb] {callsign}: paid APIs confirmed adsbdb route ({_paid_route})")
-            else:
-                _log(f"[adsbdb] {callsign}: paid APIs overrode adsbdb — was {_db_route}, now {_paid_route}")
-        _record_free_api_check(callsign, _db_route, _paid_route, _matched)
+    _route_adsbdb_crosscheck(adsbdb_commercial=_adsbdb_commercial,
+                             adsbdb_origin=adsbdb_origin, adsbdb_dest=adsbdb_dest,
+                             origin=origin, destination=destination,
+                             source=source, callsign=callsign)
 
     # ── _select() is the route authority (Phase-3 flip, now permanent) ──────────
     # The 4-day shadow soak proved _select()'s route matches the live inline pick on
