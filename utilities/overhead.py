@@ -2768,6 +2768,24 @@ def _route_select_authority(origin, destination, source,
             coord_olat, coord_olon, coord_dlat, coord_dlon, coord_origin_iata)
 
 
+def _route_commit_fr24(origin, destination, source, *,
+                       fr24_origin, fr24_dest, fr24_src, registration):
+    """§1 acceptance/commit glue for the FR24 GA tier.  The FR24 query already ran;
+    this fills any blank origin/destination from its result and adopts its source label
+    (preserving any endpoint a prior partial override already set).  Logs acceptance for
+    live (non-cached) results only.  Returns the possibly-updated (origin, destination,
+    source); mutates nothing else."""
+    if fr24_origin or fr24_dest:
+        if fr24_src != "fr24:cached":
+            _log(f"[fr24] {registration}: {_route_display(fr24_origin, fr24_dest)} accepted")
+        if not origin:
+            origin = fr24_origin
+        if not destination:
+            destination = fr24_dest
+        source = source or fr24_src
+    return origin, destination, source
+
+
 def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None,
               vrs_origin="", vrs_dest="", registration="", _trace=None):
     """
@@ -2990,14 +3008,10 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         callsign, hex_code, registration, origin, destination,
         plane_lat, plane_lon, _is_n_number, _adsbdb_commercial)
 
-    if _fr24_origin or _fr24_dest:
-        if _fr24_src != "fr24:cached":
-            _log(f"[fr24] {registration}: {_route_display(_fr24_origin, _fr24_dest)} accepted")
-        if not origin:
-            origin = _fr24_origin
-        if not destination:
-            destination = _fr24_dest
-        source = source or _fr24_src
+    origin, destination, source = _route_commit_fr24(
+        origin, destination, source,
+        fr24_origin=_fr24_origin, fr24_dest=_fr24_dest, fr24_src=_fr24_src,
+        registration=registration)
 
     # ── 2. adsbdb (static historical DB) ──────────────────────────────────────
     (adsbdb_origin, adsbdb_dest, adsbdb_olat, adsbdb_olon,
