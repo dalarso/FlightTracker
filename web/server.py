@@ -185,7 +185,7 @@ _CONFIG_SCHEMA = [
     ("SCOREBOARD_ENABLED",                  "bool",  False),
     ("SCOREBOARD_POST_GAME_MINUTES",        "int0",  30),  # 0 = hide immediately (valid)
     ("SCOREBOARD_GOAL_CELEBRATION_SECONDS", "int0",  30),  # 0 = disable celebration (valid)
-    ("SCOREBOARD_PRIORITY",                 "list",  ["NHL", "NFL", "MLB", "NBA", "MLS"]),
+    ("SCOREBOARD_PRIORITY",                 "list",  ["NHL", "NFL", "MLB", "NBA", "MLS", "FIFA"]),
     ("SCOREBOARD_NHL_ENABLED",  lambda e: str(bool(e.get("SCOREBOARD_NHL_ENABLED", e.get("SCOREBOARD_ENABLED", True))))),
     ("SCOREBOARD_NHL_TEAM_ID",  lambda e: str(int(e.get("SCOREBOARD_NHL_TEAM_ID") or e.get("SCOREBOARD_TEAM_ID") or 0))),
     ("SCOREBOARD_NHL_TEAM_NAME", lambda e: repr(str(e.get("SCOREBOARD_NHL_TEAM_NAME") or e.get("SCOREBOARD_TEAM_NAME") or ""))),
@@ -201,6 +201,9 @@ _CONFIG_SCHEMA = [
     ("SCOREBOARD_MLS_ENABLED",              "bool",  False),
     ("SCOREBOARD_MLS_TEAM_ID",              "int",   0),
     ("SCOREBOARD_MLS_TEAM_NAME",            "str",   ""),
+    ("SCOREBOARD_FIFA_ENABLED",             "bool",  False),
+    ("SCOREBOARD_FIFA_TEAM_ID",             "int",   0),
+    ("SCOREBOARD_FIFA_TEAM_NAME",           "str",   ""),
     ("FEEDER_MONTHLY_CREDIT",               "float0", 10.00),  # 0.0 = no feeder credit (valid)
     ("AIRLABS_MONTHLY_LIMIT",               "int",   1000),
     ("AIRLABS_RESET_DAY",                   "int",   9),

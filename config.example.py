@@ -84,7 +84,7 @@ SCOREBOARD_GOAL_CELEBRATION_SECONDS = 30
 SCOREBOARD_WIN_CELEBRATION_SECONDS = 180
 
 # Priority order — when multiple sports are live, the first entry wins
-SCOREBOARD_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "MLS"]
+SCOREBOARD_PRIORITY = ["NHL", "NFL", "MLB", "NBA", "MLS", "FIFA"]
 
 # ── NHL ───────────────────────────────────────────────────────────────────────
 # Team IDs: use the link below and look for the numeric "id" field next to your team.
@@ -118,6 +118,13 @@ SCOREBOARD_NBA_TEAM_NAME = ""
 SCOREBOARD_MLS_ENABLED   = False
 SCOREBOARD_MLS_TEAM_ID   = 0        # set your team's ID here
 SCOREBOARD_MLS_TEAM_NAME = ""
+
+# ── FIFA World Cup (national teams) ────────────────────────────────────────────
+# ESPN team IDs: https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/teams
+# Example: 660 = United States, 202 = England, 205 = Brazil, 478 = Mexico
+SCOREBOARD_FIFA_ENABLED   = False
+SCOREBOARD_FIFA_TEAM_ID   = 0        # your national team's ESPN ID (e.g. 660 = USA)
+SCOREBOARD_FIFA_TEAM_NAME = ""       # ≤4 chars shown on LED display (e.g. "USA")
 
 # ── Remote agent apps (optional desktop companions) ──────────────────────────
 # Two optional Windows desktop apps mirror the board over fire-and-forget UDP and

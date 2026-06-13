@@ -128,6 +128,12 @@ def _fetch_scoreboard_data():
             "team_name": str(cfg.get("SCOREBOARD_MLS_TEAM_NAME", "")),
             "fetch_fn":  lambda tid: _sb_fetch_espn("soccer/usa.1", tid, tz),
         },
+        "FIFA": {
+            "enabled":   bool(cfg.get("SCOREBOARD_FIFA_ENABLED", False)),
+            "team_id":   int(cfg.get("SCOREBOARD_FIFA_TEAM_ID",  0)),
+            "team_name": str(cfg.get("SCOREBOARD_FIFA_TEAM_NAME", "")),
+            "fetch_fn":  lambda tid: _sb_fetch_espn("soccer/fifa.world", tid, tz),
+        },
     }
 
     any_enabled = any(

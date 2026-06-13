@@ -81,10 +81,10 @@ import scoreboard_data            # noqa: E402  web/scoreboard_data.py
 import sportscore                 # noqa: E402  scenes/sportscore.py
 
 
-# All five sports, with the same fixed team-id / team-name everywhere so a winner's
+# All sports, with the same fixed team-id / team-name everywhere so a winner's
 # team_name (web) and slot key (scene) are directly comparable by sport key.
-_SPORTS = ("NHL", "NFL", "MLB", "NBA", "MLS")
-_TEAM_ID = {"NHL": 54, "NFL": 1, "MLB": 119, "NBA": 2, "MLS": 3}
+_SPORTS = ("NHL", "NFL", "MLB", "NBA", "MLS", "FIFA")
+_TEAM_ID = {"NHL": 54, "NFL": 1, "MLB": 119, "NBA": 2, "MLS": 3, "FIFA": 660}
 
 
 def _game(state, team_score=1, opp_score=0):
@@ -133,7 +133,8 @@ class _WebHarness:
 
         # ESPN fetcher is shared by NFL/NBA/MLS and is called as fetch(path, team_id, tz);
         # map team_id back to the sport so each ESPN sport can return its own game.
-        espn_by_id = {_TEAM_ID["NFL"]: "NFL", _TEAM_ID["NBA"]: "NBA", _TEAM_ID["MLS"]: "MLS"}
+        espn_by_id = {_TEAM_ID["NFL"]: "NFL", _TEAM_ID["NBA"]: "NBA",
+                      _TEAM_ID["MLS"]: "MLS", _TEAM_ID["FIFA"]: "FIFA"}
 
         scoreboard_data._sb_fetch_nhl = lambda tid, tz: games.get("NHL")
         scoreboard_data._sb_fetch_mlb = lambda tid, tz: games.get("MLB")
@@ -291,6 +292,14 @@ class ScoreboardParity(unittest.TestCase):
             {"NHL": _game("LIVE"), "NFL": _game("LIVE"), "MLS": _game("LIVE")},
         )
         self.assertEqual(pick, ("MLS", "LIVE"))
+
+    def test_fifa_world_cup_live_is_selected(self):
+        # FIFA (World Cup) is a first-class ESPN sport — a live match wins over a final.
+        pick = self._assert_agree(
+            ["NHL", "FIFA"],
+            {"NHL": _game("FINAL"), "FIFA": _game("LIVE")},
+        )
+        self.assertEqual(pick, ("FIFA", "LIVE"))
 
     # ── Case 3: all FINAL → both pick per priority (fresh window) …
     def test_all_final_fresh_pick_first_in_priority(self):

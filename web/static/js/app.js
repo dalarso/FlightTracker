@@ -376,10 +376,13 @@ function populateForm() {
   document.getElementById('sb_mls_enabled').checked    = config.SCOREBOARD_MLS_ENABLED || false;
   document.getElementById('sb_mls_team_id').value      = config.SCOREBOARD_MLS_TEAM_ID ?? '';
   document.getElementById('sb_mls_team_name').value    = (config.SCOREBOARD_MLS_TEAM_NAME || '').toUpperCase();
+  document.getElementById('sb_fifa_enabled').checked   = config.SCOREBOARD_FIFA_ENABLED || false;
+  document.getElementById('sb_fifa_team_id').value     = config.SCOREBOARD_FIFA_TEAM_ID ?? '';
+  document.getElementById('sb_fifa_team_name').value   = (config.SCOREBOARD_FIFA_TEAM_NAME || '').toUpperCase();
   // Reorder table rows to match saved priority
   const _sbPriority = Array.isArray(config.SCOREBOARD_PRIORITY)
     ? config.SCOREBOARD_PRIORITY
-    : ['NHL', 'NFL', 'MLB', 'NBA', 'MLS'];
+    : ['NHL', 'NFL', 'MLB', 'NBA', 'MLS', 'FIFA'];
   const _sbTbody = document.querySelector('.sb-table tbody');
   _sbPriority.forEach(league => {
     const row = _sbTbody.querySelector(`tr[data-league="${league}"]`);
@@ -457,6 +460,9 @@ function buildConfigPayload() {
     SCOREBOARD_MLS_ENABLED:  document.getElementById('sb_mls_enabled').checked,
     SCOREBOARD_MLS_TEAM_ID:  parseInt(document.getElementById('sb_mls_team_id').value)  || 0,
     SCOREBOARD_MLS_TEAM_NAME: (document.getElementById('sb_mls_team_name').value || '').toUpperCase().slice(0, 4),
+    SCOREBOARD_FIFA_ENABLED:  document.getElementById('sb_fifa_enabled').checked,
+    SCOREBOARD_FIFA_TEAM_ID:  parseInt(document.getElementById('sb_fifa_team_id').value)  || 0,
+    SCOREBOARD_FIFA_TEAM_NAME: (document.getElementById('sb_fifa_team_name').value || '').toUpperCase().slice(0, 4),
     SCOREBOARD_POST_GAME_MINUTES: parseInt(document.getElementById('scoreboard_post_game_minutes').value) || 30,
     SCOREBOARD_GOAL_CELEBRATION_SECONDS: parseInt(document.getElementById('scoreboard_goal_celebration_seconds').value) || 30,
     TIMEZONE: document.getElementById('timezone').value.trim(),

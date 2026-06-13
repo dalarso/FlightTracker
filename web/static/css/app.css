@@ -254,6 +254,7 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .sb-league.mlb { background:#002D72; color:#d6a5a5; }
 .sb-league.nba { background:#17408B; color:#f5b8c0; }
 .sb-league.mls { background:#005293; color:#b8d4f0; }
+.sb-league.fifa { background:#1a7a4a; color:#cdeed9; }
 .sb-find-link { font-size:11px; color:var(--accent); text-decoration:none; white-space:nowrap; }
 .sb-find-link:hover { text-decoration:underline; }
 .sb-table input[type=number] { width:70px; }
