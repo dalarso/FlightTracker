@@ -35,7 +35,7 @@ The Pi only sends these packets when the matching host is set in `config.py`
 
 ```python
 # Goal horn → goal-horn app
-SCOREBOARD_GOAL_HORN_HOST      = "192.168.1.30"   # the Windows machine's LAN IP ("" = off)
+SCOREBOARD_GOAL_HORN_HOST      = "192.168.1.30"   # the desktop machine's LAN IP ("" = off)
 SCOREBOARD_GOAL_HORN_PORT      = 50505
 SCOREBOARD_GOAL_HORN_PING_SECS = 5             # heartbeat cadence
 
