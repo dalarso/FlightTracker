@@ -189,7 +189,7 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
 - **Binds `0.0.0.0:5000`** (reachable from any device on your LAN). Keep the Pi behind your router/firewall — do **not** port-forward `:5000` to the internet.
 - **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The dashboard's 👁 button reveals one key on demand (one request per field).
 - **CSRF-guarded, two layers:** every state-changing request must carry an `X-Requested-With: FlightTracker` header (the dashboard sends it automatically), so a malicious page you happen to visit can't drive the dashboard through your browser. In addition, a request whose browser `Origin` resolves to a **non-LAN** host is rejected — this blocks DNS-rebinding (where a public name is rebound to the Pi's LAN IP), which the static header alone can't catch. LAN/loopback/`*.local`/bare-hostname origins (and header-less clients like `curl`) are allowed. **Tailscale is fully supported** for remote access — both the CGNAT IP range (`100.64.0.0/10`) and MagicDNS names (`*.ts.net`) pass, so you can reach the dashboard from anywhere on your tailnet.
-- **Health endpoint:** `GET /api/health` returns a liveness snapshot the display process writes each poll — `last_poll_age_sec`, `processing`, `active_threads`, `cache_write_failures`, `uptime_sec`, and an `ok` flag. Point a uptime monitor at it to catch a wedged poll or a failing SD card (rising `cache_write_failures`) before the panel visibly goes stale.
+- **Health endpoint:** `GET /api/health` returns a liveness snapshot the display process writes each poll — `last_poll_age_sec`, `processing`, `active_threads`, `cache_write_failures`, `uptime_sec`, and an `ok` flag. Point an uptime monitor at it to catch a wedged poll or a failing SD card (rising `cache_write_failures`) before the panel visibly goes stale.
 - **Production server:** served by [`waitress`](https://pypi.org/project/waitress/) when installed (it's in `requirements.txt`); falls back to the Flask dev server otherwise.
 - **Service control needs sudo** (the Save & Restart and service buttons run `systemctl`). Grant a **narrow** rule — never `NOPASSWD: ALL`:
   ```
@@ -304,7 +304,7 @@ RAINFALL_ENABLED    = False       # experimental — requires local taps-aff ser
 
 # ── Scoreboard (optional multi-sport live score — see "Live Scoreboard" above) ─
 SCOREBOARD_ENABLED        = False                          # master switch
-SCOREBOARD_PRIORITY       = ["NHL", "NFL", "MLB", "NBA", "MLS"]
+SCOREBOARD_PRIORITY       = ["NHL", "NFL", "MLB", "NBA", "WNBA", "MLS", "FIFA"]
 SCOREBOARD_NHL_ENABLED    = True
 SCOREBOARD_NHL_TEAM_ID    = 0                              # your team's numeric NHL id
 SCOREBOARD_NHL_TEAM_NAME  = "NHL"                          # ≤4 chars, shown on the LED
