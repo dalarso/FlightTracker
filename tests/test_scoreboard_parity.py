@@ -188,6 +188,13 @@ class _SceneHarness:
         now = time.time()
         for slot in scene._sport_slots:
             slot["game"] = games.get(slot["key"])
+            # Bypass the async network fetch: every slot is born with poll_due=0.0, so the
+            # first _sports_score tick would otherwise fire _poll_slot_async() → the slot's
+            # REAL fetch_fn (_fetch_mlb/_fetch_nhl/…) against the live API, on a background
+            # thread that races select_active and can overwrite our injected game with a real
+            # one (a real LIVE/FINAL game on game day → flaky parity mismatch). Push poll_due
+            # far into the future so the injected game is the only thing the tick ever sees.
+            slot["poll_due"] = now + 1e9
             if finals_aged_out and slot["game"] and slot["game"]["state"] in ("FINAL", "OFF"):
                 # Stamp the post-game window as having opened well in the past so Pass-2's
                 # `now - ended <= POST_GAME_SECONDS` gate fails — i.e. the window has lapsed.
