@@ -512,6 +512,28 @@ class SportScoreScene(object):
         for slot in self._sport_slots:
             slot["last_draw"] = None
 
+    # ── Reset-time repaint (fires inside reset_scene) ───────────────────────────
+
+    @Animator.KeyFrame.add(0)
+    def sport_score_reset(self):
+        # Repaint the active board immediately on every reset_scene() so the panel
+        # doesn't blank for up to a second (until the 1 Hz sports_score tick) whenever
+        # something resets the scene while the board — not a plane — is what's showing:
+        # the end of a GOAL/WIN celebration, or an incidental flyover appearing and then
+        # departing.  The flight scenes already repaint themselves at reset time (they're
+        # divisor-0); the scoreboard was the only active content that didn't, so it dropped
+        # to black on each reset and only came back on the next once-a-second tick.  Guards
+        # mirror _sports_score: flights win, a live celebration owns the canvas, and we only
+        # draw when a slot is genuinely active.  clear_screen sorts before this method, so
+        # the canvas is already cleared when we paint on top.
+        if len(self._data):
+            return
+        if self._goal_celebration_active:
+            return
+        slot = self._active_slot
+        if self._scoreboard_active and slot is not None and slot.get("game") is not None:
+            self._draw_score(slot, slot["game"])
+
     # ── Celebration frame (fires every display frame) ──────────────────────────
 
     @Animator.KeyFrame.add(1)

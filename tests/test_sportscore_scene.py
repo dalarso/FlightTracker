@@ -501,5 +501,78 @@ class RainDelayGuard(unittest.TestCase):
             self.assertTrue(slot["was_live"])
 
 
+# ── 5. Reset-time repaint: board must not blank on reset_scene() ──────────────────
+class ResetRepaint(unittest.TestCase):
+    """scenes/sportscore.py:sport_score_reset — the divisor-0 keyframe that repaints the
+    active board *inside* reset_scene() so the panel doesn't drop to black for up to a
+    second (until the next 1 Hz sports_score tick) whenever something resets the scene
+    while the scoreboard — not a plane — is the active content: the end of a GOAL/WIN
+    celebration, or an incidental flyover appearing then departing.  The flight scenes
+    already repaint themselves at reset time (they're divisor-0); before this fix the
+    scoreboard was the only active content that didn't, so it flashed blank on each reset.
+    """
+
+    def _active_board(self, h, slot):
+        """Drive the harness to a FINAL board that is the active content, via the loss path
+        (a winning FINAL arms the WIN celebration, which suppresses the active-slot draw):
+        leaves _scoreboard_active True, _active_slot == slot, no flights, no celebration."""
+        h.set_game(slot, _game("FUT", team_score=0))
+        h.tick()
+        h.set_game(slot, _game("LIVE", team_score=0, opp_score=2, period_label="3rd"))
+        h.tick()
+        h.set_game(slot, _game("FINAL", team_score=1, opp_score=2))
+        h.tick()
+        self.assertTrue(h.scene._scoreboard_active)
+        self.assertIs(h.scene._active_slot, slot)
+        self.assertFalse(h.scene._goal_celebration_active)
+
+    def test_registered_as_reset_keyframe(self):
+        # The whole fix hinges on this running INSIDE reset_scene() — i.e. divisor 0.  Guard
+        # it explicitly so a future edit to the divisor silently reintroduces the blank.
+        self.assertEqual(
+            sportscore.SportScoreScene.sport_score_reset.properties["divisor"], 0)
+
+    def test_repaints_active_board_on_reset(self):
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            self._active_board(h, slot)
+            h.scene._draw_score = MagicMock(name="_draw_score")
+            h.scene.sport_score_reset()
+            h.scene._draw_score.assert_called_once_with(slot, slot["game"])
+
+    def test_yields_to_flights(self):
+        # A plane is overhead → the flight scenes own the canvas; the board must NOT paint
+        # over it (mirrors the len(self._data) guard in _sports_score / celebration_frame).
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            self._active_board(h, slot)
+            h.scene._data = [{"callsign": "AAL123", "hex": "abc"}]
+            h.scene._draw_score = MagicMock(name="_draw_score")
+            h.scene.sport_score_reset()
+            h.scene._draw_score.assert_not_called()
+
+    def test_yields_during_celebration(self):
+        # A live GOAL/WIN scroll owns the canvas; the reset repaint must not stamp the static
+        # board on top of the animation.
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            self._active_board(h, slot)
+            h.scene._goal_celebration_active = True
+            h.scene._draw_score = MagicMock(name="_draw_score")
+            h.scene.sport_score_reset()
+            h.scene._draw_score.assert_not_called()
+
+    def test_noop_when_idle_no_active_slot(self):
+        # No game active (idle clock/date/weather) → nothing to repaint, and no crash on the
+        # None active slot.
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            self.assertFalse(h.scene._scoreboard_active)
+            self.assertIsNone(h.scene._active_slot)
+            h.scene._draw_score = MagicMock(name="_draw_score")
+            h.scene.sport_score_reset()
+            h.scene._draw_score.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
