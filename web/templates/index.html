@@ -165,6 +165,16 @@
       <div class="section-header">Scoreboard</div>
       <div class="field-grid">
 
+        <div class="field" id="sb-live-field" style="grid-column:1/-1;display:none">
+          <label>On the board now</label>
+          <div class="sb-live">
+            <span class="sb-live-dot" id="sb-live-dot"></span>
+            <span class="sb-live-text" id="sb-live-text">—</span>
+            <button type="button" class="btn" id="sb-hide-btn" onclick="toggleHideGame()">Hide this game</button>
+          </div>
+          <div class="hint">Swap the live scoreboard for the normal idle scene. It comes back on its own for the next game.</div>
+        </div>
+
         <div class="field" style="grid-column:1/-1">
           <label>Scoreboard</label>
           <div class="toggle-wrap">

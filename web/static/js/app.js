@@ -62,8 +62,9 @@ function showTab(name, btn) {
 // Pause the heavy polling timers when the tab/screen is hidden (saves phone battery and
 // Pi load for a 24/7-open dashboard); resume the active tab's poller when it returns.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stopAPIsTab(); stopLog(); }
+  if (document.hidden) { stopAPIsTab(); stopLog(); stopScoreboardPoll(); }
   else {
+    startScoreboardPoll();
     const active = document.querySelector('.tab-content.active');
     const tab = active ? active.id.replace('-tab', '') : '';
     if (tab === 'apis') initAPIsTab();
@@ -229,6 +230,88 @@ async function toggleNight() {
     }
   } catch(e) {}
   el.style.pointerEvents = '';
+}
+
+// ── Scoreboard: live game + hide control ───────────────────────
+let _sbGame = null;         // last-seen active game dict (or null)
+let _sbDismissedId = null;  // game_id currently hidden (or null)
+let _sbTimer = null;
+
+function _sbStatusLabel(g) {
+  const st = g.state;
+  if (st === 'FINAL' || st === 'OFF') {
+    if ((g.period_label || '').startsWith('F/')) return g.period_label;       // MLB extra innings
+    const pt = g.period_type || 'REG';
+    if (pt === 'OT' || pt === 'SO') return 'Final ' + (g.period_label || pt); // OT/SO final
+    return 'Final';
+  }
+  return g.period_label || 'Live';
+}
+
+function renderSbLive(d) {
+  const field = document.getElementById('sb-live-field');
+  if (!field) return;
+  const g = d && d.enabled ? d.game : null;
+  const active = g && ['LIVE', 'CRIT', 'FINAL', 'OFF'].includes(g.state);
+  if (!active) { field.style.display = 'none'; _sbGame = null; return; }
+  _sbGame = g;
+  const gid = g.game_id != null ? String(g.game_id) : '';
+  const hidden = !!(_sbDismissedId && gid && _sbDismissedId === gid);
+  field.style.display = '';
+  field.dataset.hidden = hidden ? '1' : '';
+  const team = d.team_name || '';
+  const opp = g.opp_abbr || '?';
+  document.getElementById('sb-live-text').textContent =
+    `${team} ${g.team_score ?? 0}–${g.opp_score ?? 0} ${opp} · ${_sbStatusLabel(g)}`;
+  document.getElementById('sb-live-dot').classList.toggle('off', hidden);
+  const btn = document.getElementById('sb-hide-btn');
+  btn.textContent = hidden ? 'Show this game' : 'Hide this game';
+  btn.classList.toggle('btn-primary', hidden);
+}
+
+async function pollScoreboard() {
+  try {
+    const r = await fetch('/api/scoreboard');
+    const d = await r.json();
+    _sbDismissedId = d.dismissed_game_id != null ? String(d.dismissed_game_id) : null;
+    renderSbLive(d);
+  } catch(e) { /* keep last state on a transient error */ }
+}
+
+async function toggleHideGame() {
+  const field = document.getElementById('sb-live-field');
+  const btn = document.getElementById('sb-hide-btn');
+  const hidden = field.dataset.hidden === '1';
+  btn.style.pointerEvents = 'none';
+  try {
+    if (hidden) {
+      const r = await fetch('/api/scoreboard/show', { method: 'POST' });
+      const dd = await r.json();
+      if (dd.ok) showToast('Scoreboard restored');
+    } else {
+      const gid = _sbGame && _sbGame.game_id != null ? String(_sbGame.game_id) : '';
+      const r = await fetch('/api/scoreboard/dismiss', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ game_id: gid }),
+      });
+      const dd = await r.json();
+      if (dd.ok) showToast('Game hidden — showing the default scene');
+      else showToast('✗ ' + (dd.error || 'Could not hide game'), 'err');
+    }
+  } catch(e) { showToast('✗ Request failed', 'err'); }
+  await pollScoreboard();
+  btn.style.pointerEvents = '';
+}
+
+function startScoreboardPoll() {
+  if (_sbTimer) return;
+  pollScoreboard();
+  _sbTimer = setInterval(pollScoreboard, 20000);
+}
+
+function stopScoreboardPoll() {
+  if (_sbTimer) { clearInterval(_sbTimer); _sbTimer = null; }
 }
 
 // ── Unit Conversion ────────────────────────────────────────────
@@ -2355,3 +2438,4 @@ function initSbDragDrop() {
 loadConfig();
 checkInitialStatus();
 initSbDragDrop();
+startScoreboardPoll();

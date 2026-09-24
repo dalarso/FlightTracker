@@ -42,6 +42,7 @@ Display layout (64 × 32 LED matrix)
 """
 
 import datetime
+import json
 import socket
 import sys
 import threading
@@ -450,6 +451,26 @@ def _build_slots() -> list[dict]:
     return ordered
 
 
+# ── Web "hide this game" marker ─────────────────────────────────────────────────
+# The web UI writes /tmp/ft_dismissed_game = {"game_id": "<id>", "ts": <unix>} when the user
+# hides the game currently on the board.  The display suppresses ONLY that game_id, so the
+# scoreboard auto-returns for the next game (a different game_id) with nothing to switch back
+# on.  The web owns the file (creates/removes it, world-readable 0644); the display only reads
+# it — mirrors the pause/night flag ownership so /tmp's sticky bit is never in play.
+DISMISS_FILE = "/tmp/ft_dismissed_game"
+
+
+def _read_dismissed_game_id():
+    """Return the hidden game_id (str) from DISMISS_FILE, or None if absent/empty/malformed."""
+    try:
+        with open(DISMISS_FILE) as f:
+            gid = json.load(f).get("game_id")
+        gid = str(gid) if gid is not None else ""
+        return gid or None
+    except Exception:
+        return None
+
+
 # Typical wall-clock length (scheduled start → final buzzer) per league, with ~30 min of
 # headroom baked in for OT / stoppages so we err slightly LATE (never hide a score before its
 # real post-game window ends).  Keyed by league because "period" means different things per
@@ -496,6 +517,8 @@ class SportScoreScene(object):
         self._celebration_text     = ""
         self._celebration_scroll_x = screen.WIDTH
         self._celebration_tw       = 0      # cached text width for wrap
+        self._celebration_game_id  = None   # game_id that armed the current celebration
+        self._dismissed_game_id    = None   # web "hide this game" marker (by game_id)
 
     # ── Drawing helpers ────────────────────────────────────────────────────────
 
@@ -647,6 +670,22 @@ class SportScoreScene(object):
 
         now_ts = time.time()
 
+        # ── Web "hide this game" marker ────────────────────────────────────────
+        # Suppress ONLY this game_id, so the board auto-returns for the next game.
+        dismissed_id = _read_dismissed_game_id()
+        self._dismissed_game_id = dismissed_id
+
+        def _is_dismissed(g):
+            return bool(dismissed_id) and g is not None and str(g.get("game_id")) == dismissed_id
+
+        # If the game whose GOAL/WIN scroll is currently on screen just got hidden, cut the
+        # celebration now instead of letting it run out its 30 s / 180 s (celebration_frame
+        # cleans up on its next frame once _celebration_until is in the past).
+        if (dismissed_id and self._celebration_game_id is not None
+                and str(self._celebration_game_id) == dismissed_id
+                and now_ts < self._celebration_until):
+            self._celebration_until = 0.0
+
         # Stamp the post-game window start BEFORE _send_state reads it, so a FINAL that
         # actually ended hours ago (e.g. process restarted long after the buzzer) is
         # recognised as already-expired on the very first tick rather than mis-reported as
@@ -679,7 +718,8 @@ class SportScoreScene(object):
                 # each goal nudges the LAN listener (without re-arming the on-panel scroll).
                 horn_slot = next(
                     (s for s in self._sport_slots
-                     if (s.get("game") or {}).get("state") in ("LIVE", "CRIT")),
+                     if (s.get("game") or {}).get("state") in ("LIVE", "CRIT")
+                     and not _is_dismissed(s.get("game"))),
                     None,
                 )
                 for slot in self._sport_slots:
@@ -763,10 +803,12 @@ class SportScoreScene(object):
                 # game_ended_at set above so a buzzer-beater goal celebration can't swallow
                 # it.  Reuses the goal-celebration scroll machinery.
                 if (slot["was_live"] and not slot["win_shown"]
-                        and game.get("team_score", 0) > game.get("opp_score", 0)):
+                        and game.get("team_score", 0) > game.get("opp_score", 0)
+                        and not _is_dismissed(game)):
                     self._celebration_until    = now_ts + WIN_CELEBRATION_SECONDS
                     self._celebration_text     = f'{slot["team_name"]} WINS!'
                     self._celebration_scroll_x = screen.WIDTH
+                    self._celebration_game_id  = game.get("game_id")
                     slot["win_shown"]          = True
                     _send_horn("WIN", slot["team_name"], game.get("team_score", 0),
                                game.get("opp_abbr", ""), game.get("opp_score", 0))   # nudge the LAN listener (win sound)
@@ -781,8 +823,12 @@ class SportScoreScene(object):
             ended = _slot_by_key[key]["game_ended_at"]
             return bool(ended) and (now_ts - ended) <= POST_GAME_SECONDS
 
+        # A hidden game is passed as None so select_active skips it — a lower-priority
+        # game (if any) still wins, otherwise the board hands back to the idle scenes.
         _winner = select_active(
-            [(s["key"], s["game"]) for s in self._sport_slots], _final_window_ok
+            [(s["key"], (None if _is_dismissed(s["game"]) else s["game"]))
+             for s in self._sport_slots],
+            _final_window_ok,
         )
         active_slot = _slot_by_key.get(_winner)
 
@@ -824,6 +870,7 @@ class SportScoreScene(object):
                 team=active_slot["team_name"]
             )
             self._celebration_scroll_x = screen.WIDTH
+            self._celebration_game_id  = game.get("game_id")
             _send_horn("GOAL", active_slot["team_name"], new_score,
                        game.get("opp_abbr", ""), game.get("opp_score", 0))   # nudge the LAN horn, in sync
         active_slot["last_team_score"] = new_score

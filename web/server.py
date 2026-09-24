@@ -128,6 +128,7 @@ from scoreboard_data import _fetch_scoreboard_data, _load_persisted_game_ended_a
 CONFIG_PATH      = BASE_DIR / "config.py"
 PAUSE_FLAG       = Path("/tmp/ft_paused")
 NIGHT_FLAG       = Path("/tmp/ft_night")
+DISMISS_FLAG     = Path("/tmp/ft_dismissed_game")  # user "hide this game" marker (by game_id)
 APIS_DISABLED_FLAG    = Path("/tmp/ft_apis_disabled")
 ADSBDB_DISABLED_FLAG  = Path("/tmp/ft_adsbdb_disabled")
 OPENSKY_DISABLED_FLAG = Path("/tmp/ft_opensky_disabled")
@@ -1149,6 +1150,40 @@ _scoreboard_fetch_lock = threading.Lock()
 _SCOREBOARD_CACHE_TTL  = 30   # seconds
 
 
+def _read_dismiss_game_id():
+    """Return the currently-hidden game_id (str) from DISMISS_FLAG, or None if absent/empty."""
+    try:
+        gid = json.loads(DISMISS_FLAG.read_text()).get("game_id")
+        return str(gid) if gid not in (None, "") else None
+    except Exception:
+        return None
+
+
+def _write_dismiss_game_id(game_id):
+    """Persist the hide marker world-readable (0644): the LED display runs as user 'daemon'
+    and must be able to read a file the web (user 'pi') wrote.  Atomic write-then-rename so
+    the display never sees a half-written file."""
+    tmp = Path(str(DISMISS_FLAG) + ".tmp")
+    tmp.write_text(json.dumps({"game_id": str(game_id), "ts": int(time.time())}))
+    os.chmod(tmp, 0o644)
+    tmp.replace(DISMISS_FLAG)
+
+
+def _dismiss_state_for(game):
+    """Return the hidden game_id IF it still matches the game currently on the board;
+    otherwise clear the stale marker and return None.  This is what makes 'hide' auto-expire:
+    once a different game — or no game — is active, the marker is forgotten and the UI stops
+    reporting 'hidden' (mirrors the display, which only suppresses a matching game_id)."""
+    dismissed = _read_dismiss_game_id()
+    if dismissed is None:
+        return None
+    cur = str((game or {}).get("game_id") or "")
+    if cur and cur == dismissed:
+        return dismissed
+    DISMISS_FLAG.unlink(missing_ok=True)
+    return None
+
+
 def _scoreboard_response(cached):
     return jsonify({
         "game":          cached["game"],
@@ -1156,6 +1191,7 @@ def _scoreboard_response(cached):
         "sport_key":     cached.get("sport_key", "NHL"),
         "enabled":       cached["enabled"],
         "game_ended_at": cached.get("game_ended_at"),
+        "dismissed_game_id": _dismiss_state_for(cached["game"]),
     })
 
 
@@ -1249,7 +1285,36 @@ def _refresh_scoreboard(now):
         "sport_key":    sport_key,    # e.g. "NHL", "NFL", "MLB", "NBA", "MLS"
         "enabled":      enabled,
         "game_ended_at": game_ended_at,   # unix timestamp or null
+        "dismissed_game_id": _dismiss_state_for(game),   # game_id hidden by the user, or null
     })
+
+
+@app.route("/api/scoreboard/dismiss", methods=["POST"])
+def api_scoreboard_dismiss():
+    """Hide the game currently on the board.  Keyed by game_id so the scoreboard auto-returns
+    for the next game — nothing to switch back on.  The client sends the game_id it is showing;
+    if omitted we fall back to whatever the scoreboard cache currently considers active."""
+    data = request.get_json(silent=True) or {}
+    game_id = str(data.get("game_id") or "").strip()
+    if not game_id:
+        with _scoreboard_cache_lock:
+            game_id = str((_scoreboard_cache.get("game") or {}).get("game_id") or "").strip()
+    if not game_id:
+        return jsonify({"ok": False, "error": "no active game to hide"}), 400
+    try:
+        _write_dismiss_game_id(game_id)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    _log(f"[web] scoreboard: hid game {game_id}")
+    return jsonify({"ok": True, "dismissed_game_id": game_id})
+
+
+@app.route("/api/scoreboard/show", methods=["POST"])
+def api_scoreboard_show():
+    """Un-hide the scoreboard (remove the hide marker) — the board shows the active game again."""
+    DISMISS_FLAG.unlink(missing_ok=True)
+    _log("[web] scoreboard: restored (un-hid)")
+    return jsonify({"ok": True, "dismissed_game_id": None})
 
 
 @app.route("/api/service", methods=["GET"])

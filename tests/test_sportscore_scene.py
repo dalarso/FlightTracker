@@ -574,6 +574,80 @@ class ResetRepaint(unittest.TestCase):
             h.scene._draw_score.assert_not_called()
 
 
+# ── 6. Hide-this-game (web "dismiss" marker) ─────────────────────────────────────
+class HideGame(unittest.TestCase):
+    """scenes/sportscore.py hide-this-game support: when the web writes DISMISS_FILE with a
+    game_id, the display suppresses ONLY that game (board hands back to idle), never arms or
+    keeps a celebration for it, and a non-matching id leaves the board alone.  The module-level
+    file reader _read_dismissed_game_id is patched to stand in for the web-owned file."""
+
+    @staticmethod
+    def _dismiss(gid):
+        return mock.patch.object(sportscore, "_read_dismissed_game_id", lambda: gid)
+
+    def _live_board(self, h, slot, gid="G1"):
+        h.set_game(slot, _game("FUT", team_score=0))
+        h.tick()
+        g = _game("LIVE", team_score=0, opp_score=0, period_label="1st")
+        g["game_id"] = gid
+        h.set_game(slot, g)
+        h.tick()
+        self.assertTrue(h.scene._scoreboard_active)
+        self.assertIs(h.scene._active_slot, slot)
+
+    def test_dismissed_game_hands_board_to_idle(self):
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            self._live_board(h, slot, "G1")
+            with self._dismiss("G1"):
+                h.tick()
+            self.assertFalse(h.scene._scoreboard_active)
+            self.assertIsNone(h.scene._active_slot)
+            self.assertEqual(h.scene._dismissed_game_id, "G1")
+
+    def test_non_matching_dismiss_leaves_board(self):
+        # A stale marker for a different game_id must NOT hide the game that's actually on.
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            self._live_board(h, slot, "G1")
+            with self._dismiss("SOME-OTHER-GAME"):
+                h.tick()
+            self.assertTrue(h.scene._scoreboard_active)
+            self.assertIs(h.scene._active_slot, slot)
+
+    def test_win_not_celebrated_while_dismissed(self):
+        # Hiding a game before its FINAL tick must suppress the one-shot WIN celebration/horn.
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, _game("FUT", team_score=0)); h.tick()
+            g = _game("LIVE", team_score=3, opp_score=2, period_label="3rd"); g["game_id"] = "G1"
+            h.set_game(slot, g); h.tick()
+            self.assertTrue(slot["was_live"])
+            gf = _game("FINAL", team_score=3, opp_score=2, opp_abbr="EDM"); gf["game_id"] = "G1"
+            h.set_game(slot, gf)
+            with self._dismiss("G1"):
+                h.tick()
+                h.tick()
+            self.assertEqual([c for c in h.horn_calls if c[0] == "WIN"], [])
+            self.assertFalse(h.scene._scoreboard_active)
+
+    def test_dismiss_cancels_running_celebration(self):
+        # A WIN scroll already on screen is cut short the moment its game is hidden
+        # (rather than running out the full 3-minute celebration).
+        slot = _make_slot(team_name="VGK")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, _game("FUT", team_score=0)); h.tick()
+            g = _game("LIVE", team_score=3, opp_score=2, period_label="3rd"); g["game_id"] = "G1"
+            h.set_game(slot, g); h.tick()
+            gf = _game("FINAL", team_score=3, opp_score=2); gf["game_id"] = "G1"
+            h.set_game(slot, gf); h.tick()                       # WIN armed (not yet hidden)
+            self.assertGreater(h.scene._celebration_until, h.clock.t)
+            self.assertEqual(h.scene._celebration_game_id, "G1")
+            with self._dismiss("G1"):
+                h.tick()
+            self.assertEqual(h.scene._celebration_until, 0.0)    # celebration cancelled
+
+
 # ── 7. Restart INTO an already-final game must not reset the post-game window ─────
 _NOW = 1_700_000_000.0   # fixed, realistic epoch so start-time estimates land sensibly
 

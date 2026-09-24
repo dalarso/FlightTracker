@@ -735,5 +735,72 @@ class TestFlightEndpoint(unittest.TestCase):
                                           json={"callsign": "SWA123"}).status_code, 403)
 
 
+class ScoreboardDismiss(unittest.TestCase):
+    """/api/scoreboard/dismiss + /show write and clear the 'hide this game' marker, and
+    /api/scoreboard reports dismissed_game_id ONLY while the hidden game is still the active
+    one (auto-expiry).  The marker file is redirected to a temp path so /tmp is never touched;
+    the scoreboard cache is seeded fresh so the endpoint serves it without any upstream fetch."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._orig_flag = self.srv.DISMISS_FLAG
+        self.srv.DISMISS_FLAG = self._dir / "ft_dismissed_game"
+        self._orig_cache = dict(self.srv._scoreboard_cache)
+
+    def tearDown(self):
+        self.srv.DISMISS_FLAG = self._orig_flag
+        self.srv._scoreboard_cache.clear()
+        self.srv._scoreboard_cache.update(self._orig_cache)
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def _seed_cache(self, game):
+        # Fresh ts → api_scoreboard serves the cached value without hitting the network.
+        self.srv._scoreboard_cache.update({
+            "game": game, "team_name": "VGK", "sport_key": "NHL",
+            "enabled": True, "ts": self.srv.time.time(), "game_ended_at": None,
+        })
+
+    def test_dismiss_writes_marker_and_show_clears_it(self):
+        r = self.client.post("/api/scoreboard/dismiss", headers=_CSRF, json={"game_id": "G7"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(r.get_json()["dismissed_game_id"], "G7")
+        self.assertEqual(self.srv._read_dismiss_game_id(), "G7")
+
+        r2 = self.client.post("/api/scoreboard/show", headers=_CSRF)
+        self.assertTrue(r2.get_json()["ok"])
+        self.assertIsNone(self.srv._read_dismiss_game_id())
+        self.assertFalse(self.srv.DISMISS_FLAG.exists())
+
+    def test_dismiss_without_game_id_and_empty_cache_is_400(self):
+        self._seed_cache(None)   # nothing active to fall back to
+        r = self.client.post("/api/scoreboard/dismiss", headers=_CSRF)
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(r.get_json()["ok"])
+
+    def test_dismiss_falls_back_to_cached_active_game(self):
+        self._seed_cache({"game_id": "G9", "state": "LIVE", "team_score": 1, "opp_score": 0})
+        r = self.client.post("/api/scoreboard/dismiss", headers=_CSRF)   # no body → use cache
+        self.assertEqual(r.get_json()["dismissed_game_id"], "G9")
+
+    def test_scoreboard_reports_dismissed_then_autoexpires(self):
+        self._seed_cache({"game_id": "G7", "state": "LIVE", "team_score": 2, "opp_score": 1,
+                          "opp_abbr": "EDM", "period_label": "2nd"})
+        self.client.post("/api/scoreboard/dismiss", headers=_CSRF, json={"game_id": "G7"})
+        self.assertEqual(self.client.get("/api/scoreboard").get_json()["dismissed_game_id"], "G7")
+
+        # A different game becomes active → the stale marker auto-expires and is removed.
+        self._seed_cache({"game_id": "G9", "state": "LIVE", "team_score": 0, "opp_score": 0})
+        self.assertIsNone(self.client.get("/api/scoreboard").get_json()["dismissed_game_id"])
+        self.assertFalse(self.srv.DISMISS_FLAG.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

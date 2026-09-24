@@ -102,6 +102,11 @@ nav button.active { color: var(--accent); background: rgba(88,166,255,.1); }
 .unit-label { background: var(--bg); border: 1px solid var(--border); border-left: none; color: var(--muted); padding: 0 10px; border-radius: 0 6px 6px 0; font-size: 12px; display: flex; align-items: center; white-space: nowrap; }
 .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .toggle-wrap { display: flex; align-items: center; gap: 10px; margin-top: 3px; }
+.sb-live { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; margin-top: 3px; }
+.sb-live .btn { margin-left: auto; white-space: nowrap; }
+.sb-live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 5px rgba(63,185,80,.5); flex-shrink: 0; }
+.sb-live-dot.off { background: var(--border); box-shadow: none; }
+.sb-live-text { font-size: 13px; font-weight: 600; }
 .toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
 .toggle input { opacity: 0; width: 0; height: 0; }
 .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 20px; cursor: pointer; transition: .2s; }
