@@ -304,7 +304,8 @@ class WinCelebration(unittest.TestCase):
         self.assertEqual([c for c in h.horn_calls if c[0] == "WIN"], [])
 
     def test_win_fires_for_non_celebrate_sport(self):
-        # The WIN is NOT gated by the per-sport `celebrate` flag — NBA still gets a WIN.
+        # The on-panel WIN is NOT gated by the per-sport `celebrate` flag — NBA still gets a
+        # "LAL WINS!" scroll.  (It sends no LAN horn: the horn is NHL-only — see section 8.)
         slot = _make_slot(key="NBA", team_name="LAL", celebrate=False, celebration_text="")
         with _SceneHarness([slot]) as h:
             h.set_game(slot, _game("FUT", team_score=0))
@@ -313,9 +314,10 @@ class WinCelebration(unittest.TestCase):
             h.tick()
             h.set_game(slot, _game("FINAL", team_score=100, opp_score=98))
             h.tick()
-        win_calls = [c for c in h.horn_calls if c[0] == "WIN"]
-        self.assertEqual(len(win_calls), 1)
-        self.assertEqual(win_calls[0][1], "LAL")
+            self.assertEqual(h.scene._celebration_text, "LAL WINS!")
+            self.assertGreater(h.scene._celebration_until, h.clock.t)
+            self.assertTrue(slot["win_shown"])
+        self.assertEqual(h.horn_calls, [])
 
 
 # ── 3. Post-game window arming / expiry ──────────────────────────────────────────
@@ -745,6 +747,91 @@ class RestartIntoFinal(unittest.TestCase):
             gf["game_id"] = "G1"; gf["start_time_utc"] = _iso(_NOW - 3600)
             h.set_game(slot, gf); h.tick()
             self.assertEqual(slot["game_ended_at"], _NOW)
+
+
+# ── 8. The LAN goal horn is NHL-only ──────────────────────────────────────────────
+class HornIsNhlOnly(unittest.TestCase):
+    """The desktop listener is the NHL team's goal horn (the VGK app).  Other sports keep
+    their on-panel GOAL/SCORE/WINS scrolls, but must never send it a GOAL/WIN nudge or show
+    up in its STATE mirror — no hockey horn for a touchdown."""
+
+    def test_nfl_score_celebrates_on_panel_but_no_horn(self):
+        slot = _make_slot(key="NFL", team_name="LV", celebration_text="{team} SCORE!")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, _game("FUT", team_score=0)); h.tick()
+            h.set_game(slot, _game("LIVE", team_score=0, period_label="Q1")); h.tick()
+            h.set_game(slot, _game("LIVE", team_score=7, opp_abbr="KC", period_label="Q1")); h.tick()
+            self.assertEqual(h.scene._celebration_text, "LV SCORE!")    # panel still celebrates
+            self.assertGreater(h.scene._celebration_until, h.clock.t)
+        self.assertEqual(h.horn_calls, [])
+
+    def test_nfl_win_celebrates_on_panel_but_no_horn(self):
+        slot = _make_slot(key="NFL", team_name="LV", celebration_text="{team} SCORE!")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, _game("FUT", team_score=0)); h.tick()
+            h.set_game(slot, _game("LIVE", team_score=0, period_label="Q4")); h.tick()
+            h.set_game(slot, _game("FINAL", team_score=24, opp_score=17)); h.tick()
+            self.assertEqual(h.scene._celebration_text, "LV WINS!")
+            self.assertTrue(slot["win_shown"])
+        self.assertEqual(h.horn_calls, [])
+
+    def test_nfl_score_during_celebration_no_horn_but_baseline_advances(self):
+        # The mid-celebration pass must still advance a non-NHL slot's baseline (so the TD
+        # doesn't re-fire a second scroll afterwards) — it just doesn't nudge the horn.
+        slot = _make_slot(key="NFL", team_name="LV", celebration_text="{team} SCORE!")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, _game("FUT", team_score=0)); h.tick()
+            h.set_game(slot, _game("LIVE", team_score=7, period_label="Q1")); h.tick()
+            h.scene._goal_celebration_active = True                     # scroll in progress
+            h.set_game(slot, _game("LIVE", team_score=14, period_label="Q1")); h.tick()
+            self.assertEqual(slot["last_team_score"], 14)
+        self.assertEqual(h.horn_calls, [])
+
+    def test_nhl_goal_still_horns_alongside_other_sports(self):
+        nhl = _make_slot(key="NHL", team_name="VGK")
+        nfl = _make_slot(key="NFL", team_name="LV", celebration_text="{team} SCORE!")
+        with _SceneHarness([nhl, nfl]) as h:
+            for s in (nhl, nfl):
+                h.set_game(s, _game("FUT", team_score=0))
+            h.tick()
+            h.set_game(nhl, _game("LIVE", team_score=0, period_label="1st"))
+            h.set_game(nfl, _game("LIVE", team_score=0, period_label="Q1"))
+            h.tick()
+            h.set_game(nhl, _game("LIVE", team_score=1, opp_abbr="EDM", period_label="1st"))
+            h.tick()
+        self.assertEqual(h.horn_calls, [("GOAL", "VGK", 1, "EDM", 0)])
+
+    # ── STATE heartbeat: the real _send_state against a fake socket ──
+    def _send_state(self, slots, now=1_000_000.0):
+        sent = []
+
+        class _Sock:
+            def sendto(self, data, addr):
+                sent.append(data.decode("utf-8"))
+
+        with mock.patch.object(sportscore, "_horn_sock", _Sock()), \
+             mock.patch.object(sportscore, "_last_horn_ping", 0.0):
+            sportscore._send_state(slots, now)
+        return sent
+
+    def test_state_ignores_other_sports(self):
+        # Only an NFL game is live → the NHL app sees NONE (but still gets its heartbeat).
+        nhl = _make_slot(key="NHL", team_name="VGK")
+        nfl = _make_slot(key="NFL", team_name="LV")
+        nfl["game"] = _game("LIVE", team_score=7, opp_abbr="KC", period_label="Q2")
+        self.assertEqual(self._send_state([nfl, nhl]), ["STATE|NONE"])
+        self.assertEqual(self._send_state([nfl]), ["STATE|NONE"])   # no NHL slot at all
+
+    def test_state_reports_nhl_even_when_another_sport_has_priority(self):
+        # NFL is first in priority and live, but the horn app mirrors the NHL game.
+        nfl = _make_slot(key="NFL", team_name="LV")
+        nfl["game"] = _game("LIVE", team_score=7, opp_abbr="KC", period_label="Q2")
+        nhl = _make_slot(key="NHL", team_name="VGK")
+        nhl["game"] = _game("LIVE", team_score=2, opp_score=1, opp_abbr="EDM",
+                            period_label="2nd")
+        sent = self._send_state([nfl, nhl])
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0].startswith("STATE|LIVE|VGK|2|EDM|1|"))
 
 
 if __name__ == "__main__":

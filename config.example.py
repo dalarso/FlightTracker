@@ -140,7 +140,7 @@ SCOREBOARD_FIFA_TEAM_NAME = ""       # ≤4 chars shown on LED display (e.g. "US
 # Leave the *_HOST values empty to disable (each sender becomes a complete no-op).
 # Use the desktop machine's IP (not a hostname) so the Pi never blocks on a DNS lookup.
 #
-# Goal horn → remote-agents/goal-horn/  (fires on your team's goal / win)
+# Goal horn → remote-agents/goal-horn/  (fires on your NHL team's goal / win only)
 SCOREBOARD_GOAL_HORN_HOST      = ""     # e.g. "192.168.1.30"; "" = off
 SCOREBOARD_GOAL_HORN_PORT      = 50505
 SCOREBOARD_GOAL_HORN_PING_SECS = 5      # heartbeat cadence (seconds)

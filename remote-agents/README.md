@@ -10,7 +10,7 @@ Windows **MCI** audio API (via `ctypes`) for sound. No `pip install` anything.
 
 | App | Folder | Listens | Fires when… | Plays |
 |-----|--------|---------|-------------|-------|
-| **Goal Horn** | `goal-horn/` | UDP **50505** | the scoreboard shows a goal / win for your team | `vgk_goal_horn.mp3` (and optional `vgk_win_horn.mp3`) |
+| **Goal Horn** | `goal-horn/` | UDP **50505** | the scoreboard shows a goal / win for your **NHL** team (other sports never sound it) | `vgk_goal_horn.mp3` (and optional `vgk_win_horn.mp3`) |
 | **Plane Ding** | `plane-ding/` | UDP **50506** | a **new** aircraft is put on the matrix | `plane_ding.mp3` |
 
 Both also show a live status (Connected / Pi offline), mirror the current game / plane, keep

@@ -97,6 +97,10 @@ WIN_CELEBRATION_SECONDS  = int(_cfg("SCOREBOARD_WIN_CELEBRATION_SECONDS",  180))
 GOAL_HORN_HOST = str(_cfg("SCOREBOARD_GOAL_HORN_HOST", "")).strip()
 GOAL_HORN_PORT = int(_cfg("SCOREBOARD_GOAL_HORN_PORT", 50505))
 GOAL_HORN_PING_SECS = int(_cfg("SCOREBOARD_GOAL_HORN_PING_SECS", 5))  # heartbeat → app shows "connected"
+# The listener is the NHL team's goal horn (remote-agents/goal-horn — the VGK app), so ONLY
+# the NHL slot drives it: GOAL/WIN nudges and the STATE mirror alike.  Every other sport
+# still celebrates on the panel; it just never sounds a hockey horn on the desktop.
+GOAL_HORN_LEAGUE = "NHL"
 
 _horn_sock = None
 if GOAL_HORN_HOST:
@@ -130,6 +134,14 @@ def _send_horn(kind: str, team: str, tscore, opp, oscore) -> None:
         pass
 
 
+def _nudge_horn(kind: str, slot, game, tscore) -> None:
+    """Send a GOAL/WIN horn nudge for `slot`'s game — but only when it is the
+    GOAL_HORN_LEAGUE (NHL) slot.  Other sports' goals/wins stay on the panel only."""
+    if slot.get("key") != GOAL_HORN_LEAGUE:
+        return
+    _send_horn(kind, slot["team_name"], tscore, game.get("opp_abbr", ""), game.get("opp_score", 0))
+
+
 _last_horn_ping = 0.0
 
 
@@ -138,13 +150,16 @@ def _send_state(slots, now_ts: float) -> None:
     LAN listener can mirror it (score / opponent / horn-log) and reset in lock-step with the
     board's own 30-min post-game window — no separate timer to drift.  Sent from the TOP of
     the keyframe so the heartbeat never stalls during a goal celebration.  Fire-and-forget;
-    an offline listener never affects the Pi.  The 'reportable' game mirrors active_slot:
-    a LIVE/CRIT game, else a FINAL game still inside POST_GAME_SECONDS; otherwise NONE.
+    an offline listener never affects the Pi.  Only the GOAL_HORN_LEAGUE (NHL) slot is
+    reportable — the listener is the NHL horn, so another sport's game never shows there:
+    its LIVE/CRIT game, else its FINAL game still inside POST_GAME_SECONDS; otherwise NONE
+    (still sent, so the heartbeat keeps the app "connected").
     Wire format: 'STATE|state|team|tscore|opp|oscore|period|gameid'  or  'STATE|NONE'."""
     global _last_horn_ping
     if _horn_sock is None or now_ts - _last_horn_ping < GOAL_HORN_PING_SECS:
         return
     _last_horn_ping = now_ts
+    slots = [s for s in slots if s.get("key") == GOAL_HORN_LEAGUE]
     rep = None
     for slot in slots:
         g = slot.get("game")
@@ -735,8 +750,7 @@ class SportScoreScene(object):
                     if (horn_slot["celebrate"]
                             and horn_slot["last_team_score"] is not None
                             and new_score > horn_slot["last_team_score"]):
-                        _send_horn("GOAL", horn_slot["team_name"], new_score,
-                                   g.get("opp_abbr", ""), g.get("opp_score", 0))
+                        _nudge_horn("GOAL", horn_slot, g, new_score)
                     # Advance the baseline so the post-celebration tick doesn't re-fire a
                     # single coalesced scroll for goals already nudged here.
                     if horn_slot["last_team_score"] is not None:
@@ -810,8 +824,7 @@ class SportScoreScene(object):
                     self._celebration_scroll_x = screen.WIDTH
                     self._celebration_game_id  = game.get("game_id")
                     slot["win_shown"]          = True
-                    _send_horn("WIN", slot["team_name"], game.get("team_score", 0),
-                               game.get("opp_abbr", ""), game.get("opp_score", 0))   # nudge the LAN listener (win sound)
+                    _nudge_horn("WIN", slot, game, game.get("team_score", 0))   # LAN win sound (NHL only)
 
         # ── Find highest-priority displayable game ─────────────────────────────
         # Shared selection contract with the web side (utilities.scoreboard_select):
@@ -871,8 +884,7 @@ class SportScoreScene(object):
             )
             self._celebration_scroll_x = screen.WIDTH
             self._celebration_game_id  = game.get("game_id")
-            _send_horn("GOAL", active_slot["team_name"], new_score,
-                       game.get("opp_abbr", ""), game.get("opp_score", 0))   # nudge the LAN horn, in sync
+            _nudge_horn("GOAL", active_slot, game, new_score)   # LAN horn, in sync (NHL only)
         active_slot["last_team_score"] = new_score
 
         # Yield to upcoming celebration

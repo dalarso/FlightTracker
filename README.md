@@ -148,7 +148,7 @@ When no aircraft is overhead, the panel can show a **live sports scoreboard** in
 
 - **Free data sources, no keys** — NHL (`api-web.nhle.com`), MLB (`statsapi.mlb.com`), and NFL / NBA / WNBA / MLS / **FIFA World Cup** (ESPN's public API — e.g. `basketball/wnba`, `soccer/fifa.world`; follow any team or nation).
 - **Priority** — if several configured teams are live at once, `SCOREBOARD_PRIORITY` decides which is shown; a LIVE game always beats a finished one. The LED scene and the web `/api/scoreboard` endpoint pick the game through one shared selector, so they can't disagree.
-- **Celebrations** — a full-screen scroll on a goal/score, and a one-shot "{TEAM} WINS!" at the final. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board.
+- **Celebrations** — a full-screen scroll on a goal/score, and a one-shot "{TEAM} WINS!" at the final. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board — for your NHL team only (other sports celebrate on the panel but never sound the horn).
 - **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume.
 
 Enable with `SCOREBOARD_ENABLED = True` and set each sport's team ID/name — see the config block below.

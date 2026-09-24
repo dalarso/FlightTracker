@@ -2,11 +2,12 @@
 """
 VGK Goal Horn — LAN game mirror + horn for the FlightTracker scoreboard.
 
-Open this window on the Windows machine.  It mirrors whatever the LED board is showing
-and sounds the horn in sync, driven entirely by UDP packets from the Raspberry Pi:
-  • "STATE|…"   — heartbeat every ~5 s carrying the board's current game (score, opponent,
-    period) or "STATE|NONE".  Drives the connection status AND the on-screen game data,
-    and resets the window in lock-step with the board's 30-min post-game window.
+Open this window on the Windows machine.  It mirrors your NHL team's game on the LED board
+and sounds the horn in sync, driven entirely by UDP packets from the Raspberry Pi.  The Pi
+sends ONLY the NHL team's game here — other sports never reach this app:
+  • "STATE|…"   — heartbeat every ~5 s carrying the NHL game (score, opponent, period) or
+    "STATE|NONE".  Drives the connection status AND the on-screen game data, and resets
+    the window in lock-step with the board's 30-min post-game window.
   • "GOAL|team|ts|opp|os"  — fired the instant the board shows "VGK GOAL!"; logs it +
     plays the goal horn.
   • "WIN|team|ts|opp|os"   — fired on "VGK WINS!"; logs it + plays the win sound.
