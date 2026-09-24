@@ -574,5 +574,104 @@ class ResetRepaint(unittest.TestCase):
             h.scene._draw_score.assert_not_called()
 
 
+# ── 7. Restart INTO an already-final game must not reset the post-game window ─────
+_NOW = 1_700_000_000.0   # fixed, realistic epoch so start-time estimates land sensibly
+
+
+def _iso(ts):
+    return sportscore.datetime.datetime.fromtimestamp(
+        ts, sportscore.datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class EstimateEndedAt(unittest.TestCase):
+    """_estimate_ended_at: start + that league's typical game length, clamped to now.  Keyed by
+    LEAGUE, not period — a completed WNBA game is period 4, so the old period>3→4h buffer gave a
+    ~2 h game a 4 h window and re-showed it; a 2.5 h WNBA length lands the estimate near the end."""
+
+    def test_league_lengths_applied(self):
+        g = {"start_time_utc": _iso(_NOW - 10 * 3600)}
+        self.assertAlmostEqual(sportscore._estimate_ended_at(g, _NOW, "WNBA"),
+                               _NOW - 10 * 3600 + sportscore._GAME_SECONDS["WNBA"], delta=1)
+        self.assertAlmostEqual(sportscore._estimate_ended_at(g, _NOW, "MLB"),
+                               _NOW - 10 * 3600 + sportscore._GAME_SECONDS["MLB"], delta=1)
+        # WNBA (2.5 h) clears sooner than MLB (3.5 h) for the same start time.
+        self.assertLess(sportscore._estimate_ended_at(g, _NOW, "WNBA"),
+                        sportscore._estimate_ended_at(g, _NOW, "MLB"))
+
+    def test_unknown_league_uses_default(self):
+        g = {"start_time_utc": _iso(_NOW - 10 * 3600)}
+        self.assertAlmostEqual(sportscore._estimate_ended_at(g, _NOW, "XYZ"),
+                               _NOW - 10 * 3600 + sportscore._DEFAULT_GAME_SECONDS, delta=1)
+
+    def test_recent_start_clamps_to_now(self):
+        g = {"start_time_utc": _iso(_NOW - 600)}   # 10 min ago — well under any league length
+        self.assertEqual(sportscore._estimate_ended_at(g, _NOW, "WNBA"), _NOW)
+
+    def test_missing_or_bad_start_falls_back_to_now(self):
+        self.assertEqual(sportscore._estimate_ended_at({"start_time_utc": ""}, _NOW, "NHL"), _NOW)
+        self.assertEqual(sportscore._estimate_ended_at({"start_time_utc": "not-a-date"}, _NOW, "NHL"), _NOW)
+        self.assertEqual(sportscore._estimate_ended_at(None, _NOW, "NHL"), _NOW)
+
+
+class RestartIntoFinal(unittest.TestCase):
+    """The reported bug: after the display service restarts (deploy / reboot), a game that ended
+    hours ago reappeared for a fresh 30-min post-game window because game_ended_at was stamped
+    `now`.  Now a game we didn't witness go live (was_live False) is stamped from its start-time
+    estimate, so an old final is already out-of-window on tick 1 and the board stays idle."""
+
+    def _final(self, started_secs_ago, period=9, team=3, opp=2):
+        g = _game("FINAL", team_score=team, opp_score=opp, opp_abbr="DET", period=period)
+        g["game_id"] = "G-OLD"
+        g["start_time_utc"] = _iso(_NOW - started_secs_ago)
+        return g
+
+    def test_restart_into_old_final_stays_idle(self):
+        # Started 8 h ago → estimated end ~4 h ago → far outside the 30-min window on tick 1.
+        slot = _make_slot(team_name="ATH")
+        with _SceneHarness([slot], t0=_NOW) as h:
+            h.set_game(slot, self._final(started_secs_ago=8 * 3600))
+            h.tick()
+            self.assertFalse(h.scene._scoreboard_active)
+            self.assertIsNone(h.scene._active_slot)
+            self.assertLess(slot["game_ended_at"], _NOW - sportscore.POST_GAME_SECONDS)
+
+    def test_restart_into_recent_final_still_shows(self):
+        # Started ~3 h ago (a game that just ended) → estimate clamps to now → inside the window.
+        slot = _make_slot(team_name="ATH")
+        with _SceneHarness([slot], t0=_NOW) as h:
+            h.set_game(slot, self._final(started_secs_ago=3 * 3600))
+            h.tick()
+            self.assertTrue(h.scene._scoreboard_active)
+            self.assertIs(h.scene._active_slot, slot)
+
+    def test_restart_into_old_wnba_final_stays_idle(self):
+        # Reproduces the reported Aces bug: a WNBA game started ~3.8 h ago really ended ~1.5 h ago.
+        # The old period>3 → 4 h buffer estimated its end at ~now and re-showed it; the 2.5 h WNBA
+        # length estimates ~1.3 h ago → outside the 30-min window → board stays idle.
+        slot = _make_slot(key="WNBA", team_name="LVA")
+        with _SceneHarness([slot], t0=_NOW) as h:
+            g = _game("FINAL", team_score=90, opp_score=85, opp_abbr="NYL", period=4)
+            g["game_id"] = "W1"
+            g["start_time_utc"] = _iso(_NOW - int(3.8 * 3600))
+            h.set_game(slot, g)
+            h.tick()
+            self.assertFalse(h.scene._scoreboard_active)
+            self.assertIsNone(h.scene._active_slot)
+            self.assertLess(slot["game_ended_at"], _NOW - sportscore.POST_GAME_SECONDS)
+
+    def test_witnessed_final_uses_accurate_now(self):
+        # Watched LIVE → FINAL this session: game_ended_at is the accurate `now`, not an estimate.
+        slot = _make_slot(team_name="ATH")
+        with _SceneHarness([slot], t0=_NOW) as h:
+            gl = _game("LIVE", team_score=1, opp_score=0, period=5)
+            gl["game_id"] = "G1"; gl["start_time_utc"] = _iso(_NOW - 3600)
+            h.set_game(slot, gl); h.tick()
+            self.assertTrue(slot["was_live"])
+            gf = _game("FINAL", team_score=1, opp_score=0, period=9)
+            gf["game_id"] = "G1"; gf["start_time_utc"] = _iso(_NOW - 3600)
+            h.set_game(slot, gf); h.tick()
+            self.assertEqual(slot["game_ended_at"], _NOW)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

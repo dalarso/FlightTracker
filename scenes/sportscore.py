@@ -450,6 +450,39 @@ def _build_slots() -> list[dict]:
     return ordered
 
 
+# Typical wall-clock length (scheduled start → final buzzer) per league, with ~30 min of
+# headroom baked in for OT / stoppages so we err slightly LATE (never hide a score before its
+# real post-game window ends).  Keyed by league because "period" means different things per
+# sport: a completed BASKETBALL game ends at period 4, a BASEBALL game at inning 9 — so the old
+# "period > 3 → 4 h" heuristic gave a ~2 h WNBA game a 4 h buffer and re-showed it for hours.
+_GAME_SECONDS = {
+    "NHL":  int(3.0 * 3600),
+    "MLB":  int(3.5 * 3600),
+    "NFL":  int(3.5 * 3600),
+    "NBA":  int(2.75 * 3600),
+    "WNBA": int(2.5 * 3600),
+    "MLS":  int(2.5 * 3600),
+    "FIFA": int(2.75 * 3600),
+}
+_DEFAULT_GAME_SECONDS = int(3.5 * 3600)   # err long for an unknown league
+
+
+def _estimate_ended_at(game, now_ts, league=None):
+    """Best-effort end time for a FINAL/OFF game we did NOT witness go live — i.e. a service
+    restart INTO an already-finished game.  Estimated as the scheduled start plus that league's
+    typical game length (_GAME_SECONDS), clamped to now so it is never in the future.
+
+    Without this the display stamped `now` on every restart, giving a game that ended hours ago a
+    fresh POST_GAME_SECONDS window (so a redeploy / reboot resurrected the last final for 30 min).
+    Falls back to now_ts when the start time is missing/unparseable (the original behaviour)."""
+    try:
+        start = (game or {}).get("start_time_utc", "")
+        start_ts = datetime.datetime.fromisoformat(start.replace("Z", "+00:00")).timestamp()
+        return min(start_ts + _GAME_SECONDS.get(league, _DEFAULT_GAME_SECONDS), now_ts)
+    except Exception:
+        return now_ts
+
+
 # ── Scene ─────────────────────────────────────────────────────────────────────
 
 class SportScoreScene(object):
@@ -511,6 +544,12 @@ class SportScoreScene(object):
         """Clear per-slot draw keys so sports_score repaints on next tick."""
         for slot in self._sport_slots:
             slot["last_draw"] = None
+
+    def _ended_at_for(self, slot, now_ts):
+        """When to record a FINAL/OFF game as having ended.  The accurate `now` if we actually
+        watched it finish this session (was_live); otherwise a start-time estimate, so a restart
+        INTO an old final doesn't hand it a fresh post-game window (see _estimate_ended_at)."""
+        return now_ts if slot["was_live"] else _estimate_ended_at(slot.get("game"), now_ts, slot["key"])
 
     # ── Reset-time repaint (fires inside reset_scene) ───────────────────────────
 
@@ -611,13 +650,13 @@ class SportScoreScene(object):
         # Stamp the post-game window start BEFORE _send_state reads it, so a FINAL that
         # actually ended hours ago (e.g. process restarted long after the buzzer) is
         # recognised as already-expired on the very first tick rather than mis-reported as
-        # a fresh FINAL to the LAN listener.  The full bookkeeping loop below re-stamps the
-        # same way; doing the minimal stamp here just makes _send_state agree with the
-        # display's own post-game-window guard on tick 1.
+        # a fresh FINAL to the LAN listener.  _ended_at_for estimates the real end from the
+        # start time for a game we didn't watch finish, so the restart doesn't reset the
+        # window.  The full bookkeeping loop below re-stamps the same way.
         for slot in self._sport_slots:
             g = slot.get("game")
             if g and g.get("state") in ("FINAL", "OFF") and slot["game_ended_at"] is None:
-                slot["game_ended_at"] = now_ts
+                slot["game_ended_at"] = self._ended_at_for(slot, now_ts)
 
         _send_state(self._sport_slots, now_ts)   # heartbeat + game state → mirrors to the LAN listener
 
@@ -649,7 +688,7 @@ class SportScoreScene(object):
                     # Stamp the post-game window start as soon as a slot shows FINAL.
                     g = slot.get("game")
                     if g and g.get("state") in ("FINAL", "OFF") and slot["game_ended_at"] is None:
-                        slot["game_ended_at"] = now_ts
+                        slot["game_ended_at"] = self._ended_at_for(slot, now_ts)
                 if horn_slot is not None:
                     g = horn_slot["game"]
                     new_score = g.get("team_score", 0)
@@ -715,7 +754,7 @@ class SportScoreScene(object):
                 slot["game_ended_at"] = None
             elif state in ("FINAL", "OFF"):
                 if slot["game_ended_at"] is None:
-                    slot["game_ended_at"] = now_ts
+                    slot["game_ended_at"] = self._ended_at_for(slot, now_ts)
                 # One-shot "{team} WINS!" — fires for EVERY sport.  A win happens once per
                 # game, so (unlike goal celebrations) it is NOT gated by the per-sport
                 # `celebrate` flag — NBA, which mutes its frequent goal celebrations, still
