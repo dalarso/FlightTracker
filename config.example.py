@@ -157,7 +157,10 @@ PLANE_DING_PING_SECS = 5
 RECEIVER_HOST = "localhost"
 
 # Receiver software type.
-#   "dump1090" (default) — polls fr24feed (:8754) first, dump1090 (:8080) as fallback.
+#   "dump1090" (default) — polls fr24feed (:8754) first, dump1090 as fallback.  The
+#                          fallback probes the usual aircraft.json paths (:8080/data/,
+#                          /dump1090/data/, /tar1090/data/, /skyaware/data/); set
+#                          DUMP1090_URL = "http://host/path/aircraft.json" to pin one.
 #   "vrs"                — polls Virtual Radar Server AircraftList.json API (:8080).
 #                          VRS can ingest from dump1090, fr24feed, ADSB.im, and more.
 #                          See: https://www.virtualradarserver.co.uk

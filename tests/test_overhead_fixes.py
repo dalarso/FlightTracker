@@ -307,5 +307,181 @@ class OverheadHandoff(unittest.TestCase):
         self.assertFalse(o.processing, "_processing must not wedge True on thread-start failure")
 
 
+class DepartureSignal(unittest.TestCase):
+    """Evidence for the inbound-leg veto: a clear climb, or OpenSky's local departure
+    airport unless the plane is clearly descending."""
+
+    def setUp(self):
+        self._p = mock.patch.object(overhead, "_LOCAL_AIRPORTS", frozenset({"LAS", "VGT", "HSH"}))
+        self._p.start()
+        self.addCleanup(self._p.stop)
+
+    def test_climb_is_evidence(self):
+        self.assertIn("climbing", overhead._departure_signal(1500))
+
+    def test_opensky_local_origin_is_evidence(self):
+        self.assertIn("LAS", overhead._departure_signal(0, "LAS"))
+
+    def test_descent_overrides_opensky(self):
+        self.assertEqual(overhead._departure_signal(-1000, "LAS"), "")
+
+    def test_no_evidence(self):
+        self.assertEqual(overhead._departure_signal(0, ""), "")
+        self.assertEqual(overhead._departure_signal(150, "SFO"), "")    # level-ish, non-local
+        self.assertEqual(overhead._departure_signal(None, ""), "")
+        self.assertEqual(overhead._departure_signal("bogus", ""), "")
+
+    def test_climb_far_from_home_is_not_evidence(self):
+        home = overhead.LOCATION_DEFAULT
+        self.assertIn("climbing", overhead._departure_signal(2000, "", home[0] + 0.1, home[1]))
+        self.assertEqual(overhead._departure_signal(2000, "", home[0] + 5, home[1]), "")
+        # ...but OpenSky's local departure airport still counts anywhere
+        self.assertIn("LAS", overhead._departure_signal(2000, "LAS", home[0] + 5, home[1]))
+
+    def test_global_mode_never_signals(self):
+        with mock.patch.object(overhead, "_LOCAL_AIRPORTS", frozenset()):
+            self.assertEqual(overhead._departure_signal(3000, "LAS"), "")
+
+    def test_inbound_shape(self):
+        self.assertTrue(overhead._is_inbound_to_local("ORD", "LAS"))
+        self.assertTrue(overhead._is_inbound_to_local("", "LAS"))       # ?->LAS
+        self.assertFalse(overhead._is_inbound_to_local("VGT", "LAS"))   # local -> local
+        self.assertFalse(overhead._is_inbound_to_local("LAS", "ORD"))
+        self.assertFalse(overhead._is_inbound_to_local("ORD", "DEN"))
+        self.assertFalse(overhead._is_inbound_to_local("LAS", ""))
+
+
+class IcaoToIata(unittest.TestCase):
+    """KHND is Henderson Executive (IATA HSH) — stripping the K made it Tokyo's HND."""
+
+    def test_exceptions(self):
+        self.assertEqual(overhead.icao_to_iata("KHND"), "HSH")
+        self.assertEqual(overhead.icao_to_iata("KBVU"), "BLD")
+
+    def test_regular_strip_unchanged(self):
+        self.assertEqual(overhead.icao_to_iata("KLAS"), "LAS")
+        self.assertEqual(overhead.icao_to_iata("KVGT"), "VGT")
+        self.assertEqual(overhead.icao_to_iata("CYYZ"), "YYZ")
+        self.assertEqual(overhead.icao_to_iata("EGLL"), "EGLL")
+        self.assertEqual(overhead.icao_to_iata(""), "")
+
+
+class AeroapiPickFlight(unittest.TestCase):
+    """The AeroAPI picker takes the leg in the air, never a later leg / another day's."""
+
+    NOW = 1_800_000_000
+
+    def _iso(self, offset):
+        import time as _t
+        return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(self.NOW + offset))
+
+    def _f(self, name, **kw):
+        return {"ident": name, **kw}
+
+    def test_airborne_beats_later_scheduled_leg(self):
+        flights = [
+            self._f("tomorrow", scheduled_out=self._iso(86400)),
+            self._f("next-leg", scheduled_out=self._iso(4 * 3600)),
+            self._f("airborne", actual_off=self._iso(-900), scheduled_out=self._iso(-1500)),
+            self._f("landed", actual_off=self._iso(-6 * 3600), actual_on=self._iso(-3 * 3600)),
+        ]
+        self.assertEqual(overhead._aeroapi_pick_flight(flights, now=self.NOW)["ident"], "airborne")
+
+    def test_cancelled_airborne_is_ignored(self):
+        flights = [self._f("x", actual_off=self._iso(-600), cancelled=True)]
+        self.assertIsNone(overhead._aeroapi_pick_flight(flights, now=self.NOW))
+
+    def test_no_takeoff_event_uses_nearest_departure_in_window(self):
+        flights = [
+            self._f("far", scheduled_out=self._iso(5 * 3600)),
+            self._f("near", estimated_out=self._iso(-20 * 60)),
+        ]
+        self.assertEqual(overhead._aeroapi_pick_flight(flights, now=self.NOW)["ident"], "near")
+
+    def test_nothing_near_now_returns_none(self):
+        flights = [
+            self._f("tomorrow", scheduled_out=self._iso(86400)),
+            self._f("landed", actual_off=self._iso(-7200), actual_on=self._iso(-600)),
+        ]
+        self.assertIsNone(overhead._aeroapi_pick_flight(flights, now=self.NOW))
+
+    def test_empty(self):
+        self.assertIsNone(overhead._aeroapi_pick_flight([], now=self.NOW))
+        self.assertIsNone(overhead._aeroapi_pick_flight(None, now=self.NOW))
+
+
+class Dump1090Fallback(unittest.TestCase):
+    """The fallback feed probes the common aircraft.json paths and parses both field sets."""
+
+    def test_old_mutability_field_names(self):
+        f = overhead.Flight.from_dump1090({"hex": "a1b2c3", "lat": 36.1, "lon": -115.2,
+                                           "altitude": 7200, "vert_rate": 1984, "flight": "SWA1 "})
+        self.assertEqual((f.altitude, f.vertical_speed, f.callsign), (7200, 1984, "SWA1"))
+
+    def test_readsb_field_names_and_ground(self):
+        f = overhead.Flight.from_dump1090({"hex": "a1b2c3", "lat": 36.1, "lon": -115.2,
+                                           "alt_baro": 9000, "baro_rate": -640})
+        self.assertEqual((f.altitude, f.vertical_speed), (9000, -640))
+        g = overhead.Flight.from_dump1090({"hex": "a1b2c3", "lat": 36.1, "lon": -115.2,
+                                           "alt_baro": "ground"})
+        self.assertEqual(g.altitude, 0)
+
+    def test_probes_paths_and_remembers_the_working_one(self):
+        good = f"http://{overhead.RECEIVER_HOST}/dump1090/data/aircraft.json"
+        seen = []
+
+        def fake_get(url, timeout=None, **kw):
+            seen.append(url)
+            if url == good:
+                r = mock.MagicMock(status_code=200)
+                r.json.return_value = {"aircraft": [{"hex": "a1b2c3", "lat": 36.1, "lon": -115.2,
+                                                     "altitude": 5000, "vert_rate": 900}]}
+                return r
+            raise ConnectionError("refused")
+
+        with mock.patch.object(overhead, "RECEIVER_TYPE", "dump1090"), \
+             mock.patch.object(overhead, "_dump1090_good_url", [""]), \
+             mock.patch.object(overhead.requests, "get", side_effect=fake_get):
+            flights = overhead.fetch_flights()
+            self.assertEqual([f.hex_code for f in flights], ["a1b2c3"])
+            self.assertEqual(overhead._dump1090_good_url[0], good)
+            seen.clear()
+            overhead.fetch_flights()
+            # fr24feed first, then straight to the remembered dump1090 URL
+            self.assertEqual(seen, [overhead.FR24FEED_URL, good])
+
+
+class AdsbdbRegistration(unittest.TestCase):
+    """Tails come from adsbdb now (OpenSky /metadata/aircraft answers 410 Gone)."""
+
+    def setUp(self):
+        overhead._reg_miss_until.clear()
+        self.addCleanup(overhead._reg_miss_until.clear)
+
+    def _run(self, resp):
+        store = {}
+        with mock.patch.object(overhead, "_in_backoff", return_value=False), \
+             mock.patch.object(overhead, "_cache_db_get_reg", side_effect=lambda h: store.get(h, "")), \
+             mock.patch.object(overhead, "_cache_db_set_reg", side_effect=store.__setitem__), \
+             mock.patch.object(overhead._session, "get", return_value=resp) as g:
+            overhead._try_adsbdb_reg("a1b2c3")
+            overhead._try_adsbdb_reg("a1b2c3")
+        return store, g.call_count
+
+    def test_found_registration_is_cached(self):
+        r = mock.MagicMock(status_code=200)
+        r.json.return_value = {"response": {"aircraft": {"registration": "n904sy"}}}
+        store, calls = self._run(r)
+        self.assertEqual(store, {"a1b2c3": "N904SY"})
+        self.assertEqual(calls, 1)        # second call is a cache hit
+
+    def test_unknown_aircraft_is_not_requeried_every_poll(self):
+        r = mock.MagicMock(status_code=404)
+        r.json.return_value = {"response": "unknown aircraft"}
+        store, calls = self._run(r)
+        self.assertEqual(store, {})
+        self.assertEqual(calls, 1)        # miss remembered for REG_MISS_RETRY_SECS
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

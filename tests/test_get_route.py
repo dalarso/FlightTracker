@@ -95,8 +95,16 @@ def _resp_aeroapi(v):
     return FakeResp(200, {"flights": [{
         "origin": {"code_iata": r["origin"], "latitude": r.get("olat"), "longitude": r.get("olon")},
         "destination": {"code_iata": r["dest"], "latitude": r.get("dlat"), "longitude": r.get("dlon")},
-        "actual_on": None, "scheduled_out": "2026-06-01T00:00:00Z",
+        # The plane is overhead, so the fake is the leg in the air right now (took off
+        # 20 min ago, not landed) — what _aeroapi_pick_flight selects.
+        "actual_on": None, "actual_off": _iso_ago(20 * 60),
+        "scheduled_out": _iso_ago(35 * 60),
     }]})
+
+
+def _iso_ago(secs):
+    """UTC ISO-8601 timestamp `secs` seconds ago, in AeroAPI's format."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - secs))
 
 
 def _resp_opensky(v):
@@ -140,6 +148,9 @@ def _fr24_api_for(v):
 def run_scenario(scn):
     """Install mocks for one scenario and return (origin, dest, source)."""
     calls = {"adsbdb": 0, "opensky": 0, "airlabs1": 0, "airlabs2": 0, "aeroapi": 0, "fr24": 0}
+    # Scenarios share the default hex; forget any "adsbdb knows no tail" memo from a
+    # previous scenario so each one starts clean.
+    overhead._reg_miss_until.clear()
 
     def fake_get(url, params=None, headers=None, timeout=None, **kw):
         params = params or {}
@@ -158,9 +169,10 @@ def run_scenario(scn):
         if "aeroapi.flightaware.com" in url:
             calls["aeroapi"] += 1
             return _resp_aeroapi(scn.get("aeroapi"))
-        if "metadata/aircraft/icao" in url:                       # OpenSky reg-metadata
-            _meta = scn.get("opensky_meta_reg")
-            return FakeResp(200, {"registration": _meta}) if _meta else FakeResp(404, {})
+        if "adsbdb.com/v0/aircraft" in url:                       # adsbdb hex -> tail
+            _meta = scn.get("adsbdb_reg")
+            return (FakeResp(200, {"response": {"aircraft": {"registration": _meta}}}) if _meta
+                    else FakeResp(404, {"response": "unknown aircraft"}))
         return FakeResp(404, {})
 
     def fake_cache_get_route(key, ctype):
@@ -176,7 +188,7 @@ def run_scenario(scn):
 
         fr24_api.get_flights = _counting_get_flights
 
-    # Stateful hex->reg cache so _try_opensky_reg's set→get roundtrip works in tests.
+    # Stateful hex->reg cache so _try_adsbdb_reg's set→get roundtrip works in tests.
     _reg_store = {}
     if scn.get("hex_reg"):
         _reg_store[scn.get("hex", "abc123")] = scn["hex_reg"]
@@ -219,7 +231,7 @@ def run_scenario(scn):
         o, d, src, _plane, _disp = overhead.get_route(
             scn.get("hex", "abc123"),
             scn["callsign"],
-            0,                       # vertical_speed
+            scn.get("vs", 0),        # vertical_speed (ft/min)
             plane[0], plane[1],
             scn.get("vrs_origin", ""), scn.get("vrs_dest", ""),
             scn.get("reg", ""),
@@ -721,8 +733,8 @@ SCENARIOS = [
         "expect_calls": {"airlabs1": 1, "aeroapi": 1, "fr24": 1},
     },
     {
-        "name": "fr24-after-paid: no feed-tail -> OpenSky-meta resolves it, FR24 §5 polled (poll 1)",
-        "callsign": "AAL903", "opensky_meta_reg": "N903AA",   # proactively resolved tail
+        "name": "fr24-after-paid: no feed-tail -> adsbdb resolves it, FR24 §5 polled (poll 1)",
+        "callsign": "AAL903", "adsbdb_reg": "N903AA",   # proactively resolved tail
         "airlabs1": None, "aeroapi": None,
         "fr24": [{"origin": "LAS", "dest": "SEA"}],
         "expect": ("LAS", "SEA", "fr24"),
@@ -739,7 +751,7 @@ SCENARIOS = [
     },
     {
         "name": "fr24-after-paid: NO tail anywhere -> FR24 NOT callable (library is registration-only)",
-        "callsign": "AAL905",                            # no reg, no hex_reg, no opensky_meta_reg
+        "callsign": "AAL905",                            # no reg, no hex_reg, no adsbdb_reg
         "airlabs1": None, "aeroapi": None,
         "fr24": [{"origin": "LAS", "dest": "JFK"}],        # FR24 HAS data — but we can't query it
         "expect": ("", "", "none"),
@@ -761,8 +773,8 @@ SCENARIOS = [
         "expect_calls": {"fr24": 1, "airlabs1": 0, "aeroapi": 0},   # §1 short-circuits paid
     },
     {
-        "name": "fr24-ga: charter, no feed-tail -> OpenSky-meta resolves it, FR24 §1 polled (poll 1)",
-        "callsign": "EJM327", "opensky_meta_reg": "N327K",
+        "name": "fr24-ga: charter, no feed-tail -> adsbdb resolves it, FR24 §1 polled (poll 1)",
+        "callsign": "EJM327", "adsbdb_reg": "N327K",
         "fr24": [{"origin": "LAS", "dest": "SDL"}],
         "expect": ("LAS", "SDL", "fr24"),
         "expect_calls": {"fr24": 1},
@@ -851,6 +863,139 @@ SCENARIOS = [
         # (e.g. ROUTE_MISS_TTL) would defeat the resolved cache's purpose yet otherwise
         # pass silently — the other key types pin their TTL, this one now does too.
         "expect_cache_ttl": {"AAL7700": overhead.ROUTE_TTL_SCHEDULED},
+    },
+    # ── Departure veto: AirLabs answering with the INBOUND leg (X->LAS) of a flight number
+    #    that is climbing out of LAS (live 2026-10: AAL1564 "ORD->LAS", MXY653 "ACV->LAS").
+    {
+        "name": "veto: OpenSky says LAS departure -> AirLabs inbound leg dropped, AeroAPI airborne leg wins",
+        "callsign": "AAL1564", "opensky": {"origin": "LAS", "dest": ""},
+        "airlabs1": {"origin": "ORD", "dest": "LAS"}, "aeroapi": {"origin": "LAS", "dest": "ORD"},
+        "expect": ("LAS", "ORD", "aeroapi"),
+        "expect_calls": {"aeroapi": 1, "airlabs2": 0},   # AeroAPI asked; key 2 (same data) not
+    },
+    {
+        "name": "veto: inbound leg dropped, AeroAPI empty -> free LAS-origin route serves",
+        "callsign": "MXY653", "opensky": {"origin": "LAS", "dest": ""},
+        "adsbdb": {"origin": "LAS", "dest": "PVU"},
+        "airlabs1": {"origin": "ACV", "dest": "LAS"}, "aeroapi": None,
+        "expect": ("LAS", "PVU", "adsbdb"),
+    },
+    {
+        "name": "veto: inbound leg dropped, nothing else -> LAS->? from OpenSky",
+        "callsign": "AAL2470", "opensky": {"origin": "LAS", "dest": ""},
+        "adsbdb": {"origin": "CLT", "dest": "LAS"},      # free source has the same wrong leg
+        "airlabs1": {"origin": "CLT", "dest": "LAS"}, "aeroapi": None,
+        "expect": ("LAS", "", "opensky"),
+    },
+    {
+        "name": "veto: climb alone (no OpenSky data) is enough",
+        "callsign": "JSX109", "vs": 1800,
+        "airlabs1": {"origin": "BUR", "dest": "LAS"}, "aeroapi": {"origin": "LAS", "dest": "BUR"},
+        "expect": ("LAS", "BUR", "aeroapi"),
+    },
+    {
+        "name": "veto: key 1 over quota + inbound leg -> key 2 NOT asked for the same leg",
+        "callsign": "AAL1592", "opensky": {"origin": "LAS", "dest": ""},
+        "airlabs1": {"origin": "ORD", "dest": "LAS"}, "airlabs1_count": 1001,
+        "airlabs2": {"origin": "ORD", "dest": "LAS"}, "aeroapi": {"origin": "LAS", "dest": "AUS"},
+        "expect": ("LAS", "AUS", "aeroapi"),
+        "expect_calls": {"airlabs2": 0},
+    },
+    {
+        "name": "no veto: descending plane keeps a real arrival despite a stale OpenSky LAS row",
+        "callsign": "UAL1627", "vs": -1200, "opensky": {"origin": "LAS", "dest": ""},
+        "airlabs1": {"origin": "SFO", "dest": "LAS"},
+        "expect": ("SFO", "LAS", "airlabs"),
+    },
+    {
+        "name": "no veto: no departure evidence keeps a real arrival",
+        "callsign": "UAL1628",
+        "airlabs1": {"origin": "SFO", "dest": "LAS"},
+        "expect": ("SFO", "LAS", "airlabs"),
+    },
+    {
+        "name": "no veto: local->local (VGT->LAS) is not an inbound leg",
+        "callsign": "N123VG", "reg": "N123VG", "vs": 900,
+        "fr24": [{"origin": "VGT", "dest": "LAS"}],
+        "expect": ("VGT", "LAS", "fr24"),
+    },
+    {
+        "name": "no veto: GLOBAL mode (no home airports) never vetoes",
+        "callsign": "AAL1565", "no_local": True, "vs": 2000,
+        "airlabs1": {"origin": "ORD", "dest": "LAS"},
+        "expect": ("ORD", "LAS", "airlabs"),
+    },
+    {
+        "name": "veto: climbing plane busts a cached inbound resolved entry and re-resolves",
+        "callsign": "AAL777", "vs": 2000,
+        "cache": {("AAL777", "resolved"): ("ORD", "LAS", 41.97, -87.90, 36.08, -115.15, "airlabs")},
+        "airlabs1": {"origin": "LAS", "dest": "ORD"},
+        "expect": ("LAS", "ORD", "airlabs"),
+        "expect_calls": {"airlabs1": 1},
+    },
+    {
+        "name": "no veto: cached inbound resolved entry still served when not climbing",
+        "callsign": "AAL778",
+        "cache": {("AAL778", "resolved"): ("ORD", "LAS", 41.97, -87.90, 36.08, -115.15, "airlabs")},
+        "airlabs1": {"origin": "LAS", "dest": "ORD"},
+        "expect": ("ORD", "LAS", "resolved:airlabs:cached"),
+        "expect_calls": {"airlabs1": 0},
+    },
+    {
+        "name": "veto: live AeroAPI inbound leg isn't committed, so FR24 §5 supplies the outbound leg",
+        "callsign": "AAL1566", "reg": "N166NN", "vs": 2000, "opensky": {"origin": "LAS", "dest": ""},
+        "airlabs1": {"origin": "ORD", "dest": "LAS"}, "aeroapi": {"origin": "ORD", "dest": "LAS"},
+        "fr24": [{"origin": "LAS", "dest": "ORD"}],
+        "expect": ("LAS", "ORD", "fr24"),
+        "expect_calls": {"fr24": 1},
+    },
+    {
+        "name": "veto: CACHED AeroAPI inbound leg isn't committed either -> FR24 §5 runs",
+        "callsign": "SWA2374", "reg": "N8641B", "vs": 1800,
+        "cache": {("SWA2374", "aeroapi"): ("OAK", "LAS", None, None, None, None, "aeroapi")},
+        "airlabs1": {"origin": "OAK", "dest": "LAS"},
+        "fr24": [{"origin": "LAS", "dest": "PHX"}],
+        "expect": ("LAS", "PHX", "fr24"),
+    },
+    {
+        "name": "veto: lingering vetoed flight caches an empty AeroAPI answer for 1 h, not 5 min",
+        "callsign": "AAL1567", "opensky": {"origin": "LAS", "dest": ""},
+        "airlabs1": {"origin": "ORD", "dest": "LAS"}, "aeroapi": None,
+        "expect": ("LAS", "", "opensky"),
+        "expect_cache_ttl": {"AAL1567": overhead.ROUTE_TTL_DEFAULT},
+    },
+    {
+        "name": "veto: OpenSky's newest row is the COMPLETED inbound leg -> still vetoed on climb",
+        "callsign": "AAL1568", "vs": 2000, "opensky": {"origin": "ORD", "dest": "LAS"},
+        "airlabs1": {"origin": "ORD", "dest": "LAS"}, "aeroapi": {"origin": "LAS", "dest": "ORD"},
+        "expect": ("LAS", "ORD", "aeroapi"),
+    },
+    {
+        "name": "no veto: climb reading on a real arrival OpenSky confirms in progress (go-around)",
+        "callsign": "UAL1629", "vs": 1500, "opensky": {"origin": "SFO", "dest": ""},
+        "airlabs1": {"origin": "SFO", "dest": "LAS"},
+        "expect": ("SFO", "LAS", "airlabs"),
+        "expect_calls": {"aeroapi": 0},
+    },
+    {
+        "name": "no veto: GA from a nearby non-home field, climbing, OpenSky confirms the origin",
+        "callsign": "N55BL", "reg": "N55BL", "vs": 700,
+        "fr24": [{"origin": "BLD", "dest": "VGT"}], "opensky": {"origin": "BLD", "dest": ""},
+        "expect": ("BLD", "VGT", "fr24"),
+    },
+    {
+        "name": "veto: GA FR24 inbound leg on a plane OpenSky says left LAS -> LAS->?",
+        "callsign": "N579FX", "reg": "N579FX", "vs": 1800,
+        "fr24": [{"origin": "VNY", "dest": "LAS"}], "opensky": {"origin": "LAS", "dest": ""},
+        "expect": ("LAS", "", "opensky"),
+    },
+    {
+        "name": "no veto: web test lookup of a plane climbing far from home keeps its cached arrival",
+        "callsign": "AAL779", "vs": 2500, "plane": (37.62, -122.38),        # near SFO
+        "cache": {("AAL779", "resolved"): ("SFO", "LAS", 37.62, -122.38, 36.08, -115.15, "airlabs")},
+        "airlabs1": {"origin": "SFO", "dest": "LAS"},
+        "expect": ("SFO", "LAS", "resolved:airlabs:cached"),
+        "expect_calls": {"airlabs1": 0, "aeroapi": 0},
     },
 ]
 

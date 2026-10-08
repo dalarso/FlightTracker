@@ -106,6 +106,9 @@ A final free fallback for commercial callsigns the paid APIs couldn't resolve (o
 ### The Final Pick — `_select()`
 The steps above don't each decide the route on their own; they gather every source's candidate and a single authority, **`_select()`**, picks the winner. It ranks candidates by **route tier** (a local endpoint beats a non-local guess; a complete route beats a partial one), breaks ties by a fixed **source priority**, and rejects any candidate whose geometry is implausible for the aircraft's current position. The free-source **trust rule travels into the candidate set**: for a *commercial* callsign a stale local-origin adsbdb/OpenSky route is never allowed to outrank a live paid route — but it still serves as a safety net when the paid chain is empty or every paid route is geometrically implausible.
 
+### Departure Veto
+Some flight numbers fly more than one leg (airline turns like CLT→LAS→CLT, through-flights), and AirLabs sometimes answers with the leg that *ended* at the home airport while the plane is climbing out of it — a departure shown as `ORD→LAS`. When the plane is evidently **departing** a local airport — climbing at ≥ 300 ft/min, or OpenSky's live departure airport is local and the plane isn't descending — any candidate that *arrives* at a local airport from elsewhere is dropped before `_select()` runs (and a cached one is busted). The chain then falls through to AeroAPI (which picks the leg that is actually airborne) or to the free sources' local-origin route.
+
 ### Paid-Miss Cache
 When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppression entry is written. Prevents repeated quota burns on GA or obscure flights that will never have a filed route.
 
@@ -133,10 +136,11 @@ For commercial flights where adsbdb had a route, the result is compared against 
 Parallel to route lookup, a separate thread resolves the aircraft type for display and logging:
 
 1. **airplanes.live** — returns type code and registration in one call
-2. **adsbdb** type endpoint — fallback if airplanes.live misses
-3. **OpenSky metadata** (`/api/aircraft/HEX`) — registration and model by hex; permanent mapping cached indefinitely
-4. **airplanes.live /v2/reg** — registration-only fallback
-5. **FlightRadar24** — `get_flights(registration=…)` as a free last resort by tail number
+2. **adsbdb** aircraft endpoint — type fallback if airplanes.live misses; also the registration source (hex → tail, cached permanently) when the feed and airplanes.live don't carry one
+3. **airplanes.live /v2/reg** — registration-only fallback
+4. **FlightRadar24** — `get_flights(registration=…)` as a free last resort by tail number
+
+(OpenSky's `/metadata/aircraft` endpoint used to provide registrations; it now answers `410 Gone` and is no longer used.)
 
 Type codes (e.g. `B738`) are translated to human-readable names (e.g. `Boeing 737-800`) via a built-in lookup table covering airliners, regional jets, business jets, GA aircraft, and helicopters.
 

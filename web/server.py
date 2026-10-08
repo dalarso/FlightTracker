@@ -1649,8 +1649,8 @@ def api_stack():
                 "cache_ttl":    86400,
                 "cache_ttl_fmt": "24h",
                 "notes":    "Used for aircraft type/model (e.g. 'BOEING 737-800'). "
-                            "Step 1 and 4 of a 5-step type lookup chain: "
-                            "airplanes.live (by hex) → adsbdb → OpenSky metadata → "
+                            "Step 1 and 3 of a 4-step type lookup chain: "
+                            "airplanes.live (by hex) → adsbdb → "
                             "airplanes.live (by reg) → FR24. Results cached 24 hr.",
             },
         ],

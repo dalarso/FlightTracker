@@ -2240,7 +2240,6 @@ function renderTestResult(d) {
       {key:'airlabs',       label:'AirLabs',           desc:'Real-time by callsign'},
       {key:'aeroapi',       label:'AeroAPI',            desc:'FlightAware paid'},
       {key:'adsbdb_type',   label:'adsbdb type',       desc:'Aircraft type fallback'},
-      {key:'opensky_meta',  label:'OpenSky metadata',  desc:'Aircraft registry (public)'},
     ];
 
     function stepBody(def) {
@@ -2248,7 +2247,7 @@ function renderTestResult(d) {
       if (!s) {
         if (d.override_matched && ['adsbdb_route','opensky','airlabs','aeroapi'].includes(def.key))
           return `<span style="color:var(--muted)">Skipped — override</span>`;
-        if (!d.hex_code && ['adsbdb_type','opensky_meta'].includes(def.key))
+        if (!d.hex_code && def.key === 'adsbdb_type')
           return `<span style="color:var(--muted)">Skipped — no hex</span>`;
         return `<span style="color:var(--muted)">—</span>`;
       }
@@ -2257,7 +2256,7 @@ function renderTestResult(d) {
       if (s.error)
         return `<span style="color:var(--red)">✗ ${escHtml(s.error)}</span>`;
       if (def.key === 'live_position') return livePosBody(s);
-      if (def.key === 'adsbdb_type' || def.key === 'opensky_meta') {
+      if (def.key === 'adsbdb_type') {
         if (s.type) return `<span style="color:#c800c8">${escHtml(s.type)}</span>`;
         return `<span style="color:var(--muted)">No type data</span>`;
       }

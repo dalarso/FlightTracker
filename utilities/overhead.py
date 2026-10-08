@@ -150,6 +150,13 @@ try:
 except Exception:
     RECEIVER_TYPE = "dump1090"  # "dump1090" | "vrs"
 
+# Optional explicit dump1090 aircraft.json URL for the fallback feed.  When unset, the
+# common install paths are probed (see _DUMP1090_URLS).
+try:
+    from config import DUMP1090_URL as _DUMP1090_URL_CFG
+except Exception:
+    _DUMP1090_URL_CFG = ""
+
 try:
     from config import LOCAL_AIRPORTS
 except Exception:
@@ -199,7 +206,19 @@ OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-networ
 
 # Data source URLs
 FR24FEED_URL = f"http://{RECEIVER_HOST}:8754/flights.json"
-DUMP1090_URL = f"http://{RECEIVER_HOST}:8080/data/aircraft.json"
+# dump1090 fallback feed.  Where aircraft.json lives depends on the build: dump1090-fa /
+# readsb serve :8080/data/, while the dump1090-mutability web UI bundled with fr24feed
+# serves /dump1090/data/ on port 80 (a :8080-only fallback could never work there).  An
+# explicit DUMP1090_URL in config.py is tried first; the first URL that answers is
+# remembered and tried first on later polls.
+_DUMP1090_URLS = [u for u in (
+    _DUMP1090_URL_CFG,
+    f"http://{RECEIVER_HOST}:8080/data/aircraft.json",
+    f"http://{RECEIVER_HOST}/dump1090/data/aircraft.json",
+    f"http://{RECEIVER_HOST}/tar1090/data/aircraft.json",
+    f"http://{RECEIVER_HOST}/skyaware/data/aircraft.json",
+) if u]
+DUMP1090_URL = _DUMP1090_URLS[0]
 # Virtual Radar Server — default HTTP port is 8080; override RECEIVER_HOST to include
 # a non-standard port, e.g. RECEIVER_HOST = "192.168.1.50:8090"
 VRS_URL      = f"http://{RECEIVER_HOST}:8080/VirtualRadar/AircraftList.json"
@@ -209,7 +228,6 @@ AIRLABS_URL = "https://airlabs.co/api/v9/flight"
 OPENSKY_FLIGHTS_URL = "https://opensky-network.org/api/flights/aircraft"
 ADSBDB_CALLSIGN_URL  = "https://api.adsbdb.com/v0/callsign/{}"
 ADSBDB_AIRCRAFT_URL  = "https://api.adsbdb.com/v0/aircraft/{}"
-OPENSKY_AIRCRAFT_URL = "https://opensky-network.org/api/metadata/aircraft/icao/{}"  # public, no token
 
 # fr24feed flights.json field indices
 # {hex: [hex, lat, lon, heading, alt_ft, speed, squawk, ?, type, reg, timestamp, origin, dest, ?, on_ground, vert_rate, callsign]}
@@ -967,6 +985,81 @@ def _is_nonlocal(origin, dest):
     return bool(origin and dest) and not _has_local_endpoint(origin, dest)
 
 
+# ── Departure veto (inbound-leg guard) ─────────────────────────────────────────
+# Flight numbers that fly more than one leg (American CLT->LAS->CLT turns, Breeze / JSX
+# through-flights, charters) can come back from AirLabs as the leg that ENDED at the home
+# airport while the plane is climbing out of it — a LAS departure displayed as "ORD->LAS".
+# The geometry check can't catch it (the plane really is near that leg's destination).
+# When the plane is evidently departing, a route that ARRIVES at a local airport from
+# elsewhere can't be this flight, so it is dropped from every candidate list.
+DEPARTURE_CLIMB_FPM = 300       # |vertical rate| (ft/min) that counts as a clear climb / descent
+DEPARTURE_CLIMB_RADIUS_KM = 60  # a climb only means "leaving home" this close to home
+
+
+def _is_inbound_to_local(origin, dest):
+    """True when a route ARRIVES at a local airport from a non-local or unknown origin
+    (X->LAS or ?->LAS) — the shape of an inbound leg.  Always False in GLOBAL mode."""
+    if not _LOCAL_AIRPORTS or not dest or dest.upper() not in _LOCAL_AIRPORTS:
+        return False
+    return not (origin and origin.upper() in _LOCAL_AIRPORTS)
+
+
+def _near_home(plane_lat, plane_lon):
+    """True when the plane is within DEPARTURE_CLIMB_RADIUS_KM of home (or its position is
+    unknown).  Overhead flights always are; the web test lookup can ask about a plane
+    anywhere, where a climb (e.g. a step climb at cruise) says nothing about LAS."""
+    if plane_lat is None or plane_lon is None:
+        return True
+    try:
+        return _haversine_km(plane_lat, plane_lon,
+                             LOCATION_DEFAULT[0], LOCATION_DEFAULT[1]) <= DEPARTURE_CLIMB_RADIUS_KM
+    except (TypeError, ValueError, IndexError):
+        return True
+
+
+def _departure_signal(vertical_speed, sky_origin="", plane_lat=None, plane_lon=None):
+    """Why the plane is evidently DEPARTING a local airport (a short reason for the log),
+    or "" when there's no such evidence.
+
+    Evidence is a clear climb near home, or OpenSky's live estDepartureAirport for this
+    airframe being local.  A clear descent overrides OpenSky: its newest row can be this
+    airframe's earlier departure from home when the current inbound flight isn't in
+    OpenSky yet."""
+    if not _LOCAL_AIRPORTS:
+        return ""
+    try:
+        vs = float(vertical_speed or 0)
+    except (TypeError, ValueError):
+        vs = 0.0
+    if vs <= -DEPARTURE_CLIMB_FPM:
+        return ""
+    if vs >= DEPARTURE_CLIMB_FPM and _near_home(plane_lat, plane_lon):
+        return f"climbing {vs:+.0f} fpm"
+    if sky_origin and sky_origin.upper() in _LOCAL_AIRPORTS:
+        return f"OpenSky departure {sky_origin.upper()}"
+    return ""
+
+
+def _sky_corroborates(ctx, origin):
+    """True when OpenSky's live row for this airframe is an in-progress flight FROM
+    `origin` (a non-local airport).  That independently confirms an inbound route really
+    is this flight — a genuine arrival with a noisy climb reading, a go-around, or GA from
+    a nearby non-home field — so a climb alone must not veto it.  A row that already
+    ARRIVED at a local airport is the airframe's previous leg and confirms nothing
+    (OpenSky leaves the arrival blank while a flight is in progress)."""
+    so = (ctx._sky_origin or "").upper()
+    sd = (ctx._sky_dest or "").upper()
+    return bool(so and origin and so == origin.upper()
+                and so not in _LOCAL_AIRPORTS and sd not in _LOCAL_AIRPORTS)
+
+
+def _vetoes_inbound(ctx, origin, dest):
+    """The departure veto for one route: the plane is evidently departing (ctx._departing),
+    the route is an inbound leg, and OpenSky doesn't confirm it as this flight."""
+    return (bool(ctx._departing) and _is_inbound_to_local(origin, dest)
+            and not _sky_corroborates(ctx, origin))
+
+
 # Source trust priority for selecting among held non-local routes (lower = more
 # trusted).  Paid real-time sources first, then FR24 (unofficial/scraped), then
 # the free historical DBs last.  Declarative on purpose: reordering the resolution
@@ -1292,6 +1385,10 @@ _last_overhead_track: dict[str, int] = {}
 # lines, so a lingering override flight (e.g. JANET77 orbiting) logs the match once and
 # then only the [overhead] alt= tracking line repeats until the rule (or its result) changes.
 _last_override_log: dict[str, tuple] = {}
+# callsign -> (dropped inbound-leg candidates, ts) last logged by the departure veto; logs
+# the drop once per pass (re-logs after _FREE_API_CHECK_DEDUP_SECS, i.e. on a later pass)
+# instead of on every poll's cached re-evaluation.
+_last_veto_log: dict[str, tuple] = {}
 # (date, callsign) -> (registration, plane_type, route_src) last WRITTEN by the dedup-enrich
 # UPDATE in _record_flight_stat.  Lets an already-counted, lingering flight skip its
 # per-poll (~15 s) UPDATE+commit when none of the enrich fields changed — avoiding SD-card
@@ -1518,10 +1615,21 @@ def _get_opensky_token():
     return None
 
 
+# Airports whose IATA code is NOT their ICAO code minus the region letter.  Stripping the
+# K would turn Henderson Executive (KHND, IATA HSH) into HND — Tokyo Haneda's IATA code —
+# and mark a local departure non-local; Boulder City (KBVU) is IATA BLD.
+_ICAO_IATA_EXCEPTIONS = {
+    "KHND": "HSH",
+    "KBVU": "BLD",
+}
+
+
 def icao_to_iata(code):
     """Best-effort ICAO→IATA: strip leading region letter for common prefixes."""
     if not code or len(code) != 4:
         return code
+    if code.upper() in _ICAO_IATA_EXCEPTIONS:
+        return _ICAO_IATA_EXCEPTIONS[code.upper()]
     if code[0] in ("K", "P"):  # US / Alaska
         return code[1:]
     if code[0] == "C":          # Canada: CYYZ → YYZ
@@ -1575,12 +1683,15 @@ class Flight:
         lon = ac.get("lon")
         if lat is None or lon is None:
             return None
-        alt = ac.get("alt_baro", 0)
+        # readsb / dump1090-fa name these alt_baro + baro_rate/geom_rate; the older
+        # dump1090-mutability build (bundled with fr24feed) uses altitude + vert_rate.
+        alt = ac.get("alt_baro", ac.get("altitude", 0))
+        vs = ac.get("baro_rate", ac.get("geom_rate", ac.get("vert_rate", 0)))
         return cls(
             lat=lat,
             lon=lon,
             altitude=alt if isinstance(alt, (int, float)) else 0,
-            vertical_speed=ac.get("baro_rate", ac.get("geom_rate", 0)) or 0,
+            vertical_speed=vs if isinstance(vs, (int, float)) else 0,
             callsign=(ac.get("flight") or "").strip(),
             hex_code=ac.get("hex", ""),
             registration=ac.get("registration", "") or "",
@@ -1667,20 +1778,31 @@ def fetch_flights():
     except Exception:
         pass
 
-    try:
-        r = requests.get(DUMP1090_URL, timeout=3)   # local LAN — 3 s is plenty
-        if r.status_code == 200:
-            flights = []
-            for ac in r.json().get("aircraft", []):
-                f = Flight.from_dump1090(ac)
-                if f:
-                    flights.append(f)
-            return flights
-    except Exception:
-        pass
+    _good = _dump1090_good_url[0]
+    for url in ([_good] if _good else []) + [u for u in _DUMP1090_URLS if u != _good]:
+        try:
+            # local LAN — short connect timeout so a dead host doesn't stall the poll
+            # once per candidate URL
+            r = requests.get(url, timeout=(1, 3))
+            if r.status_code == 200:
+                payload = r.json()
+                if isinstance(payload, dict) and "aircraft" in payload:
+                    _dump1090_good_url[0] = url
+                    flights = []
+                    for ac in payload.get("aircraft", []):
+                        f = Flight.from_dump1090(ac)
+                        if f:
+                            flights.append(f)
+                    return flights
+        except Exception:
+            pass
 
     _log(f"[overhead] receiver unreachable — no data from {RECEIVER_HOST}")
     return []
+
+
+# Last dump1090 URL that answered — tried first on the next fallback poll.
+_dump1090_good_url = [""]
 
 
 # The home Cartesian is FIXED — precompute it once instead of re-running
@@ -2432,7 +2554,8 @@ def _route_last_resort_pick(ctx):
         # airport-coords table; airports it doesn't know get benefit of the doubt,
         # matching each source's own inline coordless behavior.
         _cands = [c for c in _cands
-                  if _fr24_route_plausible(ctx.plane_lat, ctx.plane_lon, c[1], c[2])]
+                  if _fr24_route_plausible(ctx.plane_lat, ctx.plane_lon, c[1], c[2])
+                  and not _vetoes_inbound(ctx, c[1], c[2])]
         if _cands:
             # Tier: 0 local-complete, 1 local-partial, 2 non-local-complete,
             # 3 non-local-partial.  A LOCAL endpoint outranks completeness (your
@@ -2468,6 +2591,44 @@ def _route_last_resort_pick(ctx):
                 _log(f"[route] {_airline_display(ctx.callsign)}: no committed local route — "
                      f"serving {_tier_label} {_route_display(ctx.origin, ctx.destination)} from {ctx.source} "
                      f"(short-TTL; not written to resolved cache)")
+
+
+AEROAPI_PICK_WINDOW_SECS = 3 * 3600   # max |departure - now| for a not-yet-airborne pick
+
+
+def _iso_epoch(value):
+    """Epoch seconds for an AeroAPI ISO-8601 timestamp ("2026-10-07T21:30:00Z"), or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _aeroapi_pick_flight(flights, now=None):
+    """Pick the AeroAPI /flights/{ident} entry that is the plane overhead right now, or None.
+
+    The endpoint returns ~2 weeks of past and scheduled legs for the flight number.  Prefer
+    the leg that is in the air (took off, hasn't landed, not cancelled).  Failing that, the
+    not-yet-landed leg whose departure time is closest to now within
+    AEROAPI_PICK_WINDOW_SECS (FlightAware sometimes lags on the takeoff event).  Never a
+    later leg or another day's flight — the old "latest scheduled_out not yet landed" pick
+    did exactly that, and the wrong leg could then sit in the 7-day resolved cache."""
+    now = time.time() if now is None else now
+    live = [f for f in flights or [] if isinstance(f, dict) and not f.get("cancelled")]
+    airborne = [f for f in live if f.get("actual_off") and not f.get("actual_on")]
+    if airborne:
+        return max(airborne, key=lambda f: _iso_epoch(f.get("actual_off")) or 0)
+    best, best_gap = None, AEROAPI_PICK_WINDOW_SECS
+    for f in live:
+        if f.get("actual_on"):
+            continue   # already landed — can't be the plane overhead
+        dep = _iso_epoch(f.get("estimated_off") or f.get("estimated_out")
+                         or f.get("scheduled_off") or f.get("scheduled_out"))
+        if dep is not None and abs(dep - now) <= best_gap:
+            best, best_gap = f, abs(dep - now)
+    return best
 
 
 def _route_aeroapi_tier(ctx):
@@ -2513,7 +2674,13 @@ def _route_aeroapi_tier(ctx):
                 # a candidate — _select then resolved the flight to "none" (or to a wrong
                 # non-local source).  _select's local-first tiering now picks it correctly.
                 ctx.fa_origin, ctx.fa_dest = _fa_cached_origin, _fa_cached_dest
-                if (ctx._al_held_nonlocal
+                # Departure veto: a cached inbound leg (e.g. this flight number's arrival
+                # looked up within the hour) stays a candidate for _select to drop, but is
+                # not committed — so FR24 §5 still gets a chance at the outbound leg.
+                _fa_vetoed = _vetoes_inbound(ctx, _fa_cached_origin, _fa_cached_dest)
+                if _fa_vetoed:
+                    pass
+                elif (ctx._al_held_nonlocal
                         and _fa_cached_origin and _fa_cached_dest
                         and _has_local_endpoint(_fa_cached_origin, _fa_cached_dest)):
                     # AirLabs gave a complete non-local route; AeroAPI cache has a
@@ -2546,7 +2713,7 @@ def _route_aeroapi_tier(ctx):
                 # tag — NOT the 'origin' variable, which may be set by an earlier
                 # source (e.g. AirLabs).  The resolved-cache write guard checks that
                 # _coord_origin_iata == origin; a mismatch blocks a bad write.
-                if ctx._cached_fa[2] is not None:
+                if ctx._cached_fa[2] is not None and not _fa_vetoed:
                     ctx._coord_olat, ctx._coord_olon = ctx._cached_fa[2], ctx._cached_fa[3]
                     ctx._coord_dlat, ctx._coord_dlon = ctx._cached_fa[4], ctx._cached_fa[5]
                     ctx._coord_origin_iata = _fa_cached_origin  # the airport these coords actually belong to
@@ -2580,10 +2747,7 @@ def _route_aeroapi_tier(ctx):
                     _log(f"[aeroapi] auth error ({r.status_code}) — check FLIGHTAWARE_API_KEY")
                 elif r.status_code == 200:
                     flights = r.json().get("flights", [])
-                    # Prefer an en-route flight; fall back to most recent
-                    active = [f for f in flights if not f.get("actual_on")]
-                    active.sort(key=lambda f: f.get("scheduled_out") or f.get("actual_off") or "", reverse=True)
-                    f = active[0] if active else (flights[0] if flights else None)
+                    f = _aeroapi_pick_flight(flights)
                     ctx.fa_origin = ctx.fa_dest = ""
                     fa_olat = fa_olon = fa_dlat = fa_dlon = None
                     if f:
@@ -2604,7 +2768,11 @@ def _route_aeroapi_tier(ctx):
                     # use ROUTE_TTL_DEFAULT (1 hr) for empty results instead of ROUTE_MISS_TTL
                     # (5 min) — the flight won't gain a local endpoint mid-flight, so
                     # re-querying every 5 min would burn AeroAPI quota needlessly.
-                    _fa_miss_ttl = ROUTE_TTL_DEFAULT if ctx._al_held_nonlocal else ROUTE_MISS_TTL
+                    # Same for a flight whose AirLabs answer was a vetoed inbound leg: AeroAPI
+                    # was the shot at the real outbound leg, and a lingering departure would
+                    # otherwise re-bill it every 5 min.
+                    _fa_miss_ttl = (ROUTE_TTL_DEFAULT if (ctx._al_held_nonlocal or ctx._al_inbound_rejected)
+                                    else ROUTE_MISS_TTL)
                     _fa_is_nonlocal_cache = _is_nonlocal(ctx.fa_origin, ctx.fa_dest)
                     # Non-local complete routes → ROUTE_MISS_TTL (5 min); they're almost
                     # certainly wrong for this zone and must not persist.
@@ -2623,7 +2791,12 @@ def _route_aeroapi_tier(ctx):
                         fa_plausible = _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                                          fa_olat, fa_olon,
                                                          fa_dlat, fa_dlon)
-                        if fa_plausible:
+                        if fa_plausible and _vetoes_inbound(ctx, ctx.fa_origin, ctx.fa_dest):
+                            # Inbound leg on a departing plane — same as AirLabs: keep it as a
+                            # candidate for _select to drop, don't commit, so FR24 §5 runs.
+                            _log(f"[aeroapi] {_airline_display(ctx.callsign)}: {_route_display(ctx.fa_origin, ctx.fa_dest)} "
+                                 f"rejected — inbound leg, plane is departing ({ctx._departing})")
+                        elif fa_plausible:
                             # Paid APIs trust any plausible route — no origin-local restriction.
                             _fa_applied   = False   # tracks whether AeroAPI route was actually adopted
                             _fa_filled_dest = not ctx.destination
@@ -2708,6 +2881,18 @@ def _route_aeroapi_tier(ctx):
         # else: in backoff — already logged when backoff was set
 
 
+def _departure_veto(ctx, cands, vetoed):
+    """Return `cands` without inbound-leg routes (X->LAS / ?->LAS) when ctx._departing says
+    the plane is leaving a local airport; the dropped candidates are appended to `vetoed`
+    (for the caller's log).  A no-op when there's no departure evidence."""
+    if not ctx._departing:
+        return cands
+    kept = []
+    for c in cands:
+        (vetoed if _vetoes_inbound(ctx, c.origin, c.dest) else kept).append(c)
+    return kept
+
+
 def _route_select_authority(ctx):
     """_select() is the route authority: gather every source's candidate, let _select()
     pick the winner by (tier, SOURCE_PRIORITY) + geometry, reconstruct the cached-aware
@@ -2755,6 +2940,12 @@ def _route_select_authority(ctx):
     # / GLOBAL flights flow straight through to the full _select with the free candidates appended
     # (one _select, exactly as before).  _select never mutates its argument (it builds + sorts a
     # fresh `usable` list), so the old defensive list() copy is unnecessary and dropped.
+    #
+    # Departure veto: when the plane is evidently departing a local airport, drop every
+    # inbound-leg candidate (X->LAS / ?->LAS) BEFORE the trusted pick, so a vetoed paid route
+    # opens the free-source safety net exactly like an empty paid answer would.
+    _vetoed = []
+    _cands = _departure_veto(ctx, _cands, _vetoed)
     if ctx._adsbdb_commercial:
         _trusted_best = _select(_cands, ctx.plane_lat, ctx.plane_lon)
         _free_ok = _trusted_best is None
@@ -2770,9 +2961,19 @@ def _route_select_authority(ctx):
                                 ctx.adsbdb_dlat, ctx.adsbdb_dlon, "adsbdb"))
         if (ctx._sky_origin or ctx._sky_dest):
             _cands.append(_Cand(_norm_code(ctx._sky_origin), _norm_code(ctx._sky_dest), None, None, None, None, "opensky"))
+        _cands = _departure_veto(ctx, _cands, _vetoed)
         _best = _select(_cands, ctx.plane_lat, ctx.plane_lon)
     else:
         _best = _trusted_best
+    if _vetoed:
+        _veto_sig = tuple(sorted({(c.source, c.origin, c.dest) for c in _vetoed}))
+        _prev_veto = _last_veto_log.get(ctx.callsign)
+        if (not _prev_veto or _prev_veto[0] != _veto_sig
+                or time.time() - _prev_veto[1] > _FREE_API_CHECK_DEDUP_SECS):
+            _bounded_put(_last_veto_log, ctx.callsign, (_veto_sig, time.time()))
+            _dropped = ", ".join(f"{o or '?'}->{d} ({s})" for s, o, d in _veto_sig)
+            _log(f"[route] {ctx.callsign}: plane is departing ({ctx._departing}) — "
+                 f"dropped inbound leg {_dropped}")
 
     ctx.origin, ctx.destination = (_best.origin, _best.dest) if _best else ("", "")
     if _best:
@@ -2794,6 +2995,16 @@ def _route_commit_fr24(ctx):
     label (preserving any endpoint a prior partial override already set).  Logs acceptance
     for live (non-cached) results only.  Writes ctx.origin/destination/source in place."""
     if ctx._fr24_origin or ctx._fr24_dest:
+        # Departure veto, climb-only (OpenSky hasn't been asked yet): an inbound-shaped
+        # route on a plane climbing out may be the tail's previous leg.  Don't commit it,
+        # so adsbdb / OpenSky still run; it stays a candidate, and _route_select_authority
+        # keeps it only if OpenSky confirms the flight really is from that origin.
+        _climb = _departure_signal(ctx.vertical_speed, "", ctx.plane_lat, ctx.plane_lon)
+        if _climb and _is_inbound_to_local(ctx._fr24_origin, ctx._fr24_dest):
+            if ctx._fr24_src != "fr24:cached":
+                _log(f"[fr24] {ctx.registration}: {_route_display(ctx._fr24_origin, ctx._fr24_dest)} "
+                     f"held — inbound leg on a climbing plane ({_climb}); checking OpenSky")
+            return
         if ctx._fr24_src != "fr24:cached":
             _log(f"[fr24] {ctx.registration}: {_route_display(ctx._fr24_origin, ctx._fr24_dest)} accepted")
         if not ctx.origin:
@@ -2844,6 +3055,12 @@ class _RouteCtx:
     _is_n_number: bool = False
     _need_airlabs: bool = False
     _skip_paid: bool = False
+    # Departure-veto evidence ("" = none) — see _departure_signal / _vetoes_inbound.
+    vertical_speed: float = 0
+    _departing: str = ""
+    # An AirLabs key answered with an inbound leg the veto rejected; both keys read the
+    # same backend, so the other key isn't asked for the same wrong leg.
+    _al_inbound_rejected: bool = False
     # ── §1 FR24 GA ──
     _fr24_origin: str = ""
     _fr24_dest: str = ""
@@ -2933,12 +3150,18 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     Negative cache entries have empty origin/dest with None coords — used to avoid
     re-querying APIs within ROUTE_MISS_TTL when they had no data.
 
+    Departure veto: when the plane is evidently departing a local airport (climbing, or
+    OpenSky's live departure airport is local and it isn't descending), any route that
+    ARRIVES at a local airport from elsewhere (X->LAS) is the airframe's previous leg, not
+    this flight — it is rejected everywhere (resolved cache, AirLabs, final selection).
+
     plane_lat/plane_lon: aircraft's current position, used for plausibility checks.
-    vertical_speed: kept for API compatibility; no longer used in trust logic.
+    vertical_speed: ft/min from the feed (+ climbing), evidence for the departure veto.
     """
     ctx = _RouteCtx(hex_code, callsign, registration, plane_lat, plane_lon,
                     vrs_origin, vrs_dest)
     ctx.now = int(time.time())
+    ctx.vertical_speed = vertical_speed
     ctx._apis_disabled = os.path.exists(APIS_DISABLED_FLAG)  # evaluate once — two callers below
 
     # ── 0. Override rules — bypass ALL API lookups for known callsigns ─────────
@@ -3009,13 +3232,20 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
             _rsrc           = _resolved[6].removesuffix(":cached")
             _resolved_label = f"resolved:{_rsrc}:cached" if _rsrc else "resolved:cached"
             _res_origin     = _resolved[0].upper()
+            # Departure veto (climb only — OpenSky hasn't been asked yet): a cached inbound
+            # leg (X->LAS) can't be the route of a plane climbing out — bust and re-resolve.
+            _res_dep = _departure_signal(vertical_speed, "", ctx.plane_lat, ctx.plane_lon)
+            if _res_dep and _is_inbound_to_local(_resolved[0], _resolved[1]):
+                _cache_db_delete_route(ctx.callsign, 'resolved')
+                _log(f"[resolved] {ctx.callsign}: cached {_resolved[0]}->{_resolved[1]} is an inbound "
+                     f"leg but the plane is departing ({_res_dep}) — busting stale entry, re-resolving")
             # Local departures: trust immediately — we know our own airport's schedule.
             # When dest coords ARE stored, still run the cheap detour-ratio check first:
             # airline flight numbers are reused on the same local origin across days
             # (LAS->X today, LAS->Y tomorrow), and the geometry catches a plane heading
             # away from the cached dest.  _route_plausible returns True when any coord is
             # missing, so a coordless local entry keeps its unconditional fast path.
-            if _res_origin in _LOCAL_AIRPORTS:
+            elif _res_origin in _LOCAL_AIRPORTS:
                 if _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                     _resolved[2], _resolved[3],
                                     _resolved[4], _resolved[5]):
@@ -3074,14 +3304,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if not ctx.registration and ctx.hex_code:
         ctx.registration = _cache_db_get_reg(ctx.hex_code) or ""
 
-    # Proactive OpenSky-metadata tail resolution for ANY flight still missing a tail — so
+    # Proactive adsbdb tail resolution for ANY flight still missing a tail — so
     # BOTH FR24 paths can run on the FIRST poll: §1 (GA / charter, by N-number reg) and §5
     # (commercial, by reg).  FR24's library has no callsign lookup, so a tail is the only
     # way to query it at all.  Permanent cache, backoff-guarded, no-op once known;
     # get_aircraft_type() resolves the same tail later this poll regardless, so this adds
     # no net API calls — it just makes the tail available before the FR24 stages run.
     if not ctx.registration and ctx.hex_code:
-        _try_opensky_reg(ctx.hex_code)
+        _try_adsbdb_reg(ctx.hex_code)
         ctx.registration = _cache_db_get_reg(ctx.hex_code) or ""
 
     # Compute once — AFTER the tail is fully resolved, so _is_n_number reflects it (a
@@ -3175,6 +3405,10 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         elif ctx._sky_src != "opensky:cached":
             _log(f"[opensky] {ctx.callsign}: {ctx._sky_origin or '?'}->{ctx._sky_dest or '?'} skipped — origin not local")
 
+    # Departure evidence for the inbound-leg veto (climb rate, or OpenSky's live local
+    # departure airport) — read by the AirLabs acceptance below and by _route_select_authority.
+    ctx._departing = _departure_signal(vertical_speed, ctx._sky_origin, ctx.plane_lat, ctx.plane_lon)
+
     # ── 2b. Free-API consensus (non-local departures / arrivals) ─────────────────
     # adsbdb keys by callsign; OpenSky keys by hex code — two independent KEYS.
     # If both return the exact same non-local route AND it passes the geometry
@@ -3249,7 +3483,16 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if ctx.al_origin or ctx.al_dest:
         al_plausible = _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                          ctx.al_olat, ctx.al_olon, ctx.al_dlat, ctx.al_dlon)
-        if al_plausible:
+        if al_plausible and _vetoes_inbound(ctx, ctx.al_origin, ctx.al_dest):
+            # Inbound leg on a departing plane — don't commit it, so AeroAPI / FR24 still
+            # get a chance at the real outbound leg.  (Kept in al_origin/al_dest for the
+            # trace; _route_select_authority drops it as a candidate.)
+            ctx._al_inbound_rejected = True
+            if ctx._al_src != "airlabs:cached":
+                _count_suffix = f" [call #{ctx._al_count}]" if ctx._al_count else ""
+                _log(f"[airlabs-1] {_airline_display(ctx.callsign)}: {_route_display(ctx.al_origin, ctx.al_dest)} "
+                     f"rejected — inbound leg, plane is departing ({ctx._departing}){_count_suffix}")
+        elif al_plausible:
             _al_is_nonlocal = _is_nonlocal(ctx.al_origin, ctx.al_dest)
             if _al_is_nonlocal:
                 # Non-local route — do NOT commit to origin/dest yet.
@@ -3317,6 +3560,7 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
         and _is_nonlocal(ctx.al_origin, ctx.al_dest)
     )
     if (not (ctx.origin and ctx.destination)
+            and not ctx._al_inbound_rejected   # same backend — key 2 would return the same leg
             and (_al1_over_quota
                  or _al1_cache_was_empty
                  or (ctx._al_count == 0
@@ -3335,7 +3579,14 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     if ctx.al2_origin or ctx.al2_dest:
         al2_plausible = _route_plausible(ctx.plane_lat, ctx.plane_lon,
                                           ctx.al2_olat, ctx.al2_olon, ctx.al2_dlat, ctx.al2_dlon)
-        if al2_plausible:
+        if al2_plausible and _vetoes_inbound(ctx, ctx.al2_origin, ctx.al2_dest):
+            # Inbound leg on a departing plane — see AirLabs-1 above.
+            ctx._al_inbound_rejected = True
+            if ctx._al2_src != "airlabs2:cached":
+                _count_suffix = f" [call #{ctx._al2_count}]" if ctx._al2_count else ""
+                _log(f"[airlabs-2] {_airline_display(ctx.callsign)}: {_route_display(ctx.al2_origin, ctx.al2_dest)} "
+                     f"rejected — inbound leg, plane is departing ({ctx._departing}){_count_suffix}")
+        elif al2_plausible:
             _al2_is_nonlocal = _is_nonlocal(ctx.al2_origin, ctx.al2_dest)
             if _al2_is_nonlocal:
                 _log(f"[airlabs-2] {ctx.callsign}: {_route_display(ctx.al2_origin, ctx.al2_dest)} non-local — deferring to AeroAPI/FR24 verification")
@@ -3468,48 +3719,71 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
     return ctx.origin, ctx.destination, ctx.source or "none", ctx._ov_plane, ctx._ov_display
 
 
-def _try_opensky_reg(hex_code: str) -> None:
+# hex -> epoch until which a "no registration known" answer is trusted, so an aircraft
+# adsbdb doesn't know isn't re-queried on every ~15 s poll.  In-memory, bounded.
+_reg_miss_until: dict[str, float] = {}
+REG_MISS_RETRY_SECS = 6 * 3600
+
+
+def _adsbdb_aircraft_reg(payload) -> str:
+    """Registration from an adsbdb /v0/aircraft response body, or "".  An unknown hex
+    answers {"response": "unknown aircraft"} (a string, not a dict)."""
+    resp = payload.get("response") if isinstance(payload, dict) else None
+    ac = resp.get("aircraft") if isinstance(resp, dict) else None
+    return ((ac.get("registration") or "") if isinstance(ac, dict) else "").strip().upper()
+
+
+def _try_adsbdb_reg(hex_code: str) -> None:
     """
-    Best-effort: call OpenSky metadata endpoint for registration only.
-    Called when airplanes.live has type data but no 'r' field, and on cache hits
-    where the type is known but no reg has been cached yet.
+    Best-effort hex→tail lookup via adsbdb /v0/aircraft/{hex} (free, no key).
+    Called when airplanes.live has type data but no 'r' field, on type-cache hits with
+    no reg cached yet, and proactively by get_route() so the tail-keyed FR24 lookups can
+    run on an aircraft's FIRST poll.  (Replaces OpenSky's /metadata/aircraft endpoint,
+    which now answers 410 Gone.)
     Permanent hex→tail mapping — stops being called once reg is cached.
-    No-op if reg is already cached, on error, 429, or global opensky_meta backoff.
+    No-op if reg is already cached, the hex recently had no reg, on error, or in backoff.
     """
-    if _in_backoff("opensky_meta"):
+    if _in_backoff("adsbdb_reg"):
         return
     # Re-check the cache before the HTTP call — prevents duplicate in-flight requests
     # when two threads encounter the same aircraft simultaneously (both see no reg,
     # both enter this function; the second thread sees the reg the first just wrote).
     if _cache_db_get_reg(hex_code):
         return
+    if _reg_miss_until.get(hex_code, 0) > time.time():
+        return
     try:
-        r = _session.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
+        r = _session.get(ADSBDB_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
         if r.status_code == 200:
-            _meta_reg = (r.json().get("registration") or "").strip().upper()
-            if _meta_reg:
-                _cache_db_set_reg(hex_code, _meta_reg)
+            _reg = _adsbdb_aircraft_reg(r.json())
+            if _reg:
+                _cache_db_set_reg(hex_code, _reg)
+            else:
+                _bounded_put(_reg_miss_until, hex_code, time.time() + REG_MISS_RETRY_SECS)
+        elif r.status_code == 404:   # adsbdb: "unknown aircraft"
+            _bounded_put(_reg_miss_until, hex_code, time.time() + REG_MISS_RETRY_SECS)
         elif r.status_code == 429:
-            _set_backoff("opensky_meta", secs=BACKOFF_RATE_LIMIT_SECS)
-        elif r.status_code in (401, 403):
-            _set_backoff("opensky_meta", secs=BACKOFF_AUTH_SECS)
-    except Exception:
-        pass
+            _set_backoff("adsbdb_reg", secs=BACKOFF_RATE_LIMIT_SECS)
+        else:
+            _log_source_error("adsbdb:reg", RuntimeError(f"HTTP {r.status_code}"))
+    except Exception as _e:
+        _log_source_error("adsbdb:reg", _e)
 
 
 def get_aircraft_type(hex_code):
     """
     Aircraft type lookup priority:
       1. airplanes.live /v2/hex/{hex}  (best coverage, has desc field)
-      2. adsbdb /v0/aircraft/{hex}     (static DB, manufacturer + type)
-      3. OpenSky metadata /api/metadata/aircraft/icao/{hex}  (public, no token)
-      4. airplanes.live /v2/reg/{reg}  (by tail # when hex lookup misses)
-      5. FlightRadar24  get_flights(registration=reg)  (free last resort)
+      2. adsbdb /v0/aircraft/{hex}     (static DB, manufacturer + type + registration)
+      3. airplanes.live /v2/reg/{reg}  (by tail # when hex lookup misses)
+      4. FlightRadar24  get_flights(registration=reg)  (free last resort)
+    (OpenSky's /metadata/aircraft endpoint used to sit between 2 and 3; it now answers
+    410 Gone, so it was dropped.)
     Cache: type_string and source_label stored in the SQLite cache table.
     Returns (type_string, source_label).
 
     Registration side-effect: whenever a type is found but no reg is cached,
-    _try_opensky_reg() is called to fill in the tail # from OpenSky metadata.
+    _try_adsbdb_reg() is called to fill in the tail # from adsbdb.
     The result is cached permanently so it is only fetched once per hex code.
     """
     if not hex_code:
@@ -3521,7 +3795,7 @@ def get_aircraft_type(hex_code):
         if type_str:
             # Type is cached but reg may not be — fill it in opportunistically.
             if not _cache_db_get_reg(hex_code):
-                _try_opensky_reg(hex_code)
+                _try_adsbdb_reg(hex_code)
             return type_str, f"{ac_source}:cached"   # known type, still fresh
         return "", "miss:cached"                       # recent miss — don't retry all 3 APIs yet
 
@@ -3537,7 +3811,7 @@ def get_aircraft_type(hex_code):
                 if reg:
                     _cache_db_set_reg(hex_code, reg)   # permanent; hex → tail never changes
                 else:
-                    _try_opensky_reg(hex_code)         # airplanes.live has no 'r' — fall back to OpenSky metadata
+                    _try_adsbdb_reg(hex_code)          # airplanes.live has no 'r' — fall back to adsbdb
                 if plane:
                     _cache_db_set_aircraft(hex_code, plane, "airplanes.live", AIRCRAFT_CACHE_TTL)
                     return plane, "airplanes.live"
@@ -3548,7 +3822,14 @@ def get_aircraft_type(hex_code):
     try:
         r = _session.get(ADSBDB_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
         if r.status_code == 200:
-            ac = r.json().get("response", {}).get("aircraft", {})
+            _payload = r.json()
+            # Cache the registration regardless of whether a type is found — it's a
+            # permanent hex→tail mapping that benefits future sightings (and step 3).
+            _adsbdb_reg = _adsbdb_aircraft_reg(_payload)
+            if _adsbdb_reg and not _cache_db_get_reg(hex_code):
+                _cache_db_set_reg(hex_code, _adsbdb_reg)
+            _resp = _payload.get("response") if isinstance(_payload, dict) else None
+            ac = (_resp.get("aircraft") if isinstance(_resp, dict) else None) or {}
             manufacturer = ac.get("manufacturer", "") or ""
             type_name = ac.get("type", "") or ""
             plane = _translate_type(f"{manufacturer} {type_name}".strip())
@@ -3558,31 +3839,7 @@ def get_aircraft_type(hex_code):
     except Exception as _e:
         _log_source_error("adsbdb", _e)
 
-    # 3. OpenSky aircraft metadata (public endpoint — no token required)
-    # This endpoint returns both aircraft type AND registration, so we extract
-    # the registration here as a free fallback even when the type lookup misses.
-    if not _in_backoff("opensky_meta"):
-        try:
-            r = _session.get(OPENSKY_AIRCRAFT_URL.format(hex_code.lower()), timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                # Cache registration regardless of whether type is found — it's
-                # a permanent hex→tail mapping that benefits future sightings.
-                _meta_reg = (data.get("registration") or "").strip().upper()
-                if _meta_reg:
-                    _cache_db_set_reg(hex_code, _meta_reg)
-                plane = _translate_type((data.get("model") or data.get("typecode") or "").strip())
-                if plane:
-                    _cache_db_set_aircraft(hex_code, plane, "opensky:meta", AIRCRAFT_CACHE_TTL)
-                    return plane, "opensky:meta"
-            elif r.status_code == 429:
-                _set_backoff("opensky_meta", secs=BACKOFF_RATE_LIMIT_SECS)
-            elif r.status_code in (401, 403):
-                _set_backoff("opensky_meta", secs=BACKOFF_AUTH_SECS)
-        except Exception:
-            pass
-
-    # 4. airplanes.live /v2/reg/{reg} — fallback when hex-based lookup missed but
+    # 3. airplanes.live /v2/reg/{reg} — fallback when hex-based lookup missed but
     #    we know the registration (e.g. from fr24feed or the reg cache).
     #    Queries by tail # instead of live hex, so it works even when the aircraft
     #    isn't currently in airplanes.live's ADS-B feed.
@@ -3601,8 +3858,8 @@ def get_aircraft_type(hex_code):
         except Exception as _e:
             _log_source_error("airplanes.live:reg", _e)
 
-    # 5. FlightRadar24 — free, no key required.  Queries by registration so only
-    #    runs when a tail number is known (reg populated by step 4 above).
+    # 4. FlightRadar24 — free, no key required.  Queries by registration so only
+    #    runs when a tail number is known (the same reg step 3 used).
     #    Good last-resort for very new aircraft or foreign regs that static DBs miss.
     if reg and _FR24_AVAILABLE and not os.path.exists(FR24_DISABLED_FLAG):
         try:
