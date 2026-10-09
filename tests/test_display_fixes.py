@@ -294,6 +294,7 @@ def _sync_self():
     s._was_night = False
     s._cur_brightness = display.BRIGHTNESS
     s._reset_idle_scenes = mock.Mock()
+    s.reset_scene = mock.Mock()
     return s
 
 

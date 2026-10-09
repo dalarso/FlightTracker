@@ -460,10 +460,15 @@ def get_health():
         snap_age = max(0, int(time.time()) - int(h.get("ts", 0))) if h.get("ts") else None
         h["snapshot_age_sec"] = snap_age
         poll_age = h.get("last_poll_age_sec")
-        # Healthy = the display wrote a fresh snapshot AND a poll succeeded recently.
+        # Healthy = the display wrote a fresh snapshot AND a poll succeeded recently AND
+        # the render thread is alive with no logical stall (blank-panel deadlock guard).
+        disp = h.get("display") or {}
+        hb = disp.get("heartbeat_age_sec")
+        h["display_ok"] = bool(not disp or (hb is not None and hb < 90 and not disp.get("problem")))
         h["ok"] = bool(
             snap_age is not None and snap_age < 90
             and poll_age is not None and poll_age < 120
+            and h["display_ok"]
         )
     except Exception:
         h.setdefault("ok", False)

@@ -253,6 +253,7 @@ TYPE_LOOKUP_TIMEOUT  = 30   # seconds
 # re-poll instead of the display silently freezing on stale flight data forever.
 POLL_STALL_TIMEOUT   = 180  # seconds
 _WATCHDOG_INTERVAL   = 30   # seconds between watchdog ticks / health-file refreshes
+POLL_STARVE_LOG_SECS = 300  # no poll REQUESTED this long (display gate shut) -> log loudly
 APIS_DISABLED_FLAG    = "/tmp/ft_apis_disabled"   # combined kill-switch (AirLabs + AeroAPI)
 ADSBDB_DISABLED_FLAG  = "/tmp/ft_adsbdb_disabled"
 OPENSKY_DISABLED_FLAG = "/tmp/ft_opensky_disabled"
@@ -4144,6 +4145,8 @@ class Overhead:
         self._start_ts = time.time()
         self._last_poll_start_ts = 0.0   # when the in-flight poll began (0 = none yet)
         self._last_poll_ok_ts = 0.0      # when a poll last fully succeeded
+        self._display_status = None      # pushed 1 Hz by Display.display_selfcheck
+        self._starve_logged = False
         # Daemon watchdog: refreshes the health snapshot and clears a wedged _processing.
         Thread(target=self._watchdog, daemon=True).start()
 
@@ -4363,7 +4366,39 @@ class Overhead:
             "last_poll_age_sec":    int(now - last_ok) if last_ok else None,
             "active_threads":       active_count(),
             "cache_write_failures": cache.write_failure_count(),
+            "last_poll_start_age_sec": int(now - self._last_poll_start_ts) if self._last_poll_start_ts else None,
+            "display":              self._display_health(now),
         }
+
+    def set_display_status(self, status):
+        """Render-thread heartbeat + mode/stall summary (see Display.display_selfcheck)."""
+        with self._lock:
+            self._display_status = dict(status)
+
+    def _display_health(self, now):
+        with self._lock:
+            st = dict(self._display_status) if self._display_status else None
+        if st is None:
+            return None
+        st["heartbeat_age_sec"] = round(now - st.pop("ts", now), 1)
+        return st
+
+    def _log_if_starved(self, now=None):
+        """Loud, once-per-episode log when nobody has asked for a poll in a long time —
+        the display's poll gate (not the poll itself) is what froze on 2026-10-08, which
+        _clear_if_stalled can't see because _processing was False the whole night."""
+        now = now if now is not None else time.time()
+        with self._lock:
+            idle = (not self._processing and self._last_poll_start_ts
+                    and now - self._last_poll_start_ts > POLL_STARVE_LOG_SECS)
+            age = int(now - self._last_poll_start_ts) if self._last_poll_start_ts else 0
+        if idle and not self._starve_logged:
+            self._starve_logged = True
+            _log(f"[overhead] WATCHDOG: no poll requested for {age}s "
+                 f"(> {POLL_STARVE_LOG_SECS}s) — display poll gate stuck? display={self._display_health(now)}")
+        elif not idle:
+            self._starve_logged = False
+        return bool(idle)
 
     def health(self):
         """In-process liveness snapshot (also written to HEALTH_FILE for the web endpoint)."""
@@ -4408,6 +4443,7 @@ class Overhead:
             time.sleep(_WATCHDOG_INTERVAL)
             try:
                 self._clear_if_stalled()
+                self._log_if_starved()
                 self._write_health()
             except Exception:
                 pass

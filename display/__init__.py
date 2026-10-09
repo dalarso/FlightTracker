@@ -4,7 +4,7 @@ import time
 
 from setup import frames
 from utilities.animator import Animator
-from utilities.overhead import Overhead
+from utilities.overhead import Overhead, _log
 from utilities import planeding
 
 from scenes.weather import WeatherScene
@@ -67,9 +67,30 @@ try:
 except (ImportError, NameError):
     DATA_CHECK_INTERVAL = 2  # seconds between processed-data pickup checks
 
+try:
+    from config import MAX_DATA_HOLD_SECS
+except (ImportError, NameError):
+    # Upper bound on how long grab_new_data may hold a 2+-flight set waiting for
+    # _data_all_looped.  A marquee pass is (64 + 6*len(name) + 1) frames at 10 fps:
+    # p50 name 15 chars = 15.5 s, p99 32 = 25.7 s, longest seen 45 = 33.5 s (ft_flights.db,
+    # 29k sightings).  Observed concurrency is <=2 in-zone flights, so a real loop finishes
+    # in <=~70 s; 120 s never cuts a normal loop short, yet bounds how long ANY scene stall
+    # can freeze the flight data (2026-10-08: frozen 9 h).  Firing mid-loop is harmless:
+    # check_for_loaded_data's continue-in-place keeps the plane that is mid-scroll.
+    MAX_DATA_HOLD_SECS = 120
+
 # Clamp to safe minimums so KeyFrame.add(0) one-shot traps can't happen
 POLL_INTERVAL       = max(5, int(POLL_INTERVAL))
 DATA_CHECK_INTERVAL = max(1, int(DATA_CHECK_INTERVAL))
+MAX_DATA_HOLD_SECS  = max(2 * POLL_INTERVAL, int(MAX_DATA_HOLD_SECS))
+
+# Render self-check (display_selfcheck).  Logical stalls — the render loop is alive but
+# nothing it should be animating is moving — are invisible to a pure liveness heartbeat.
+STALL_DETECT_SECS = 5     # flights on screen but the marquee hasn't advanced for this long
+STALL_HEAL_EVERY  = 30    # re-attempt the soft heal at most this often during an episode
+STALL_CLEAR_SECS  = 60    # episode closes only after this long problem-free (hysteresis)
+STALL_EXIT_SECS   = 120   # still broken this long after the first heal -> exit for systemd
+STALL_EXIT_CODE   = 75    # non-zero so Restart=on-failure restarts (SIGTERM would not)
 
 PAUSE_FLAG  = "/tmp/ft_paused"
 NIGHT_FLAG  = "/tmp/ft_night"
@@ -149,6 +170,20 @@ class Display(
         # Time-bounded memory of recently-dinged flight keys → ding timestamp,
         # so brief ADS-B feed dropouts don't re-ding a plane that never left.
         self._recently_dinged = {}
+
+        # Poll-gate staleness cap (see MAX_DATA_HOLD_SECS) — the constructor just polled.
+        # Timed on the frame clock (_fsecs), not time.time(): the Pi has no RTC, and the
+        # boot-time NTP step (up to hours after a power cut) must not read as a stall.
+        self._last_grab_f = self._fsecs()
+        self._gate_hold_logged = False
+        self._force_poll = False      # set by the self-check's soft heal
+
+        # Render self-check episode state (see display_selfcheck).
+        self._stall_started = None    # first detection of the current episode
+        self._stall_last_seen = None  # last check that still saw the problem
+        self._stall_last_heal = None
+        self._stall_heals = 0
+        self._stall_heals_total = 0   # since process start (exposed in /api/health)
 
     def draw_square(self, x0, y0, x1, y1, colour):
         # Solid same-colour fill covering columns [x0, x1-1] × rows [y0, y1]
@@ -302,6 +337,9 @@ class Display(
             if self._was_paused:
                 # Transitioning back on — canvas is already blank from the
                 # last paused frame; reset states so everything redraws.
+                # reset_scene() re-runs the divisor-0 drawers (flight_details / journey
+                # only paint inside reset_scene) so the flight rows aren't left blank.
+                self.reset_scene()
                 self._reset_idle_scenes()
             elif night != self._was_night:
                 # Night mode toggled — force redraws so the brightness
@@ -331,10 +369,138 @@ class Display(
         #
         # Last, if our internal store of the data
         # is empty, try and grab data
+        #
+        # Staleness cap: never hold a 2+-flight set longer than MAX_DATA_HOLD_SECS.
+        # _data_all_looped is only set by plane_details finishing a pass, so ANY scene
+        # stall used to stop polling forever (2026-10-08: the panel froze on 2 flights).
+        now = self._fsecs()
+        gate_open = self._data_all_looped or len(self._data) <= 1
+        held = now - self._last_grab_f
         if not (self.overhead.processing and self.overhead.new_data) and (
-            self._data_all_looped or len(self._data) <= 1
+            gate_open or held >= MAX_DATA_HOLD_SECS or self._force_poll
         ):
+            self._force_poll = False
+            if not gate_open and not self._gate_hold_logged:
+                self._gate_hold_logged = True
+                _log(f"[display] poll gate held {held:.0f}s on {len(self._data)} flights "
+                     f"(index {self._data_index}, not all looped) — polling anyway")
+            elif gate_open:
+                self._gate_hold_logged = False
+            self._last_grab_f = now
             self.overhead.grab_data()
+
+    # ── Render self-check ──────────────────────────────────────────────────────
+    def _fsecs(self):
+        """Frame clock in seconds (frames / PER_SECOND).  Monotonic by construction and
+        unaffected by NTP steps; runs ~3% slow on the Pi (~0.103 s/frame), which only
+        stretches the cap/self-check windows by the same few percent."""
+        return getattr(self, "frame", 0) / frames.PER_SECOND
+
+    def _display_mode(self):
+        if self._paused:
+            return "paused"
+        if len(self._data):
+            return "flights"
+        if getattr(self, "_goal_celebration_active", False):
+            return "celebration"
+        if getattr(self, "_scoreboard_active", False):
+            return "scoreboard"
+        return "idle"
+
+    def _render_problem(self, now):
+        """Return a description of a LOGICAL render stall, or None.  The canvas can't be
+        read back (rgbmatrix has no GetPixel), so check the invariants instead: flights on
+        screen => the marquee is moving; a celebration flag never outlives its window; the
+        poll gate never starves."""
+        if self._paused:
+            return None
+        stalled_frames = self.frame - getattr(self, "_marquee_frame", self.frame)
+        if len(self._data) and stalled_frames > STALL_DETECT_SECS * frames.PER_SECOND:
+            return (f"{len(self._data)} flight(s) on screen but the marquee hasn't moved "
+                    f"for {stalled_frames / frames.PER_SECOND:.0f}s")
+        if (getattr(self, "_goal_celebration_active", False)
+                and now > getattr(self, "_celebration_until", 0.0) + STALL_DETECT_SECS):
+            return "celebration flag still set past its window"
+        # The cap is only evaluated on grab_new_data's POLL_INTERVAL tick, and frames run a
+        # little slower than nominal on the Pi (~0.103 s), so a capped poll can legitimately
+        # land ~MAX_DATA_HOLD_SECS + POLL_INTERVAL + a few s after the last one — keep a
+        # full extra poll interval plus slack before calling it a stall.
+        held = self._fsecs() - self._last_grab_f
+        if held > MAX_DATA_HOLD_SECS + 2 * POLL_INTERVAL + 10:
+            return f"no poll requested for {held:.0f}s"
+        return None
+
+    def _soft_heal(self):
+        """Put every scene back into a consistent, repaintable state: flights own the
+        canvas, any celebration flag is dropped (celebration_frame re-arms it if its window
+        is still open and no flights are up), every change-detecting scene repaints, and
+        the next grab_new_data tick polls."""
+        self._goal_celebration_active = False
+        self._force_poll = True
+        self.reset_scene()
+        self._reset_idle_scenes()
+
+    @Animator.KeyFrame.add(int(frames.PER_SECOND))
+    def display_selfcheck(self, count):
+        wall = time.time()
+        problem = self._render_problem(wall)   # check (b) compares wall-clock _celebration_until
+        # Episode timers run on the frame clock (immune to wall-clock steps in either
+        # direction); only the exported heartbeat/"stall_since" are wall-clock.
+        now = self._fsecs()
+        try:
+            self.overhead.set_display_status({
+                "ts": wall, "frame": self.frame, "mode": self._display_mode(),
+                "flights": len(self._data), "problem": problem,
+                "stall_since": (wall - (now - self._stall_started)
+                                if self._stall_started is not None else None),
+                "stall_heals": self._stall_heals,
+                "stall_heals_total": self._stall_heals_total,
+                "poll_gate_held_sec": int(now - self._last_grab_f),
+            })
+        except Exception:
+            pass
+
+        if problem is None:
+            if (self._stall_started is not None
+                    and now - self._stall_last_seen >= STALL_CLEAR_SECS):
+                _log(f"[display] SELF-CHECK: recovered after "
+                     f"{now - self._stall_started:.0f}s ({self._stall_heals} heal(s))")
+                self._stall_started = None
+                self._stall_last_heal = None
+                self._stall_heals = 0
+            return
+
+        self._stall_last_seen = now
+        if self._stall_started is None:
+            self._stall_started = now
+        elif now - self._stall_started >= STALL_EXIT_SECS:
+            _log(f"[display] SELF-CHECK FATAL: {problem}; unresolved for "
+                 f"{now - self._stall_started:.0f}s after {self._stall_heals} heal(s) — "
+                 f"exiting {STALL_EXIT_CODE} so systemd restarts the display")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            try:
+                # Blank the panel and give the refresh thread ~10 refresh cycles to latch
+                # the zeros, so no half-refreshed row stays lit for the ~7-8 s until
+                # systemd's restart re-initialises the matrix.
+                self.matrix.Clear()
+                time.sleep(0.05)
+            except Exception:
+                pass
+            os._exit(STALL_EXIT_CODE)     # os._exit: works from any thread, skips the
+                                          # per-keyframe `except Exception` in Animator.play
+        if self._stall_last_heal is None or now - self._stall_last_heal >= STALL_HEAL_EVERY:
+            self._stall_last_heal = now
+            self._stall_heals += 1
+            self._stall_heals_total += 1
+            _until = getattr(self, "_celebration_until", 0.0)
+            _log(f"[display] SELF-CHECK: {problem} — soft heal #{self._stall_heals} "
+                 f"(celebration={getattr(self, '_goal_celebration_active', None)} "
+                 f"until={(f'{_until - wall:+.0f}s' if _until else 'none')} "
+                 f"flights={len(self._data)} index={self._data_index} "
+                 f"looped={self._data_all_looped} pos={self.plane_position} "
+                 f"scoreboard={getattr(self, '_scoreboard_active', None)})")
+            self._soft_heal()
 
     @Animator.KeyFrame.add(int(frames.PER_SECOND * 2))
     def ping_plane_ding(self, count):

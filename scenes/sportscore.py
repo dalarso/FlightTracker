@@ -79,6 +79,14 @@ except Exception:
 
 
 # ── Shared scoreboard settings ────────────────────────────────────────────────
+def _clog(msg: str) -> None:
+    """Timestamped line in plane.log (same shape as overhead._log) for the celebration
+    lifecycle — arm / show / suspend / end.  Celebrations used to leave no trace, so the
+    2026-06-25 and 2026-10-08 blank-panel hangs could only be reconstructed afterwards."""
+    ts = datetime.datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [sportscore] {msg}", flush=True)
+
+
 def _cfg(name, default):
     try:
         import config
@@ -250,6 +258,7 @@ _SCORE_CHAR_PX    = 9    # approx px per char — 8×13B bold (actual DWIDTH=8; 
 # ── Poll intervals ─────────────────────────────────────────────────────────────
 _POLL_LIVE = 10    # seconds — active period
 _POLL_IDLE = 120   # seconds — pre/post/intermission
+_POLL_NO_GAME = 3600   # seconds — no game known yet (fetch failed or none today): re-check hourly
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
@@ -289,7 +298,10 @@ def _secs_until_pregame(start_time_utc: str) -> float:
 def _next_poll(game: dict | None, now_ts: float, ended_at: float | None = None) -> float:
     """Return the timestamp of the next poll for a slot given its current game."""
     if game is None:
-        return now_ts + _secs_until_midnight()
+        # No game known yet.  The fetchers return None both for "no game today" and for a
+        # transport/HTTP error, so re-check at least hourly: sleeping to midnight here meant
+        # ONE failed fetch right after a restart hid that sport's board and horn all day.
+        return now_ts + min(_secs_until_midnight(), _POLL_NO_GAME)
     state = game.get("state", "FUT")
     if state in ("LIVE", "CRIT"):
         return now_ts + _POLL_LIVE
@@ -323,15 +335,29 @@ def _poll_slot_async(slot: dict, now_ts: float) -> None:
     def _work():
         try:
             result = fetch_fn(team_id, _TZ)
+        except Exception:
+            result = None   # keep last-known game
+        try:
             if result is not None:
                 slot["game"]     = result
                 slot["poll_due"] = _next_poll(result, time.time(), slot["game_ended_at"])
+            else:
+                # Error or "no game": the up-front schedule may be a long sleep (to 00:05,
+                # or to a pre-game window computed from yesterday's game) — never wait
+                # longer than _POLL_NO_GAME on a fetch that returned nothing.
+                slot["poll_due"] = min(slot["poll_due"], time.time() + _POLL_NO_GAME)
         except Exception:
-            pass   # keep last-known game; poll_due already scheduled above
+            pass
         finally:
             slot["_inflight"] = False
 
-    threading.Thread(target=_work, daemon=True).start()
+    try:
+        threading.Thread(target=_work, daemon=True).start()
+    except Exception:
+        # Couldn't spawn the worker (e.g. thread exhaustion): clear the guard so the next
+        # tick retries — otherwise _inflight stays True and this sport never polls again.
+        slot["_inflight"] = False
+        raise
 
 
 def _score_x(score_str: str, is_team: bool, char_px: int = _SCORE_CHAR_PX) -> int:
@@ -625,7 +651,23 @@ class SportScoreScene(object):
         # overhead plane — the opposite of the documented priority.  The LAN horn already
         # fired when the celebration armed, so cutting the on-panel scroll short loses no
         # audio cue; the celebration simply doesn't draw while flights are present.
+        #
+        # SUSPEND, don't just skip: drop the active flag and reset_scene() so the flight
+        # scenes' divisor-0 drawers (flight_details / journey / journey_arrow) actually
+        # paint — they only draw inside reset_scene().  Returning while the flag stayed
+        # True was the 2026-10-08 deadlock: this early return also skipped the expiry
+        # cleanup below, nothing drew, plane_details never finished a pass, and with 2+
+        # flights grab_new_data stopped polling forever (panel black all night).
+        # _celebration_until is left alone, so if the flyover ends inside the window the
+        # init branch below re-arms and the scroll resumes; otherwise the board returns.
         if len(self._data):
+            if self._goal_celebration_active:
+                self._goal_celebration_active = False
+                _left = self._celebration_until - time.time()
+                _clog(f"celebration {self._celebration_text!r} suspended — {len(self._data)} "
+                      f"flight(s) overhead ({max(0, _left):.0f}s of its window left)")
+                self._reset_sport_draws()
+                self.reset_scene()
             return
 
         now_ts = time.time()
@@ -633,12 +675,15 @@ class SportScoreScene(object):
         if now_ts >= self._celebration_until:
             if self._goal_celebration_active:
                 self._goal_celebration_active = False
+                _clog(f"celebration {self._celebration_text!r} ended")
                 self._reset_sport_draws()
                 self.reset_scene()
             return
 
         # ── First frame: initialise ────────────────────────────────────────────
         if not self._goal_celebration_active:
+            _clog(f"celebration {self._celebration_text!r} on screen "
+                  f"({self._celebration_until - now_ts:.0f}s left)")
             self._goal_celebration_active   = True
             self._scoreboard_active    = True
             self._celebration_scroll_x = screen.WIDTH
@@ -700,6 +745,7 @@ class SportScoreScene(object):
                 and str(self._celebration_game_id) == dismissed_id
                 and now_ts < self._celebration_until):
             self._celebration_until = 0.0
+            _clog(f"celebration {self._celebration_text!r} cut short — game {dismissed_id} hidden")
 
         # Stamp the post-game window start BEFORE _send_state reads it, so a FINAL that
         # actually ended hours ago (e.g. process restarted long after the buzzer) is
@@ -825,6 +871,8 @@ class SportScoreScene(object):
                     self._celebration_game_id  = game.get("game_id")
                     slot["win_shown"]          = True
                     _nudge_horn("WIN", slot, game, game.get("team_score", 0))   # LAN win sound (NHL only)
+                    _clog(f"celebration armed: {self._celebration_text!r} for {WIN_CELEBRATION_SECONDS}s "
+                          f"(game {self._celebration_game_id}, {game.get('team_score', 0)}-{game.get('opp_score', 0)})")
 
         # ── Find highest-priority displayable game ─────────────────────────────
         # Shared selection contract with the web side (utilities.scoreboard_select):
@@ -885,6 +933,8 @@ class SportScoreScene(object):
             self._celebration_scroll_x = screen.WIDTH
             self._celebration_game_id  = game.get("game_id")
             _nudge_horn("GOAL", active_slot, game, new_score)   # LAN horn, in sync (NHL only)
+            _clog(f"celebration armed: {self._celebration_text!r} for {GOAL_CELEBRATION_SECONDS}s "
+                  f"(game {self._celebration_game_id}, {new_score}-{game.get('opp_score', 0)})")
         active_slot["last_team_score"] = new_score
 
         # Yield to upcoming celebration
@@ -909,6 +959,8 @@ class SportScoreScene(object):
         if not self._scoreboard_active or slot_changed or draw_key != active_slot["last_draw"]:
             self._scoreboard_active    = True
             self._active_slot          = active_slot
-            active_slot["last_draw"]   = draw_key
             self.reset_scene()
             self._draw_score(active_slot, game)
+            # Record the key only AFTER a successful paint: if _draw_score raised, the next
+            # tick retries instead of leaving the board blank until the score changes.
+            active_slot["last_draw"]   = draw_key

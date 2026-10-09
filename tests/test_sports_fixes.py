@@ -174,6 +174,26 @@ class CelebrationYieldsToFlights(unittest.TestCase):
             h.celebration_tick(0)
         h.scene.canvas.Clear.assert_not_called()   # flight scenes keep the canvas
 
+    def test_flights_suspend_an_active_celebration(self):
+        # 2026-10-08 deadlock: celebration_frame used to return on flights while leaving
+        # _goal_celebration_active True (the flight scenes yielded to that flag, so nothing
+        # drew and polling stalled).  With flights overhead the flag must drop and the scene
+        # reset once so the reset-only flight drawers paint — whether the window is still
+        # open (suspended: _celebration_until kept so it can resume) or already expired.
+        for until_offset in (100, -5):
+            slot = _make_slot()
+            with _SceneHarness([slot]) as h:
+                h.scene._goal_celebration_active = True
+                h.scene._celebration_until = until = h.clock.t + until_offset
+                h.scene._celebration_text = "VGK GOAL!"
+                h.scene._data = [{"callsign": "AAL1", "hex": "abc"}]
+                h.celebration_tick(0)
+                self.assertFalse(h.scene._goal_celebration_active)
+                h.scene.reset_scene.assert_called_once()
+                self.assertEqual(h.scene._celebration_until, until)
+                h.celebration_tick(1)                     # next frame: nothing more to do
+                h.scene.reset_scene.assert_called_once()
+
     def test_board_flight_guard_runs_before_celebration_block(self):
         # _sports_score must treat flights as top priority even when a celebration is
         # active: with a plane overhead it resets sport draws and returns, rather than
@@ -457,6 +477,83 @@ class NhlCritState(unittest.TestCase):
         self.assertIsNotNone(g)
         self.assertEqual(g["state"], "CRIT")
         self.assertEqual((g["team_score"], g["opp_score"]), (2, 2))
+
+
+class SportsPollRecovery(unittest.TestCase):
+    """A failed first fetch must not park a sport until midnight, and a worker that can't
+    be started must not wedge the slot's _inflight guard."""
+
+    def test_no_game_known_rechecks_within_an_hour(self):
+        now = 1_000_000.0
+        with mock.patch.object(sportscore, "_secs_until_midnight", return_value=20 * 3600):
+            self.assertLessEqual(sportscore._next_poll(None, now) - now, 3600)
+        with mock.patch.object(sportscore, "_secs_until_midnight", return_value=600):
+            self.assertEqual(sportscore._next_poll(None, now) - now, 600)   # midnight sooner
+        self.assertEqual(sportscore._next_poll(_game("LIVE"), now) - now, sportscore._POLL_LIVE)
+
+    def test_failed_fetch_after_restart_reschedules_within_an_hour(self):
+        slot = _make_slot()
+        slot["fetch_fn"] = lambda *_a: None            # transport error -> None
+        now = 1_000_000.0
+        with mock.patch.object(sportscore, "_secs_until_midnight", return_value=20 * 3600), \
+             mock.patch.object(sportscore.threading, "Thread") as T:
+            T.return_value.start.side_effect = lambda: T.call_args.kwargs["target"]()
+            sportscore._poll_slot_async(slot, now)
+        self.assertLessEqual(slot["poll_due"] - now, 3600)
+        self.assertFalse(slot["_inflight"])
+
+    def test_failed_rollover_fetch_on_a_stale_final_rechecks_within_an_hour(self):
+        # Slot still holds yesterday's FINAL (post-game window over): the up-front schedule
+        # is the next 00:05.  A failed/empty fetch must not sleep the whole game day.
+        slot = _make_slot()
+        slot["game"] = _game("FINAL", 3, 1)
+        now = 1_000_000.0
+        slot["game_ended_at"] = now - 10 * 3600
+        slot["fetch_fn"] = lambda *_a: None
+        with mock.patch.object(sportscore, "_secs_until_midnight", return_value=23 * 3600), \
+             mock.patch.object(sportscore.time, "time", return_value=now), \
+             mock.patch.object(sportscore.threading, "Thread") as T:
+            T.return_value.start.side_effect = lambda: T.call_args.kwargs["target"]()
+            sportscore._poll_slot_async(slot, now)
+        self.assertLessEqual(slot["poll_due"] - now, sportscore._POLL_NO_GAME)
+        self.assertEqual(slot["game"]["state"], "FINAL")     # last-known game kept
+        self.assertFalse(slot["_inflight"])
+
+    def test_live_fetch_error_keeps_the_short_live_retry(self):
+        slot = _make_slot()
+        slot["game"] = _game("LIVE", 1, 0)
+        now = 1_000_000.0
+        slot["fetch_fn"] = lambda *_a: (_ for _ in ()).throw(RuntimeError("timeout"))
+        with mock.patch.object(sportscore.time, "time", return_value=now), \
+             mock.patch.object(sportscore.threading, "Thread") as T:
+            T.return_value.start.side_effect = lambda: T.call_args.kwargs["target"]()
+            sportscore._poll_slot_async(slot, now)
+        self.assertEqual(slot["poll_due"] - now, sportscore._POLL_LIVE)
+
+    def test_thread_start_failure_clears_inflight(self):
+        slot = _make_slot()
+        with mock.patch.object(sportscore.threading, "Thread") as T:
+            T.return_value.start.side_effect = RuntimeError("can't start new thread")
+            with self.assertRaises(RuntimeError):
+                sportscore._poll_slot_async(slot, 1_000_000.0)
+        self.assertFalse(slot["_inflight"])          # next tick can retry
+
+
+class BoardDrawKeyAfterPaint(unittest.TestCase):
+    def test_failed_paint_is_retried_next_tick(self):
+        # last_draw used to be recorded BEFORE _draw_score, so a raising paint left the
+        # board blank until the score changed.
+        slot = _make_slot()
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, _game("LIVE", 1, 0, period_label="1st"))
+            with mock.patch.object(h.scene, "_draw_score", side_effect=RuntimeError("font")):
+                with self.assertRaises(RuntimeError):
+                    h.tick()
+            self.assertIsNone(slot["last_draw"])
+            with mock.patch.object(h.scene, "_draw_score") as paint:
+                h.tick()
+            paint.assert_called_once()
+            self.assertIsNotNone(slot["last_draw"])
 
 
 if __name__ == "__main__":

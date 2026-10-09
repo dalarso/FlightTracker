@@ -45,9 +45,9 @@ class JourneyScene(object):
         if len(self._data) == 0:
             return
 
-        # Yield canvas to goal celebration animation
-        if getattr(self, "_goal_celebration_active", False):
-            return
+        # NOTE: no `_goal_celebration_active` yield here — flights always own the canvas
+        # (celebration_frame suspends itself when flights appear).  Yielding here too was
+        # one half of the 2026-10-08 mutual-yield deadlock that blanked the panel.
 
         # .get() not bare [] — a malformed/partial flight dict (missing origin/destination)
         # must degrade to the blank filler, not raise KeyError that the animator swallows
@@ -93,9 +93,9 @@ class JourneyScene(object):
         if len(self._data) == 0:
             return
 
-        # Yield canvas to goal celebration animation
-        if getattr(self, "_goal_celebration_active", False):
-            return
+        # NOTE: no `_goal_celebration_active` yield here — flights always own the canvas
+        # (celebration_frame suspends itself when flights appear).  Yielding here too was
+        # one half of the 2026-10-08 mutual-yield deadlock that blanked the panel.
 
         # Black area before arrow
         self.draw_square(

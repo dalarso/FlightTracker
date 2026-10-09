@@ -51,8 +51,14 @@ class Animator(object):
                     self._reset_keyframes.append(method)
 
     def reset_scene(self):
+        # Isolate each reset drawer like play() isolates frame keyframes: one raising
+        # divisor-0 drawer must not skip the others (leaving rows blank) or abort the
+        # caller's follow-up code (e.g. the scoreboard paint right after reset_scene()).
         for keyframe in self._reset_keyframes:
-            keyframe()
+            try:
+                keyframe()
+            except Exception:
+                self._log_keyframe_error(keyframe)
 
     def play(self):
         while True:
