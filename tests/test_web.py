@@ -197,16 +197,25 @@ class Fr24AgreementEndpoint(unittest.TestCase):
             p.unlink()
         self._dir.rmdir()
 
-    def _seed(self, rows):
+    def _seed(self, rows, tie_break_cols=True):
         conn = sqlite3.connect(str(self._db))
-        conn.execute("""CREATE TABLE IF NOT EXISTS fr24_checks (
+        _extra = (", referee TEXT NOT NULL DEFAULT '', referee_route TEXT NOT NULL DEFAULT '',"
+                  " shown_route TEXT NOT NULL DEFAULT ''") if tie_break_cols else ""
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS fr24_checks (
             id INTEGER PRIMARY KEY AUTOINCREMENT, seen_at TEXT NOT NULL, date TEXT NOT NULL,
             callsign TEXT NOT NULL DEFAULT '', registration TEXT NOT NULL DEFAULT '',
             fr24_route TEXT NOT NULL DEFAULT '', other_route TEXT NOT NULL DEFAULT '',
-            other_source TEXT NOT NULL DEFAULT '', matched INTEGER NOT NULL DEFAULT 0)""")
-        conn.executemany(
-            "INSERT INTO fr24_checks (seen_at,date,callsign,registration,fr24_route,"
-            "other_route,other_source,matched) VALUES (?,?,?,?,?,?,?,?)", rows)
+            other_source TEXT NOT NULL DEFAULT '', matched INTEGER NOT NULL DEFAULT 0{_extra})""")
+        if tie_break_cols:
+            rows = [r if len(r) == 11 else r + ("", "", "") for r in rows]
+            conn.executemany(
+                "INSERT INTO fr24_checks (seen_at,date,callsign,registration,fr24_route,"
+                "other_route,other_source,matched,referee,referee_route,shown_route)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+        else:
+            conn.executemany(
+                "INSERT INTO fr24_checks (seen_at,date,callsign,registration,fr24_route,"
+                "other_route,other_source,matched) VALUES (?,?,?,?,?,?,?,?)", rows)
         conn.commit()
         conn.close()
 
@@ -219,7 +228,8 @@ class Fr24AgreementEndpoint(unittest.TestCase):
         today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
         self._seed([
             (f"{today} 09:00:00", today, "SWA1", "N1", "LAS->DEN", "LAS->DEN", "airlabs", 1),
-            (f"{today} 09:05:00", today, "SWA2", "N2", "LAS->MDW", "LAS->BNA", "airlabs", 0),
+            (f"{today} 09:05:00", today, "SWA2", "N2", "LAS->MDW", "LAS->BNA", "airlabs", 0,
+             "fr24", "LAS->MDW", "LAS->MDW"),
             (f"{today} 09:10:00", today, "SWA3", "N3", "LAS->OAK", "LAS->OAK", "cache", 1),
             (f"{today} 09:15:00", today, "AAL4", "N4", "LAS->SEA", "ORD->LAS", "aeroapi", 0),
             ("2025-01-01 09:00:00", "2025-01-01", "OLD1", "N9", "LAS->X", "LAS->Y", "airlabs", 0),
@@ -234,6 +244,23 @@ class Fr24AgreementEndpoint(unittest.TestCase):
         self.assertEqual([r["callsign"] for r in d["last_mismatches"]], ["AAL4", "SWA2"])
         self.assertEqual(d["last_mismatches"][0]["other_source"], "aeroapi")
         self.assertEqual(d["daily"], [{"date": today, "total": 4, "matches": 2}])
+        # AeroAPI's tie-break verdicts and what the board showed
+        self.assertEqual(d["tie_breaks"], {"fr24": 1})
+        swa2 = d["last_mismatches"][1]
+        self.assertEqual((swa2["referee"], swa2["referee_route"], swa2["shown_route"]),
+                         ("fr24", "LAS->MDW", "LAS->MDW"))
+
+    def test_table_without_tie_break_columns_still_serves(self):
+        # The display service adds the tie-break columns when it starts; the web service may
+        # read the table before that — it must report them blank, not fail.
+        today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+        self._seed([(f"{today} 09:05:00", today, "SWA2", "N2", "LAS->MDW", "LAS->BNA", "airlabs", 0)],
+                   tie_break_cols=False)
+        r = self.client.get("/api/fr24-agreement")
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertEqual(d["tie_breaks"], {})
+        self.assertEqual(d["last_mismatches"][0]["referee"], "")
 
 
 class RouteSourceBuckets(unittest.TestCase):

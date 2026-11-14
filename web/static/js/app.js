@@ -1932,6 +1932,14 @@ function _drawAccCharts(el, charts) {
 // What FR24 was compared against: a paid API's live answer, or the 7-day route cache.
 const _CHECK_SOURCES = { airlabs: 'AirLabs', airlabs2: 'AirLabs 2', aeroapi: 'AeroAPI', cache: 'Route cache' };
 
+// AeroAPI's tie-break verdicts, as the card words them.
+function _verdictLabel(v, other) {
+  if (v === 'fr24') return 'backs FR24';
+  if (v === 'other') return `backs ${other}`;
+  if (v === 'split') return 'no clear answer';
+  return '';
+}
+
 function renderFr24Agreement(d) {
   const el = $('fr24-agree-content');
   if (!el) return;
@@ -1948,12 +1956,25 @@ function renderFr24Agreement(d) {
     html += `<p class="acc-meta acc-split">${bySrc.map(([k, v]) =>
       `vs ${escHtml(_CHECK_SOURCES[k] || k)}: <strong>${escHtml(v.pct)}%</strong> of ${_fmtInt(v.total)}`).join(' · ')}</p>`;
   }
+  const tb = d.tie_breaks || {};
+  const tbTotal = _num(tb.fr24) + _num(tb.other) + _num(tb.split);
+  if (tbTotal) {
+    html += `<p class="acc-meta acc-split">AeroAPI broke ${_plural(tbTotal, 'tie')}: backed FR24 <strong>${_fmtInt(_num(tb.fr24))}</strong> · backed the other source <strong>${_fmtInt(_num(tb.other))}</strong> · no clear answer <strong>${_fmtInt(_num(tb.split))}</strong></p>`;
+  }
   const mm = d.last_mismatches || [];
   if (mm.length) {
-    html += `<h3 class="subhead">Recent disagreements <span class="label-note">the board showed FR24's route</span></h3>
+    const cell = (route, shown, sub) =>
+      `<td class="mono ${route && route === shown ? 'tone-accent' : 'muted'}">${escHtml(route || '—')}${sub ? `<span class="sub">${escHtml(sub)}</span>` : ''}</td>`;
+    html += `<h3 class="subhead">Recent disagreements <span class="label-note">highlighted: what the board showed</span></h3>
       <div class="table-scroll"><table class="data-table">
-        <thead><tr><th>Time</th><th>Flight</th><th>FR24</th><th>Other</th><th>Source</th></tr></thead>
-        <tbody>${mm.map(r => `<tr><td class="muted c-time">${escHtml(_stamp(r.seen_at))}</td><td class="mono-strong">${escHtml(r.callsign || r.registration || '')}</td><td class="mono tone-accent">${escHtml(r.fr24_route)}</td><td class="mono muted">${escHtml(r.other_route)}</td><td class="muted">${escHtml(_CHECK_SOURCES[r.other_source] || r.other_source || '')}</td></tr>`).join('')}</tbody>
+        <thead><tr><th>Time</th><th>Flight</th><th>FR24</th><th>Other</th><th>AeroAPI</th></tr></thead>
+        <tbody>${mm.map(r => {
+          const other = _CHECK_SOURCES[r.other_source] || r.other_source || '';
+          return `<tr><td class="muted c-time">${escHtml(_stamp(r.seen_at))}</td><td class="mono-strong">${escHtml(r.callsign || r.registration || '')}</td>`
+            + cell(r.fr24_route, r.shown_route, '')
+            + cell(r.other_route, r.shown_route, other)
+            + `<td class="mono muted">${escHtml(r.referee_route || '—')}${r.referee ? `<span class="sub">${escHtml(_verdictLabel(r.referee, other))}</span>` : ''}</td></tr>`;
+        }).join('')}</tbody>
       </table></div>`;
   }
   el.innerHTML = html;

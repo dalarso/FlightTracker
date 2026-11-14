@@ -243,6 +243,10 @@ RATE_LIMIT_DELAY   = 1
 # reshaped) backs it off briefly: the paid APIs and the route caches carry on meanwhile
 # instead of every new flight waiting out an FR24 timeout.
 FR24_ERROR_BACKOFF_SECS = 300
+# FR24 is read live once per pass of a flight: its answer is memoised per callsign only long
+# enough to cover the pass, so the ~15 s polls of a plane overhead don't re-ask it.  (The
+# 7-day resolved cache, which spares the paid APIs, is separate — see get_route.)
+FR24_ROUTE_TTL = 600
 FLIGHT_DATA_FILE   = "/tmp/ft_data.json"
 HEALTH_FILE        = "/tmp/ft_health.json"   # liveness snapshot for the web /api/health endpoint
 
@@ -495,9 +499,17 @@ def _init_db() -> None:
                 fr24_route   TEXT NOT NULL DEFAULT '',
                 other_route  TEXT NOT NULL DEFAULT '',
                 other_source TEXT NOT NULL DEFAULT '',
-                matched      INTEGER NOT NULL DEFAULT 0
+                matched      INTEGER NOT NULL DEFAULT 0,
+                referee       TEXT NOT NULL DEFAULT '',
+                referee_route TEXT NOT NULL DEFAULT '',
+                shown_route   TEXT NOT NULL DEFAULT ''
             )
         """)
+        # Tie-breaker columns, added after the table first shipped (2026-11-14).
+        _fc_cols = {r[1] for r in conn.execute("PRAGMA table_info(fr24_checks)")}
+        for _col in ("referee", "referee_route", "shown_route"):
+            if _col not in _fc_cols:
+                conn.execute(f"ALTER TABLE fr24_checks ADD COLUMN {_col} TEXT NOT NULL DEFAULT ''")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fr24c_date ON fr24_checks(date)"
         )
@@ -792,12 +804,17 @@ def _routes_agree(o1: str, d1: str, o2: str, d2: str):
 
 
 def _record_fr24_check(callsign: str, registration: str, fr24_route: str,
-                       other_route: str, other_source: str, matched: bool) -> None:
+                       other_route: str, other_source: str, matched: bool,
+                       referee: str = "", referee_route: str = "",
+                       shown_route: str = "") -> None:
     """
     Persist one FR24-vs-paid comparison to fr24_checks (the Stats page "FR24 vs paid
     APIs" card).  FR24 is asked for every flight; when a paid API (AirLabs / AeroAPI) or
     the resolved-route cache also has the route, this records whether they agree.
-    other_source is 'airlabs', 'airlabs2', 'aeroapi' or 'cache'.
+    other_source is 'airlabs', 'airlabs2', 'aeroapi' or 'cache'.  On a disagreement
+    AeroAPI is asked as the tie-breaker: referee is 'fr24' or 'other' (the side its route
+    matched) or 'split' (no clear answer), referee_route its route, and shown_route what
+    the display showed.
     Deduplicates: the same (fr24_route, other_route) pair for a callsign is recorded
     once per _FREE_API_CHECK_DEDUP_SECS window, so a lingering flight's repeat polls
     don't inflate the counts.  Runs under _stats_lock using _db_conn (same
@@ -819,11 +836,13 @@ def _record_fr24_check(callsign: str, registration: str, fr24_route: str,
             _db_conn.execute(
                 """INSERT INTO fr24_checks
                        (seen_at, date, callsign, registration, fr24_route,
-                        other_route, other_source, matched)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        other_route, other_source, matched,
+                        referee, referee_route, shown_route)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (_seen, _date, callsign or "", registration or "",
                  fr24_route or "", other_route or "", other_source or "",
-                 1 if matched else 0),
+                 1 if matched else 0,
+                 referee or "", referee_route or "", shown_route or ""),
             )
             _db_conn.commit()
     except Exception:
@@ -2195,7 +2214,8 @@ def _query_fr24(callsign, hex_code, registration, plane_lat, plane_lon):
     """Fetch this flight's route from FlightRadar24 by tail number — the PRIMARY source,
     asked for every flight (it's free).
 
-    Pure fetch: cache read (keyed by callsign, so each flight is asked once per pass),
+    Pure fetch: memo read (keyed by callsign, FR24_ROUTE_TTL, so each flight is read live
+    once per pass),
     FlightRadarAPI get_flights(registration=...) preferring an airborne result, aircraft
     type harvested into the type cache as a side effect, cache write, then a geometry-
     parity reject that negatively caches an implausible leg.  Returns (origin, dest, src);
@@ -2205,16 +2225,18 @@ def _query_fr24(callsign, hex_code, registration, plane_lat, plane_lon):
     FR24_ERROR_BACKOFF_SECS so the paid APIs and caches carry on without waiting on it.
     Commit / compare / select stay with the caller.
     """
-    if not (registration and _FR24_AVAILABLE
-            and not os.path.exists(FR24_DISABLED_FLAG) and not _in_backoff("fr24")):
+    if not (registration and _FR24_AVAILABLE and not os.path.exists(FR24_DISABLED_FLAG)):
         return "", "", ""
     _key = f"fr24:{callsign or registration}"
     _fr24_origin = _fr24_dest = ""
     _cached = _cache_db_get_route(_key, 'route')
     if _cached:
+        # This pass's answer, already read live (still used while FR24 is backing off).
         _fr24_origin = _cached[0] or ""
         _fr24_dest   = _cached[1] or ""
         _fr24_src    = "fr24:cached"
+    elif _in_backoff("fr24"):
+        return "", "", ""
     else:
         _fr24_src = "fr24"
         _fr24_f = None
@@ -2244,14 +2266,13 @@ def _query_fr24(callsign, hex_code, registration, plane_lat, plane_lon):
         except Exception as e:
             _log(f"[fr24] {callsign} ({registration}): request error — {e}")
             _set_backoff("fr24", secs=FR24_ERROR_BACKOFF_SECS)
-        # Unconditional cache write outside try — prevents per-poll retries on a persistent
-        # failure.  A route is kept for ROUTE_TTL_DEFAULT (one pass of the flight; the next
-        # day's flight with the same number is asked again).  A grounded-only result (the
-        # tail's last flight, not this one) or no data gets the short miss TTL so a newly
-        # tracked flight is re-asked soon.
+        # Unconditional memo write outside try — prevents per-poll retries on a persistent
+        # failure.  A route is kept for FR24_ROUTE_TTL (one pass of the flight).  A grounded-
+        # only result (the tail's last flight, not this one) or no data gets the short miss
+        # TTL so a newly tracked flight is re-asked soon.
         _fr24_grounded = _fr24_f is not None and not _fr24_active
         _fr24_ttl = (ROUTE_MISS_TTL if (_fr24_grounded or not (_fr24_origin or _fr24_dest))
-                     else ROUTE_TTL_DEFAULT)
+                     else FR24_ROUTE_TTL)
         _cache_db_set_route(_key, 'route', _fr24_origin, _fr24_dest,
                             None, None, None, None,
                             int(time.time()) + _fr24_ttl, source="fr24")
@@ -2372,9 +2393,12 @@ def _route_record_paid_miss(ctx):
     )
     paid_returned_nothing = not (ctx.al_origin or ctx.al_dest or ctx.al2_origin or ctx.al2_dest
                                  or ctx.fa_origin or ctx.fa_dest)
+    # When FR24 already had the whole route AeroAPI isn't asked (ctx._fa_skipped), so an
+    # empty AirLabs is the paid miss: suppressing it keeps a lingering flight from re-asking
+    # AirLabs every few minutes for a route FR24 has.
     if (paid_returned_nothing and ctx._need_airlabs and ctx.callsign
             and (airlabs_eligible or airlabs2_eligible)
-            and aeroapi_eligible):
+            and (aeroapi_eligible or ctx._fa_skipped)):
         _cache_db_set_paid_miss(ctx.callsign)
         _log(f"[route] {ctx.callsign}: all paid APIs returned empty — suppressing for {ROUTE_PAID_MISS_TTL // 3600}h")
 
@@ -2726,6 +2750,128 @@ def _route_aeroapi_tier(ctx):
         # else: in backoff — already logged when backoff was set
 
 
+def _fr24_complete(ctx):
+    """FR24 has this flight's whole route: both endpoints, geometry-checked (in _query_fr24),
+    and not the airframe's previous leg (departure veto)."""
+    _fo, _fd = _norm_code(ctx._fr24_origin), _norm_code(ctx._fr24_dest)
+    return bool(_fo and _fd) and not _vetoes_inbound(ctx, _fo, _fd)
+
+
+def _aeroapi_referee(ctx):
+    """Ask AeroAPI to break a tie between FR24 and another trusted answer (AirLabs, or the
+    7-day resolved cache).  Always a LIVE answer — never AeroAPI's own 7-day route cache,
+    which may hold the very route being judged — remembered for this flight for
+    ROUTE_TTL_DEFAULT, so a lingering flight costs one call per pass, not one per poll.
+    Returns (origin, dest, live): ("", "", False) when AeroAPI can't be asked (no key,
+    disabled, paid APIs skipped for this callsign, backing off) or had nothing plausible."""
+    if not (FLIGHTAWARE_API_KEY and ctx.callsign and not ctx._apis_disabled
+            and not os.path.exists(AEROAPI_DISABLED_FLAG)):
+        return "", "", False
+    if (ctx._skip_paid or ctx._override_partial or _skip_paid_apis(ctx.callsign)
+            or _cache_db_check_paid_miss(ctx.callsign)):
+        return "", "", False
+    _key = f"referee:{ctx.callsign}"
+    _cached = _cache_db_get_route(_key, 'route')
+    if _cached:
+        return _cached[0] or "", _cached[1] or "", False
+    _check_period_reset("aeroapi", AEROAPI_RESET_DAY)
+    _restore_persisted_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY)
+    if _in_backoff("aeroapi"):
+        return "", "", False
+    _o = _d = ""
+    _ttl = ROUTE_TTL_DEFAULT
+    try:
+        r = _session.get(AEROAPI_URL.format(ctx.callsign.strip()),
+                         headers={"x-apikey": FLIGHTAWARE_API_KEY}, timeout=10)
+        if r.status_code == 429:
+            _set_backoff("aeroapi", secs=BACKOFF_RATE_LIMIT_SECS)
+            return "", "", False
+        if r.status_code == 402:
+            _set_quota_backoff("aeroapi", AEROAPI_USAGE_FILE, AEROAPI_RESET_DAY,
+                               "aeroapi", f"{ctx.callsign}: 402 — over budget / no credit remaining")
+            return "", "", False
+        if r.status_code in (401, 403):
+            _set_backoff("aeroapi", secs=BACKOFF_AUTH_SECS)
+            _log(f"[aeroapi] auth error ({r.status_code}) — check FLIGHTAWARE_API_KEY")
+            return "", "", False
+        if r.status_code == 200:
+            _f = _aeroapi_pick_flight(r.json().get("flights", []))
+            _aeroapi_increment()  # logs running spend
+            if _f:
+                _fo = _f.get("origin") or {}
+                _fd = _f.get("destination") or {}
+                _o = _fo.get("code_iata", "") or ""
+                _d = _fd.get("code_iata", "") or ""
+                _remember_airport(_o, _fo.get("latitude"), _fo.get("longitude"))
+                _remember_airport(_d, _fd.get("latitude"), _fd.get("longitude"))
+                if (_o or _d) and not _route_plausible(
+                        ctx.plane_lat, ctx.plane_lon, _fo.get("latitude"), _fo.get("longitude"),
+                        _fd.get("latitude"), _fd.get("longitude")):
+                    _log(f"[aeroapi] {ctx.callsign}: tie-break answer {_o or '?'}->{_d or '?'} "
+                         f"is implausible here — ignored")
+                    _o = _d = ""
+        else:
+            _log(f"[aeroapi] unexpected status {r.status_code} for {ctx.callsign} (tie-break)")
+    except Exception as e:
+        _log(f"[aeroapi] {ctx.callsign}: tie-break request error — {e}")
+        _ttl = ROUTE_MISS_TTL   # transient: retry on a later poll, not every poll
+    _cache_db_set_route(_key, 'route', _o, _d, None, None, None, None,
+                        int(time.time()) + _ttl, source="aeroapi")
+    return _o, _d, True
+
+
+def _referee_verdict(ctx, fr24, other, ref):
+    """Which side the tie-breaker's route backs: 'fr24', 'other', or 'split' when it has no
+    complete, usable route of its own, or matches neither side (or both)."""
+    _ro, _rd = _norm_code(ref[0]), _norm_code(ref[1])
+    if not (_ro and _rd) or _vetoes_inbound(ctx, _ro, _rd):
+        return "split"
+    _f = _routes_agree(_ro, _rd, fr24[0], fr24[1])
+    _x = _routes_agree(_ro, _rd, other[0], other[1])
+    if _f and not _x:
+        return "fr24"
+    if _x and not _f:
+        return "other"
+    return "split"
+
+
+_VERDICT_TEXT = {"fr24": "backs FR24", "other": "backs {src}", "split": "settles nothing"}
+
+
+def _route_tie_break_airlabs(ctx):
+    """§3 when FR24 already has this flight's whole route: AeroAPI isn't asked to repeat it,
+    only to break a tie — when AirLabs has a usable route that disagrees with FR24's.  Its
+    answer becomes the AeroAPI candidate (fa_origin/fa_dest) and the verdict is left in
+    ctx._referee for _route_select_authority and the Stats record."""
+    ctx._fa_skipped = True
+    ctx.fa_origin = ctx.fa_dest = ""
+    ctx._cached_fa = None
+    _al = []
+    if ctx.al_origin or ctx.al_dest:
+        _al.append(_Cand(_norm_code(ctx.al_origin), _norm_code(ctx.al_dest),
+                         ctx.al_olat, ctx.al_olon, ctx.al_dlat, ctx.al_dlon, "airlabs"))
+    if ctx.al2_origin or ctx.al2_dest:
+        _al.append(_Cand(_norm_code(ctx.al2_origin), _norm_code(ctx.al2_dest),
+                         ctx.al2_olat, ctx.al2_olon, ctx.al2_dlat, ctx.al2_dlon, "airlabs2"))
+    _al_best = _select(_departure_veto(ctx, _al, []), ctx.plane_lat, ctx.plane_lon)
+    if _al_best is None:
+        return
+    _fo, _fd = _norm_code(ctx._fr24_origin), _norm_code(ctx._fr24_dest)
+    if _routes_agree(_fo, _fd, _al_best.origin, _al_best.dest) is not False:
+        return
+    _ro, _rd, _live = _aeroapi_referee(ctx)
+    ctx.fa_origin, ctx.fa_dest = _ro, _rd
+    ctx._cached_fa = None if _live else ((_ro or _rd) and True)
+    ctx._ref_other = _al_best
+    ctx._referee = _referee_verdict(ctx, (_fo, _fd), (_al_best.origin, _al_best.dest), (_ro, _rd))
+    ctx._referee_route = f"{_ro or '?'}->{_rd or '?'}" if (_ro or _rd) else ""
+    if _live:
+        _log(f"[aeroapi] {_airline_display(ctx.callsign)}: tie-break — FR24 {_fo}->{_fd} vs "
+             f"{_al_best.source} {_al_best.origin or '?'}->{_al_best.dest or '?'}: AeroAPI "
+             f"{ctx._referee_route or 'has nothing'} "
+             f"{_VERDICT_TEXT[ctx._referee].format(src=_al_best.source)}")
+
+
 def _departure_veto(ctx, cands, vetoed):
     """Return `cands` without inbound-leg routes (X->LAS / ?->LAS) when the plane is
     evidently leaving a local airport; the dropped candidates are appended to `vetoed`
@@ -2769,6 +2915,18 @@ def _route_select_authority(ctx):
     # The paid APIs' own answer (geometry-checked, before the veto) — what FR24 is compared
     # against on the Stats page.
     ctx._paid_best = _select([c for c in _cands if c.source != "fr24"], ctx.plane_lat, ctx.plane_lon)
+    # Tie-break (AeroAPI asked because FR24 and AirLabs disagreed): the side it backs wins.
+    # Backing FR24 wins outright, even across the home-airport tier — the airframe's live
+    # leg and AeroAPI's airborne flight are independent evidence.  Backing AirLabs wins only
+    # if that route is at least as local as FR24's: AirLabs and AeroAPI both key on the
+    # flight number and can share a stale leg (MXY243: both answered SYR->CHS for a plane
+    # over LAS), so two of them don't overrule FR24's home-airport route.
+    if ctx._referee == "fr24":
+        _cands = [c for c in _cands if c.source not in ("airlabs", "airlabs2")]
+    elif ctx._referee == "other" and ctx._ref_other is not None:
+        if (_route_tier(ctx._ref_other.origin, ctx._ref_other.dest)
+                <= _route_tier(_norm_code(ctx._fr24_origin), _norm_code(ctx._fr24_dest))):
+            _cands = [c for c in _cands if c.source != "fr24"]
     # Departure veto: when the plane is evidently departing a local airport, drop every
     # inbound-leg candidate (X->LAS / ?->LAS) BEFORE the pick, so a vetoed route opens the
     # last resort exactly like an empty answer would.
@@ -2805,7 +2963,7 @@ def _route_record_fr24_check(ctx):
     display shows FR24's route (it wins within a tier)."""
     if ctx._fr24_src != "fr24" or not (ctx._fr24_origin or ctx._fr24_dest):
         return
-    _p = ctx._paid_best
+    _p = ctx._ref_other or ctx._paid_best
     if _p is None:
         return
     _agree = _routes_agree(ctx._fr24_origin, ctx._fr24_dest, _p.origin, _p.dest)
@@ -2813,11 +2971,13 @@ def _route_record_fr24_check(ctx):
         return
     _fr24_route = f"{ctx._fr24_origin or '?'}->{ctx._fr24_dest or '?'}"
     _paid_route = f"{_p.origin or '?'}->{_p.dest or '?'}"
-    if not _agree:
+    _shown = f"{ctx.origin or '?'}->{ctx.destination or '?'}"
+    if not _agree and not ctx._referee:
         _log(f"[fr24] {_airline_display(ctx.callsign)}: FR24 {_fr24_route} vs {_p.source} "
-             f"{_paid_route} — disagree")
+             f"{_paid_route} — disagree, showing {_shown}")
     _record_fr24_check(ctx.callsign, ctx.registration, _fr24_route, _paid_route,
-                       _p.source, _agree)
+                       _p.source, _agree, referee=ctx._referee,
+                       referee_route=ctx._referee_route, shown_route=_shown)
 
 
 def _route_commit_fr24(ctx):
@@ -2858,35 +3018,53 @@ def _route_commit_fr24(ctx):
 
 def _resolved_vs_fr24(ctx, r_origin, r_dest, label):
     """Serve a usable resolved-cache hit, checked against FR24's answer for this flight (the
-    hit still saves the paid calls).  FR24 confirming the entry is credited as FR24; a
-    complete FR24 route that differs — and is at least as local, the same tier rule
-    _select() applies — is served instead and replaces the entry, so the cache stays right
-    for when FR24 can't answer.  Otherwise the cached route stands.  A live FR24 answer is
-    recorded against the entry (other_source 'cache').  Returns get_route's 5-tuple."""
+    hit still saves the regular paid calls).  FR24 confirming the entry is credited as FR24.
+    When FR24's complete route differs, AeroAPI breaks the tie (live, once per pass): the
+    side it backs is shown — FR24's route also replaces the entry.  If it settles nothing,
+    FR24 wins when its route is at least as local (the tier rule _select() applies),
+    otherwise the cached route stands.  A live FR24 answer is recorded against the entry
+    (other_source 'cache').  Returns get_route's 5-tuple."""
     _fo, _fd = _norm_code(ctx._fr24_origin), _norm_code(ctx._fr24_dest)
     if (_fo or _fd) and _vetoes_inbound(ctx, _fo, _fd):
         _fo = _fd = ""   # FR24's answer is this airframe's previous leg (plane is departing)
     _live = ctx._fr24_src == "fr24"
     _agree = _routes_agree(_fo, _fd, r_origin, r_dest)
-    if _agree is not None and _live:
-        _record_fr24_check(ctx.callsign, ctx.registration, f"{_fo or '?'}->{_fd or '?'}",
-                           f"{r_origin}->{r_dest}", "cache", _agree)
+    _fr24_route, _cache_route = f"{_fo or '?'}->{_fd or '?'}", f"{r_origin}->{r_dest}"
+
+    def _record(shown, verdict="", ref_route=""):
+        if _agree is not None and _live:
+            _record_fr24_check(ctx.callsign, ctx.registration, _fr24_route, _cache_route,
+                               "cache", _agree, referee=verdict, referee_route=ref_route,
+                               shown_route=shown)
+
     if _agree and _fo and _fd:
+        _record(_cache_route)
         return r_origin, r_dest, ctx._fr24_src, ctx._ov_plane, ctx._ov_display
-    if (_agree is False and _fo and _fd
-            and _route_tier(_fo, _fd) <= _route_tier(r_origin, r_dest)):
-        if _live:
-            _log(f"[resolved] {ctx.callsign}: cached {r_origin}->{r_dest} disagrees with FR24 "
-                 f"{_fo}->{_fd} — showing FR24, replacing the cache entry")
-        ctx.origin, ctx.destination, ctx.source = _fo, _fd, ctx._fr24_src
-        ctx._coord_olat, ctx._coord_olon = _airport_coords(_fo) or (None, None)
-        ctx._coord_dlat, ctx._coord_dlon = _airport_coords(_fd) or (None, None)
-        ctx._coord_origin_iata = _fo
-        _route_write_resolved_cache(ctx)
-        return _fo, _fd, ctx._fr24_src, ctx._ov_plane, ctx._ov_display
+    if _agree is False and _fo and _fd:
+        _ro, _rd, _rlive = _aeroapi_referee(ctx)
+        _verdict = _referee_verdict(ctx, (_fo, _fd), (r_origin, r_dest), (_ro, _rd))
+        _ref_route = f"{_ro or '?'}->{_rd or '?'}" if (_ro or _rd) else ""
+        _fr24_wins = (_verdict == "fr24" or (
+            _verdict == "split" and _route_tier(_fo, _fd) <= _route_tier(r_origin, r_dest)))
+        if _rlive or _live:
+            _log(f"[resolved] {ctx.callsign}: cached {_cache_route} disagrees with FR24 {_fr24_route}"
+                 f" — AeroAPI {_ref_route or 'has nothing'} "
+                 f"{_VERDICT_TEXT[_verdict].format(src='the cache')}; showing "
+                 f"{'FR24, replacing the cache entry' if _fr24_wins else 'the cached route'}")
+        if _fr24_wins:
+            ctx.origin, ctx.destination, ctx.source = _fo, _fd, ctx._fr24_src
+            ctx._coord_olat, ctx._coord_olon = _airport_coords(_fo) or (None, None)
+            ctx._coord_dlat, ctx._coord_dlon = _airport_coords(_fd) or (None, None)
+            ctx._coord_origin_iata = _fo
+            _route_write_resolved_cache(ctx)
+            _record(_fr24_route, _verdict, _ref_route)
+            return _fo, _fd, ctx._fr24_src, ctx._ov_plane, ctx._ov_display
+        _record(_cache_route, _verdict, _ref_route)
+        return r_origin, r_dest, label, ctx._ov_plane, ctx._ov_display
     if _agree is False and _live:
-        _log(f"[resolved] {ctx.callsign}: FR24 {_fo or '?'}->{_fd or '?'} disagrees with cached "
-             f"{r_origin}->{r_dest} — keeping the cached local route")
+        _log(f"[resolved] {ctx.callsign}: FR24 {_fr24_route} disagrees with cached "
+             f"{_cache_route} — keeping the cached route")
+    _record(_cache_route)
     return r_origin, r_dest, label, ctx._ov_plane, ctx._ov_display
 
 
@@ -2943,6 +3121,11 @@ class _RouteCtx:
     _fr24_src: str = ""
     # The paid APIs' own pick (before the veto) — FR24's comparison partner.
     _paid_best: object = None
+    # Tie-breaker: when FR24 and AirLabs (or the 7-day cache) disagree, AeroAPI is asked.
+    _ref_other: object = None     # the answer FR24 disagreed with (_Cand)
+    _referee: str = ""            # 'fr24' | 'other' | 'split' ('' = not asked)
+    _referee_route: str = ""
+    _fa_skipped: bool = False     # AeroAPI not asked: FR24 already had the whole route
     # ── last resort: adsbdb (asked only when no trusted source has a route) ──
     _adsbdb_asked: bool = False
     adsbdb_origin: str = ""
@@ -3374,8 +3557,12 @@ def get_route(hex_code, callsign, vertical_speed, plane_lat=None, plane_lon=None
 
     # ── 3. FlightAware AeroAPI (paid, capped at the monthly limit) ────────────
     # ctx.fa_origin/fa_dest/_cached_fa and ctx._al_held_nonlocal are (re)initialised
-    # inside _route_aeroapi_tier and written on EVERY path.
-    _route_aeroapi_tier(ctx)
+    # inside _route_aeroapi_tier and written on EVERY path.  When FR24 already has the
+    # whole route, AeroAPI is only asked to break a tie with AirLabs.
+    if _fr24_complete(ctx):
+        _route_tie_break_airlabs(ctx)
+    else:
+        _route_aeroapi_tier(ctx)
 
     ctx.origin      = ctx.origin      if ctx.origin.upper()      not in BLANK_FIELDS else ""
     ctx.destination = ctx.destination if ctx.destination.upper() not in BLANK_FIELDS else ""

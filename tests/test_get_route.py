@@ -262,7 +262,7 @@ def run_scenario(scn):
     sx = {"cache_writes": cache_writes, "backoffs": backoffs,
           "paid_miss_set": patches["_cache_db_set_paid_miss"].called,
           # (other_source, matched) of each FR24-vs-paid comparison recorded
-          "fr24_checks": [(c.args[4], c.args[5])
+          "fr24_checks": [(c.args[4], c.args[5], c.kwargs.get("referee", ""))
                           for c in patches["_record_fr24_check"].call_args_list]}
     return o, d, src, calls, sx
 
@@ -635,12 +635,16 @@ SCENARIOS = [
     {
         "name": "commercial FR24 runs via cached hex->reg (feed lacks tail)",
         "callsign": "AAL_FRX", "hex_reg": "N218BZ",          # tail from hex cache, NOT feed
+        "plane": (36.0840, -115.1537),                        # over LAS
         "backoff": {"airlabs"},
         "adsbdb": {"origin": "SYR", "dest": "CHS"},
-        "airlabs2": {"origin": "SYR", "dest": "CHS"},
-        "aeroapi": {"origin": "SYR", "dest": "CHS"},
+        "airlabs2": {"origin": "SYR", "dest": "CHS",         # stale leg, implausible here
+                     "olat": 43.11, "olon": -76.11, "dlat": 32.90, "dlon": -80.04},
+        "aeroapi": {"origin": "SYR", "dest": "CHS",
+                    "olat": 43.11, "olon": -76.11, "dlat": 32.90, "dlon": -80.04},
         "fr24": [{"origin": "LAS", "dest": "SYR"}],           # FR24 has the correct current leg
         "expect": ("LAS", "SYR", "fr24"),
+        "expect_calls": {"aeroapi": 0},                       # no usable AirLabs leg: no tie-break
     },
     # ── review round 2: efficiency + robustness fixes ──────────────────────────
     {
@@ -688,11 +692,11 @@ SCENARIOS = [
         # A plausible non-local GA route is KEPT (prefer local, but don't strip a valid
         # non-local one) at the normal 1 h TTL — only the read-side geometry check busts
         # it if the plane later moves off the route.
-        "name": "review2: FR24 GA non-local complete kept at ROUTE_TTL_DEFAULT",
+        "name": "review2: FR24 GA non-local complete kept for the pass (FR24_ROUTE_TTL)",
         "callsign": "N999XY", "reg": "N999XY", "plane": (40.9, -96.0),  # on the DEN-ORD line
         "fr24": [{"origin": "DEN", "dest": "ORD"}],
         "expect": ("DEN", "ORD", "fr24"),
-        "expect_cache_ttl": {"fr24:N999XY": overhead.ROUTE_TTL_DEFAULT},
+        "expect_cache_ttl": {"fr24:N999XY": overhead.FR24_ROUTE_TTL},
     },
     {
         # A non-local origin-ONLY partial from a paid API must never overwrite an
@@ -732,37 +736,38 @@ SCENARIOS = [
     #    tail is obtainable (feed / hex-cache / OpenSky-meta).  The FR24 library is
     #    registration-only, so the LAST scenario documents the irreducible no-tail limit. ──
     {
-        "name": "fr24-after-paid: tail in FEED, both paid empty -> FR24 §5 polled",
+        "name": "fr24-first: tail in FEED, AirLabs empty -> FR24 served, AeroAPI not asked",
         "callsign": "AAL901", "reg": "N901AA",
         "airlabs1": None, "aeroapi": None,
         "fr24": [{"origin": "LAS", "dest": "JFK"}],
         "expect": ("LAS", "JFK", "fr24"),
-        "expect_calls": {"airlabs1": 1, "aeroapi": 1, "fr24": 1},  # paid tried, THEN FR24
+        "expect_calls": {"airlabs1": 1, "aeroapi": 0, "fr24": 1},  # FR24 had it: no AeroAPI
     },
     {
-        "name": "fr24-after-paid: tail only in CACHE, both paid empty -> FR24 §5 polled",
+        "name": "fr24-first: tail only in CACHE, AirLabs empty -> FR24 served, AeroAPI not asked",
         "callsign": "AAL902", "hex_reg": "N902AA",
         "airlabs1": None, "aeroapi": None,
         "fr24": [{"origin": "LAS", "dest": "BOS"}],
         "expect": ("LAS", "BOS", "fr24"),
-        "expect_calls": {"airlabs1": 1, "aeroapi": 1, "fr24": 1},
+        "expect_calls": {"airlabs1": 1, "aeroapi": 0, "fr24": 1},
     },
     {
-        "name": "fr24-after-paid: no feed-tail -> adsbdb resolves it, FR24 §5 polled (poll 1)",
+        "name": "fr24-first: no feed-tail -> adsbdb resolves it, FR24 asked on poll 1",
         "callsign": "AAL903", "adsbdb_reg": "N903AA",   # proactively resolved tail
         "airlabs1": None, "aeroapi": None,
         "fr24": [{"origin": "LAS", "dest": "SEA"}],
         "expect": ("LAS", "SEA", "fr24"),
-        "expect_calls": {"airlabs1": 1, "aeroapi": 1, "fr24": 1},
+        "expect_calls": {"airlabs1": 1, "aeroapi": 0, "fr24": 1},
     },
     {
-        "name": "fr24-after-paid: paid held NON-LOCAL, FR24 has LOCAL -> FR24 overrides",
+        "name": "tie-break guard: AirLabs + AeroAPI share a NON-LOCAL leg, FR24 LOCAL -> FR24",
         "callsign": "AAL904", "reg": "N904AA",
-        "airlabs1": {"origin": "DEN", "dest": "ORD"},   # non-local (held, not committed)
-        "aeroapi":  {"origin": "DEN", "dest": "ORD"},   # non-local (held)
-        "fr24": [{"origin": "LAS", "dest": "JFK"}],      # local
+        "airlabs1": {"origin": "DEN", "dest": "ORD"},   # non-local
+        "aeroapi":  {"origin": "DEN", "dest": "ORD"},   # backs AirLabs (same flight number)
+        "fr24": [{"origin": "LAS", "dest": "JFK"}],      # local: the MXY243 guard keeps it
         "expect": ("LAS", "JFK", "fr24"),
-        "expect_calls": {"fr24": 1},
+        "expect_calls": {"fr24": 1, "aeroapi": 1},
+        "expect_fr24_check": ("airlabs", False, "other"),
     },
     {
         "name": "fr24-after-paid: NO tail anywhere -> FR24 NOT callable (library is registration-only)",
@@ -1016,21 +1021,24 @@ SCENARIOS = [
     },
     # ── FR24 first: asked for every flight (by tail); the cache + paid chain run as before ──
     {
-        "name": "fr24-first: airline, FR24 and AirLabs agree -> shown as FR24, AirLabs still asked",
+        "name": "fr24-first: airline, FR24 and AirLabs agree -> shown as FR24, no tie-break",
         "callsign": "SWA100", "reg": "N8701Q",
         "fr24": [{"origin": "LAS", "dest": "DEN"}],
         "airlabs1": {"origin": "LAS", "dest": "DEN"},
+        "aeroapi": {"origin": "LAS", "dest": "DEN"},
         "expect": ("LAS", "DEN", "fr24"),
-        "expect_calls": {"fr24": 1, "airlabs1": 1, "opensky": 0, "adsbdb": 0},
+        "expect_calls": {"fr24": 1, "airlabs1": 1, "aeroapi": 0, "opensky": 0, "adsbdb": 0},
+        "expect_cache_ttl": {"fr24:SWA100": overhead.FR24_ROUTE_TTL},   # read live once per pass
         "expect_fr24_check": ("airlabs", True),
     },
     {
-        "name": "fr24-first: airline, FR24 and AirLabs disagree -> FR24 wins, recorded",
+        "name": "tie-break: FR24 and AirLabs disagree, AeroAPI has nothing -> FR24 (primary)",
         "callsign": "SWA101", "reg": "N8702Q",
         "fr24": [{"origin": "LAS", "dest": "MDW"}],
         "airlabs1": {"origin": "LAS", "dest": "BNA"},
         "expect": ("LAS", "MDW", "fr24"),
-        "expect_fr24_check": ("airlabs", False),
+        "expect_calls": {"aeroapi": 1},
+        "expect_fr24_check": ("airlabs", False, "split"),
     },
     {
         "name": "fr24-first: FR24 partial consistent with AirLabs -> AirLabs complete shown, agree",
@@ -1041,12 +1049,12 @@ SCENARIOS = [
         "expect_fr24_check": ("airlabs", True),
     },
     {
-        "name": "fr24-first: FR24 non-local vs AirLabs local -> AirLabs (local beats non-local)",
+        "name": "tie-break: FR24 non-local vs AirLabs local, AeroAPI has nothing -> AirLabs (local)",
         "callsign": "SWA102", "reg": "N8703Q",
         "fr24": [{"origin": "SEA", "dest": "PHX"}],
         "airlabs1": {"origin": "LAS", "dest": "PHX"},
         "expect": ("LAS", "PHX", "airlabs"),
-        "expect_fr24_check": ("airlabs", False),
+        "expect_fr24_check": ("airlabs", False, "split"),
     },
     {
         "name": "fr24-first: AirLabs inbound leg on a climbing plane -> FR24's real leg wins",
@@ -1077,6 +1085,15 @@ SCENARIOS = [
         "backoff": {"fr24"},
         "airlabs1": {"origin": "LAS", "dest": "SJC"},
         "expect": ("LAS", "SJC", "airlabs"),
+        "expect_calls": {"fr24": 0},
+    },
+    {
+        "name": "fr24-first: FR24 backing off, but this pass's answer is memoised -> still used",
+        "callsign": "SWA301", "reg": "N8731Q", "fr24": [{"origin": "LAS", "dest": "SJC"}],
+        "backoff": {"fr24"},
+        "cache": {("fr24:SWA301", "route"): ("LAS", "DEN", None, None, None, None, "fr24")},
+        "airlabs1": {"origin": "LAS", "dest": "DEN"},
+        "expect": ("LAS", "DEN", "fr24:cached"),
         "expect_calls": {"fr24": 0},
     },
     {
@@ -1120,9 +1137,9 @@ SCENARIOS = [
         "fr24": [{"origin": "LAS", "dest": "MCI"}],
         "cache": {("SWA108", "resolved"): ("LAS", "STL", None, None, None, None, "airlabs")},
         "expect": ("LAS", "MCI", "fr24"),
-        "expect_calls": {"airlabs1": 0, "aeroapi": 0},
+        "expect_calls": {"airlabs1": 0, "aeroapi": 1},   # tie-break asked, had nothing
         "expect_cache_types": ["resolved"],
-        "expect_fr24_check": ("cache", False),
+        "expect_fr24_check": ("cache", False, "split"),
     },
     {
         "name": "resolved+fr24: FR24 non-local vs cached local -> cached route kept",
@@ -1131,7 +1148,7 @@ SCENARIOS = [
         "cache": {("SWA109", "resolved"): ("LAS", "PHX", None, None, None, None, "airlabs")},
         "expect": ("LAS", "PHX", "resolved:airlabs:cached"),
         "expect_no_cache_types": ["resolved"],
-        "expect_fr24_check": ("cache", False),
+        "expect_fr24_check": ("cache", False, "split"),
     },
     {
         "name": "resolved+fr24: FR24 has nothing -> cached route as before",
@@ -1173,6 +1190,79 @@ SCENARIOS = [
         "aeroapi": {"origin": "LAS", "dest": "PVU"},
         "expect": ("LAS", "PVU", "aeroapi"),
         "expect_calls": {"opensky": 1},
+    },
+    # ── AeroAPI as the tie-breaker: asked (live, once per pass) only when FR24 and AirLabs or
+    # the 7-day cache disagree ──
+    {
+        "name": "tie-break: AeroAPI backs FR24 -> FR24's route shown, answer remembered",
+        "callsign": "SWA201", "reg": "N8721Q",
+        "fr24": [{"origin": "LAS", "dest": "MDW"}],
+        "airlabs1": {"origin": "LAS", "dest": "BNA"},
+        "aeroapi": {"origin": "LAS", "dest": "MDW"},
+        "expect": ("LAS", "MDW", "fr24"),
+        "expect_calls": {"aeroapi": 1},
+        "expect_fr24_check": ("airlabs", False, "fr24"),
+        "expect_cache_key": ["referee:SWA201"],
+    },
+    {
+        "name": "tie-break: AeroAPI backs AirLabs -> AirLabs's route shown",
+        "callsign": "SWA202", "reg": "N8722Q",
+        "fr24": [{"origin": "LAS", "dest": "MDW"}],
+        "airlabs1": {"origin": "LAS", "dest": "BNA"},
+        "aeroapi": {"origin": "LAS", "dest": "BNA"},
+        "expect": ("LAS", "BNA", "airlabs"),
+        "expect_fr24_check": ("airlabs", False, "other"),
+    },
+    {
+        "name": "tie-break: AeroAPI backs FR24's non-local route over AirLabs's local one",
+        "callsign": "SWA203", "reg": "N8723Q",
+        "fr24": [{"origin": "SEA", "dest": "PHX"}],
+        "airlabs1": {"origin": "LAS", "dest": "PHX"},
+        "aeroapi": {"origin": "SEA", "dest": "PHX"},
+        "expect": ("SEA", "PHX", "fr24"),
+        "expect_fr24_check": ("airlabs", False, "fr24"),
+    },
+    {
+        "name": "tie-break: remembered answer for this pass -> no second AeroAPI call",
+        "callsign": "SWA204", "reg": "N8724Q",
+        "fr24": [{"origin": "LAS", "dest": "MDW"}],
+        "airlabs1": {"origin": "LAS", "dest": "BNA"},
+        "aeroapi": {"origin": "LAS", "dest": "BNA"},
+        "cache": {("referee:SWA204", "route"): ("LAS", "MDW", None, None, None, None, "aeroapi")},
+        "expect": ("LAS", "MDW", "fr24"),
+        "expect_calls": {"aeroapi": 0},
+        "expect_fr24_check": ("airlabs", False, "fr24"),
+    },
+    {
+        "name": "no tie-break: FR24 has the route, AirLabs empty -> AeroAPI not asked, paid-miss kept",
+        "callsign": "SWA205", "reg": "N8725Q",
+        "fr24": [{"origin": "LAS", "dest": "TUS"}],
+        "airlabs1": None, "aeroapi": {"origin": "LAS", "dest": "TUS"},
+        "expect": ("LAS", "TUS", "fr24"),
+        "expect_calls": {"airlabs1": 1, "aeroapi": 0},
+        "expect_paid_miss": True,
+    },
+    {
+        "name": "tie-break on the cache: AeroAPI backs the cached route -> cached route kept",
+        "callsign": "SWA206", "reg": "N8726Q",
+        "fr24": [{"origin": "LAS", "dest": "MCI"}],
+        "cache": {("SWA206", "resolved"): ("LAS", "STL", None, None, None, None, "airlabs")},
+        "aeroapi": {"origin": "LAS", "dest": "STL"},
+        "expect": ("LAS", "STL", "resolved:airlabs:cached"),
+        "expect_calls": {"aeroapi": 1, "airlabs1": 0},
+        "expect_no_cache_types": ["resolved"],
+        "expect_fr24_check": ("cache", False, "other"),
+    },
+    {
+        "name": "tie-break on the cache: AeroAPI backs FR24 -> FR24 shown, entry replaced",
+        "callsign": "SWA207", "reg": "N8727Q",
+        "fr24": [{"origin": "LAS", "dest": "MCI"}],
+        "cache": {("SWA207", "resolved"): ("LAS", "STL", None, None, None, None, "airlabs")},
+        "aeroapi": {"origin": "LAS", "dest": "MCI"},
+        "expect": ("LAS", "MCI", "fr24"),
+        "expect_calls": {"aeroapi": 1, "airlabs1": 0},
+        "expect_cache_types": ["resolved"],
+        "expect_fr24_check": ("cache", False, "fr24"),
     },
 ]
 
@@ -1225,10 +1315,13 @@ def _mk(scn):
         for key in scn.get("expect_cache_key", []):
             hits = [w for w in sx["cache_writes"] if w["key"] == key]
             self.assertTrue(hits, f"\n{scn['name']}: expected a cache write for key '{key}', got none")
-        # FR24 comparison recorded? (other_source, matched) of the last one, or None for none.
+        # FR24 comparison recorded? (other_source, matched[, tie-break verdict]) of the last one,
+    # or None for none.
         if "expect_fr24_check" in scn:
             _want = scn["expect_fr24_check"]
             _got = sx["fr24_checks"][-1] if sx["fr24_checks"] else None
+            if _got is not None and _want is not None:
+                _got = _got[:len(_want)]       # (source, matched) or (source, matched, verdict)
             self.assertEqual(_got, _want,
                 f"\n{scn['name']}: FR24 check={_got} expected={_want} (all={sx['fr24_checks']})")
         # paid-miss recorded? (True/False)
@@ -1526,6 +1619,42 @@ class OverridePartialFill(unittest.TestCase):
                                      ("LAS", "TNX", None, None, None, None, "adsbdb"))
         self.assertEqual((ctx.origin, ctx.destination, ctx.source), ("LAS", "TNX", "override"))
         q_db.assert_called_once()
+
+
+class Fr24ChecksMigration(unittest.TestCase):
+    """_init_db adds the tie-break columns to an fr24_checks table created by the first
+    FR24-first deploy, keeping its rows."""
+
+    def test_adds_tie_break_columns_and_keeps_rows(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "ft_flights.db")
+            c = sqlite3.connect(db)
+            c.execute("""CREATE TABLE fr24_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, seen_at TEXT NOT NULL, date TEXT NOT NULL,
+                callsign TEXT NOT NULL DEFAULT '', registration TEXT NOT NULL DEFAULT '',
+                fr24_route TEXT NOT NULL DEFAULT '', other_route TEXT NOT NULL DEFAULT '',
+                other_source TEXT NOT NULL DEFAULT '', matched INTEGER NOT NULL DEFAULT 0)""")
+            c.execute("INSERT INTO fr24_checks (seen_at, date, callsign, matched) "
+                      "VALUES ('2026-11-14 00:30:00', '2026-11-14', 'SWA1', 1)")
+            c.commit()
+            c.close()
+            saved = (overhead._db_conn, overhead._cache_conn)
+            try:
+                with mock.patch.object(overhead, "DB_FILE", db), \
+                     mock.patch.object(overhead, "OVERRIDES_FILE", os.path.join(d, "none.json")):
+                    overhead._init_db()
+                    new_conns = (overhead._db_conn, overhead._cache_conn)
+                cols = {r[1] for r in new_conns[0].execute("PRAGMA table_info(fr24_checks)")}
+                self.assertTrue({"referee", "referee_route", "shown_route"} <= cols, cols)
+                self.assertEqual(new_conns[0].execute(
+                    "SELECT callsign, referee FROM fr24_checks").fetchall(), [("SWA1", "")])
+            finally:
+                for cn in (overhead._db_conn, overhead._cache_conn):
+                    if cn is not None and cn not in saved:
+                        cn.close()
+                overhead._db_conn, overhead._cache_conn = saved
 
 
 class RoutesAgree(unittest.TestCase):

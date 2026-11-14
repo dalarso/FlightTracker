@@ -962,8 +962,8 @@ def stats_search():
 @app.route("/api/fr24-agreement", methods=["GET"])
 def fr24_agreement():
     """How often FR24's route matched the paid APIs' (or the 7-day resolved cache's) for
-    the same flight.  The display shows FR24's route when they disagree; this lets the
-    disagreements be checked by eye."""
+    the same flight, and — when they disagreed — which side AeroAPI backed as the
+    tie-breaker and what the display showed, so the disagreements can be checked by eye."""
     if not DB_FILE.exists():
         return jsonify({"error": "Database unavailable"}), 503
     conn = None
@@ -981,10 +981,15 @@ def fr24_agreement():
             return {"total": total, "matches": matches, "mismatches": total - matches, "pct": pct}
 
         empty = {"today": _row_stats(None), "thirty_day": _row_stats(None),
-                 "by_source": {}, "last_mismatches": [], "daily": []}
+                 "by_source": {}, "tie_breaks": {}, "last_mismatches": [], "daily": []}
         # The display service creates the table; until it has run once, report no data.
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fr24_checks'").fetchone():
             return jsonify(empty)
+        # The tie-break columns arrive with a later display-service start (it migrates the
+        # table); until then report them blank rather than failing.
+        _cols = {r[1] for r in conn.execute("PRAGMA table_info(fr24_checks)")}
+        _ref_cols = ", ".join(c if c in _cols else f"'' AS {c}"
+                              for c in ("referee", "referee_route", "shown_route"))
 
         _sql = "SELECT COUNT(*) total, SUM(matched) matches FROM fr24_checks WHERE "
         t   = conn.execute(_sql + "date=?",  (today,)).fetchone()
@@ -995,10 +1000,19 @@ def fr24_agreement():
                 """SELECT other_source, COUNT(*) total, SUM(matched) matches
                    FROM fr24_checks WHERE date>=? GROUP BY other_source""", (thirty_ago,))
         }
+        # AeroAPI's verdicts when it broke a tie: 'fr24', 'other' or 'split'.
+        tie_breaks = {}
+        if "referee" in _cols:
+            tie_breaks = {
+                r[0]: r[1] for r in conn.execute(
+                    """SELECT referee, COUNT(*) FROM fr24_checks
+                       WHERE date>=? AND referee!='' GROUP BY referee""", (thirty_ago,))
+            }
         mm = conn.execute(
-            """SELECT seen_at, callsign, registration, fr24_route, other_route, other_source
-               FROM fr24_checks WHERE matched=0 AND date>=?
-               ORDER BY id DESC LIMIT 15""", (thirty_ago,)
+            f"""SELECT seen_at, callsign, registration, fr24_route, other_route, other_source,
+                       {_ref_cols}
+                FROM fr24_checks WHERE matched=0 AND date>=?
+                ORDER BY id DESC LIMIT 15""", (thirty_ago,)
         ).fetchall()
         daily = conn.execute(
             """SELECT date, COUNT(*) total, SUM(matched) matches
@@ -1009,6 +1023,7 @@ def fr24_agreement():
             "today":           _row_stats(t),
             "thirty_day":      _row_stats(t30),
             "by_source":       by_source,
+            "tie_breaks":      tie_breaks,
             "last_mismatches": [dict(r) for r in mm],
             "daily":           [{"date": r["date"], "total": r["total"],
                                  "matches": r["matches"] or 0} for r in daily],
@@ -1526,17 +1541,21 @@ def api_stack():
                 "key_set":      False,
                 "requires_key": False,
                 "disabled":     FR24_DISABLED_FLAG.exists(),
-                "cache_ttl":    _default_ttl,
-                "cache_ttl_fmt": _fmt_ttl(_default_ttl),
+                "cache_ttl":    600,
+                "cache_ttl_fmt": _fmt_ttl(600),
                 "notes":    "Asked for every flight, by tail number (the library has no callsign "
                             "search, so a flight with no known tail skips it). Its answer is the "
-                            "aircraft's live leg, so it wins a disagreement with AirLabs/AeroAPI — "
-                            "except that a route touching a home airport beats one that doesn't. "
-                            "Compared with the paid answer on the Stats page. For GA / N-number "
+                            "aircraft's live leg. When AirLabs or the 7-day cache disagrees with it, "
+                            "AeroAPI breaks the tie; with no clear answer, FR24 wins unless only the "
+                            "other route touches a home airport. Compared with the paid answer on "
+                            "the Stats page. For GA / N-number "
                             "tails a complete FR24 route skips the paid APIs. If it errors it backs "
                             "off 5 min and the paid APIs and caches carry on. Not affected by the "
                             "APIs On/Off toggle (free). Also step 4 of the aircraft type lookup. "
-                            f"Route cache: {_fmt_ttl(_default_ttl)} per flight / {_fmt_ttl(_miss_ttl)} miss.",
+                            "Read live once per pass of a flight (memo: 10m / "
+                            f"{_fmt_ttl(_miss_ttl)} miss), before the 7-day route cache is "
+                            "consulted; its winning routes also refill that cache, so it's warm "
+                            "if FR24 goes away.",
             },
             {
                 "priority":     2,
@@ -1592,9 +1611,12 @@ def api_stack():
                 "disabled":     AEROAPI_DISABLED_FLAG.exists(),
                 "cache_ttl":    _sched_ttl,
                 "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
-                "notes":    "Called when both AirLabs keys return no usable route, or when AirLabs "
-                            "held a non-local route (to look for one touching a home airport). "
-                            "Cascades automatically on 402 (credit exhausted) or 429. "
+                "notes":    "The tie-breaker: when FR24 and AirLabs (or the 7-day cache) disagree, "
+                            "AeroAPI is asked live — once per pass of the flight — and the side it "
+                            "backs is shown. Not asked when FR24 already has the whole route and "
+                            "nothing disagrees. Without a full FR24 route it runs as before: when "
+                            "both AirLabs keys return no usable route, or AirLabs held a non-local "
+                            "route. Cascades automatically on 402 (credit exhausted) or 429. "
                             f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
                             f"Miss suppression: {_fmt_ttl(_paid_miss)}.",
             },
