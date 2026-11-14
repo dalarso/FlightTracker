@@ -15,8 +15,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 _ROOT = Path(__file__).resolve().parent.parent
 _WEB = _ROOT / "web"
@@ -124,7 +126,9 @@ class StatsDataLayer(unittest.TestCase):
         self.assertEqual(d["range_unique"], 4)
         self.assertEqual((d["hourly"][9], d["hourly"][10]), (1, 3))
         self.assertEqual([r["callsign"] for r in d["recent"]], ["AAL789", "SWA456", "SWA123", "UAL111"])
-        self.assertEqual(d["rollup"]["source_pct"], {"free": 50.0, "paid": 50.0})
+        # One bucket per API that supplied the displayed route.
+        self.assertEqual(d["rollup"]["source_pct"],
+                         {"airlabs": 25.0, "aeroapi": 25.0, "adsbdb": 25.0, "opensky": 25.0})
 
     def test_split_read_matches_a_fresh_read(self):
         # Finished days come from the cache and the live day is re-read; the numbers must be
@@ -169,6 +173,86 @@ class StatsDataLayer(unittest.TestCase):
     def test_db_search_missing_db_returns_none(self):
         stats_data.DB_FILE = Path("/nonexistent/missing.db")
         self.assertIsNone(stats_data._db_search("SWA"))
+
+
+class Fr24AgreementEndpoint(unittest.TestCase):
+    """/api/fr24-agreement: FR24's route vs the paid APIs' / route cache's for the same
+    flight (the Stats card that replaced the free-API accuracy cards)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._db = self._dir / "ft_flights.db"
+        _make_db(str(self._db))
+        self._orig = self.srv.DB_FILE
+        self.srv.DB_FILE = self._db
+
+    def tearDown(self):
+        self.srv.DB_FILE = self._orig
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def _seed(self, rows):
+        conn = sqlite3.connect(str(self._db))
+        conn.execute("""CREATE TABLE IF NOT EXISTS fr24_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, seen_at TEXT NOT NULL, date TEXT NOT NULL,
+            callsign TEXT NOT NULL DEFAULT '', registration TEXT NOT NULL DEFAULT '',
+            fr24_route TEXT NOT NULL DEFAULT '', other_route TEXT NOT NULL DEFAULT '',
+            other_source TEXT NOT NULL DEFAULT '', matched INTEGER NOT NULL DEFAULT 0)""")
+        conn.executemany(
+            "INSERT INTO fr24_checks (seen_at,date,callsign,registration,fr24_route,"
+            "other_route,other_source,matched) VALUES (?,?,?,?,?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+
+    def test_no_table_yet_reports_no_data(self):
+        d = self.client.get("/api/fr24-agreement").get_json()
+        self.assertEqual(d["thirty_day"]["total"], 0)
+        self.assertEqual((d["by_source"], d["last_mismatches"], d["daily"]), ({}, [], []))
+
+    def test_totals_split_and_disagreements(self):
+        today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+        self._seed([
+            (f"{today} 09:00:00", today, "SWA1", "N1", "LAS->DEN", "LAS->DEN", "airlabs", 1),
+            (f"{today} 09:05:00", today, "SWA2", "N2", "LAS->MDW", "LAS->BNA", "airlabs", 0),
+            (f"{today} 09:10:00", today, "SWA3", "N3", "LAS->OAK", "LAS->OAK", "cache", 1),
+            (f"{today} 09:15:00", today, "AAL4", "N4", "LAS->SEA", "ORD->LAS", "aeroapi", 0),
+            ("2025-01-01 09:00:00", "2025-01-01", "OLD1", "N9", "LAS->X", "LAS->Y", "airlabs", 0),
+        ])
+        d = self.client.get("/api/fr24-agreement").get_json()
+        self.assertEqual(d["thirty_day"], {"total": 4, "matches": 2, "mismatches": 2, "pct": 50.0})
+        self.assertEqual(d["today"]["total"], 4)
+        self.assertEqual(d["by_source"]["airlabs"]["pct"], 50.0)
+        self.assertEqual(d["by_source"]["cache"]["pct"], 100.0)
+        self.assertEqual(d["by_source"]["aeroapi"]["matches"], 0)
+        # newest first, and the 2025 row is outside the 30-day window
+        self.assertEqual([r["callsign"] for r in d["last_mismatches"]], ["AAL4", "SWA2"])
+        self.assertEqual(d["last_mismatches"][0]["other_source"], "aeroapi")
+        self.assertEqual(d["daily"], [{"date": today, "total": 4, "matches": 2}])
+
+
+class RouteSourceBuckets(unittest.TestCase):
+    """The Stats 'Where routes came from' split credits each displayed route to one API."""
+
+    def test_buckets(self):
+        b = stats_data._route_bucket
+        self.assertEqual(b("fr24"), "fr24")
+        self.assertEqual(b("fr24:cached"), "fr24")
+        self.assertEqual(b("resolved:airlabs2:cached"), "airlabs")
+        self.assertEqual(b("resolved:fr24:cached"), "fr24")
+        self.assertEqual(b("aeroapi:cached"), "aeroapi")
+        self.assertEqual(b("opensky+aeroapi"), "aeroapi")      # credited to the trusted one
+        self.assertEqual(b("adsbdb+opensky"), "opensky")
+        self.assertEqual(b("adsbdb"), "adsbdb")
+        self.assertEqual(b("override"), "override")
+        self.assertEqual(b("none"), "none")
+        self.assertEqual(b(""), "none")
+        self.assertEqual(b("resolved:cached"), "other")
 
 
 class StatsEndpointAndCache(unittest.TestCase):
@@ -468,7 +552,7 @@ class EndpointSmoke(unittest.TestCase):
         # 200 when the flight DB is present (the Pi), else a *handled* 503 on a DB-less
         # checkout — the point is that they never 500 / raise.
         for url in ["/api/stats?range=today", "/api/stats/search?q=SWA",
-                    "/api/free-api-accuracy", "/api/ga-accuracy"]:
+                    "/api/fr24-agreement"]:
             with self.subTest(url=url):
                 self.assertIn(self.client.get(url).status_code, (200, 503))
 

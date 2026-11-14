@@ -144,7 +144,7 @@ _HARNESS = textwrap.dedent(r"""
         sandbox.renderTodayStats = ()=>{};
         sandbox.renderRecentFlights = ()=>{};
         sandbox.renderPeriodStats   = d => renderCalls.push(d.__tag);
-        sandbox.renderFreeApiAccuracy = ()=>{}; sandbox.renderGaAccuracy = ()=>{};
+        sandbox.renderFr24Agreement = ()=>{};
         sandbox.showToast = ()=>{};
         getEl('period-from').value='2026-06-01'; getEl('period-to').value='2026-06-02';
 

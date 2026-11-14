@@ -1520,10 +1520,9 @@ async function loadStatsTab(opts = {}) {
   const pseq = _period.preset === '90d' ? ++_statsReqSeq : null;
   if (!quiet) _setStatsUpdated('loading');
   try {
-    const [d, acc, gaAcc] = await Promise.all([
+    const [d, agree] = await Promise.all([
       _json('/api/stats?days=90'),
-      _json('/api/free-api-accuracy').catch(() => null),
-      _json('/api/ga-accuracy').catch(() => null),
+      _json('/api/fr24-agreement').catch(() => null),
     ]);
     if (seq !== _statsSeq) return;   // a newer refresh superseded this one
     let rolled = false;
@@ -1540,8 +1539,7 @@ async function loadStatsTab(opts = {}) {
     _lastDefault = d;
     renderTodayStats(d);
     renderRecentFlights(d);
-    if (acc && !acc.error)     renderFreeApiAccuracy(acc);
-    if (gaAcc && !gaAcc.error) renderGaAccuracy(gaAcc);
+    if (agree && !agree.error) renderFr24Agreement(agree);
     if (pseq !== null && pseq === _statsReqSeq && _period.preset === '90d') {
       renderPeriodStats(d);
     } else if (_period.preset !== '90d' && (rolled || (quiet && _period.to >= (_serverToday || _isoToday())))) {
@@ -1908,13 +1906,13 @@ function _accBlock(stats, title, charts) {
   let trend = '';
   if (daily.length >= 2 && charts) {
     charts.push(daily);
-    trend = `<div class="bar-chart bar-chart-mini acc-trend" data-chart="${charts.length - 1}" role="img" aria-label="Daily match rate over the last 30 days"></div>`;
+    trend = `<div class="bar-chart bar-chart-mini acc-trend" data-chart="${charts.length - 1}" role="img" aria-label="Daily agreement over the last 30 days"></div>`;
   }
   return `<div class="acc">${head}
-    <div class="acc-head"><span class="acc-pct ${tone}">${escHtml(pct)}%</span><span class="acc-meta">match rate, last 30 days · ${_plural(total, 'check')} · ${_plural(mm, 'override')}</span></div>
+    <div class="acc-head"><span class="acc-pct ${tone}">${escHtml(pct)}%</span><span class="acc-meta">agree, last 30 days · ${_plural(total, 'check')} · ${_plural(mm, 'disagreement')}</span></div>
     <div class="meter ${tone}" role="presentation"><div class="meter-bar" style="width:${Math.min(100, Math.round(pct))}%"></div></div>
     ${trend}
-    <p class="acc-meta">Today: ${_plural(todayN, 'check')} · ${escHtml(todayPct)} match</p>
+    <p class="acc-meta">Today: ${_plural(todayN, 'check')} · ${escHtml(todayPct)} agree</p>
   </div>`;
 }
 
@@ -1926,53 +1924,36 @@ function _drawAccCharts(el, charts) {
       values: pcts,
       max: 100,
       barClass: v => 't-' + _accTone(v),
-      tips: daily.map((x, i) => `${fmtDate(x.date, { month: 'short', day: 'numeric' })} · ${pcts[i]}% matched (${_num(x.matches)} of ${_plural(x.total, 'check')})`),
+      tips: daily.map((x, i) => `${fmtDate(x.date, { month: 'short', day: 'numeric' })} · ${pcts[i]}% agree (${_num(x.matches)} of ${_plural(x.total, 'check')})`),
     });
   });
 }
 
-function renderFreeApiAccuracy(d) {
-  const el = $('free-api-content');
+// What FR24 was compared against: a paid API's live answer, or the 7-day route cache.
+const _CHECK_SOURCES = { airlabs: 'AirLabs', airlabs2: 'AirLabs 2', aeroapi: 'AeroAPI', cache: 'Route cache' };
+
+function renderFr24Agreement(d) {
+  const el = $('fr24-agree-content');
   if (!el) return;
   if (!_num(d && d.thirty_day && d.thirty_day.total)) {
-    el.innerHTML = '<p class="empty">No cross-checks yet. They build up as commercial flights pass overhead.</p>';
+    el.innerHTML = '<p class="empty">No comparisons yet. They build up as flights FR24 knows pass overhead and a paid API or the route cache also has the route.</p>';
     return;
   }
   const charts = [];
   let html = _accBlock(d, '', charts);
+  const bySrc = Object.entries(d.by_source || {})
+    .filter(([, v]) => _num(v && v.total) > 0)
+    .sort((a, b) => _num(b[1].total) - _num(a[1].total));
+  if (bySrc.length) {
+    html += `<p class="acc-meta acc-split">${bySrc.map(([k, v]) =>
+      `vs ${escHtml(_CHECK_SOURCES[k] || k)}: <strong>${escHtml(v.pct)}%</strong> of ${_fmtInt(v.total)}`).join(' · ')}</p>`;
+  }
   const mm = d.last_mismatches || [];
   if (mm.length) {
-    html += `<h3 class="subhead">Recent overrides <span class="label-note">what adsbdb had, and the paid API's correction</span></h3>
+    html += `<h3 class="subhead">Recent disagreements <span class="label-note">the board showed FR24's route</span></h3>
       <div class="table-scroll"><table class="data-table">
-        <thead><tr><th>Time</th><th>Flight</th><th>adsbdb had</th><th>Corrected to</th></tr></thead>
-        <tbody>${mm.map(r => `<tr><td class="muted c-time">${escHtml(_stamp(r.seen_at))}</td><td class="mono-strong">${escHtml(r.callsign)}</td><td class="mono muted">${escHtml(r.free_route)}</td><td class="mono tone-accent">${escHtml(r.paid_route)}</td></tr>`).join('')}</tbody>
-      </table></div>`;
-  }
-  el.innerHTML = html;
-  _drawAccCharts(el, charts);
-}
-
-function renderGaAccuracy(d) {
-  const el = $('ga-accuracy-content');
-  if (!el) return;
-  const has = k => _num(d && d[k] && d[k].thirty_day && d[k].thirty_day.total) > 0;
-  if (!has('adsbdb') && !has('opensky')) {
-    el.innerHTML = '<p class="empty">No GA cross-checks yet. They build up as N-number aircraft pass overhead with FR24 route data.</p>';
-    return;
-  }
-  const charts = [];
-  let html = _accBlock(d.adsbdb, 'adsbdb', charts) + _accBlock(d.opensky, 'OpenSky', charts);
-  // Merge both APIs' mismatches, newest first, max 10.
-  const all = [];
-  ((d.adsbdb && d.adsbdb.last_mismatches) || []).forEach(r => all.push({ ...r, _api: 'adsbdb' }));
-  ((d.opensky && d.opensky.last_mismatches) || []).forEach(r => all.push({ ...r, _api: 'OpenSky' }));
-  all.sort((a, b) => String(b.seen_at || '').localeCompare(String(a.seen_at || '')));
-  const mm = all.slice(0, 10);
-  if (mm.length) {
-    html += `<h3 class="subhead">Recent overrides <span class="label-note">what the free API had, and FR24's correction</span></h3>
-      <div class="table-scroll"><table class="data-table">
-        <thead><tr><th>Time</th><th>Aircraft</th><th>API</th><th>Free API had</th><th>FR24 says</th></tr></thead>
-        <tbody>${mm.map(r => `<tr><td class="muted c-time">${escHtml(_stamp(r.seen_at))}</td><td class="mono-strong">${escHtml(r.registration || r.callsign || '')}</td><td class="muted">${escHtml(r._api)}</td><td class="mono muted">${escHtml(r.free_route)}</td><td class="mono tone-accent">${escHtml(r.fr24_route)}</td></tr>`).join('')}</tbody>
+        <thead><tr><th>Time</th><th>Flight</th><th>FR24</th><th>Other</th><th>Source</th></tr></thead>
+        <tbody>${mm.map(r => `<tr><td class="muted c-time">${escHtml(_stamp(r.seen_at))}</td><td class="mono-strong">${escHtml(r.callsign || r.registration || '')}</td><td class="mono tone-accent">${escHtml(r.fr24_route)}</td><td class="mono muted">${escHtml(r.other_route)}</td><td class="muted">${escHtml(_CHECK_SOURCES[r.other_source] || r.other_source || '')}</td></tr>`).join('')}</tbody>
       </table></div>`;
   }
   el.innerHTML = html;
@@ -1982,12 +1963,18 @@ function renderGaAccuracy(d) {
 // ── Period card ────────────────────────────────────────────────────────────────────────
 const _PRESET_TITLES = { yesterday: 'Yesterday', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days' };
 
+// Which API supplied each displayed route (a 7-day cache hit counts for the API that
+// resolved it), in trust order.
 const _SOURCE_BARS = [
-  { key: 'free',     label: 'Free APIs',      color: 'var(--ok)' },
-  { key: 'mixed',    label: 'Free + paid',    color: 'var(--accent)' },
-  { key: 'paid',     label: 'Paid APIs only', color: 'var(--warn)' },
-  { key: 'override', label: 'Override rules', color: 'var(--purple)' },
-  { key: 'none',     label: 'No route found', color: 'var(--text-3)' },
+  { key: 'fr24',     label: 'FlightRadar24',           color: 'var(--ok)' },
+  { key: 'airlabs',  label: 'AirLabs',                 color: 'var(--accent)' },
+  { key: 'aeroapi',  label: 'FlightAware AeroAPI',     color: 'var(--warn)' },
+  { key: 'opensky',  label: 'OpenSky (last resort)',   color: 'var(--night)' },
+  { key: 'adsbdb',   label: 'adsbdb (last resort)',    color: 'var(--danger)' },
+  { key: 'vrs',      label: 'Receiver route hint',     color: 'var(--text-2)' },
+  { key: 'override', label: 'Override rules',          color: 'var(--purple)' },
+  { key: 'other',    label: 'Other',                   color: 'var(--text-2)' },
+  { key: 'none',     label: 'No route found',          color: 'var(--text-3)' },
 ];
 
 function renderPeriodStats(d) {
@@ -2637,16 +2624,17 @@ function renderTestResult(d) {
   } else {
     const defs = [
       { key: 'live_position', label: 'airplanes.live', desc: 'Live position + type' },
-      { key: 'adsbdb_route',  label: 'adsbdb route',   desc: 'Static historical DB' },
-      { key: 'opensky',       label: 'OpenSky',        desc: 'Real-time by hex' },
+      { key: 'fr24',          label: 'FlightRadar24',  desc: 'Primary, by tail number' },
       { key: 'airlabs',       label: 'AirLabs',        desc: 'Real-time by callsign' },
       { key: 'aeroapi',       label: 'AeroAPI',        desc: 'FlightAware, paid' },
+      { key: 'opensky',       label: 'OpenSky',        desc: 'Last resort, by hex' },
+      { key: 'adsbdb_route',  label: 'adsbdb route',   desc: 'Absolute last resort' },
       { key: 'adsbdb_type',   label: 'adsbdb type',    desc: 'Aircraft type fallback' },
     ];
     const body = def => {
       const s = steps[def.key];
       if (!s) {
-        if (d.override_matched && ['adsbdb_route', 'opensky', 'airlabs', 'aeroapi'].includes(def.key))
+        if (d.override_matched && ['fr24', 'airlabs', 'aeroapi', 'opensky', 'adsbdb_route'].includes(def.key))
           return '<span class="tone-muted">Skipped: override</span>';
         if (!d.hex_code && def.key === 'adsbdb_type') return '<span class="tone-muted">Skipped: no hex</span>';
         return '<span class="tone-muted">\u2014</span>';

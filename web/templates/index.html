@@ -168,7 +168,7 @@
         <span class="dswitch-state" id="service-label">On</span>
       </button>
       <button type="button" class="dswitch" id="apis-toggle" role="switch" aria-checked="true" data-action="toggle-apis" data-tone="ok" data-off-tone="warn" disabled
-              title="AirLabs and FlightAware lookups; off falls back to OpenSky and adsbdb">
+              title="AirLabs and FlightAware lookups; off leaves FR24, the route cache and the last-resort feeds">
         <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
         <span class="dswitch-text"><span class="dswitch-name">APIs</span><span class="dswitch-desc">AirLabs and FlightAware lookups</span></span>
         <span class="dswitch-state" id="apis-label">On</span>
@@ -403,7 +403,7 @@
               <div><h2 id="sec-cache-h">Cache lifetimes</h2><p>In seconds. Applies after Save &amp; restart.</p></div>
             </header>
             <div class="fields fields-3">
-              {{ num('adsbdb_cache_ttl', 'adsbdb', hint='Route results. Default 3600 (1 hour)', min=60) }}
+              {{ num('adsbdb_cache_ttl', 'adsbdb', hint='Last-resort route results. Default 3600 (1 hour)', min=60) }}
               {{ num('opensky_cache_ttl', 'OpenSky', hint='Default 3600 (1 hour)', min=60) }}
               {{ num('route_ttl_scheduled', 'Scheduled routes', hint='Resolved airline routes. Default 604800 (7 days)', min=60) }}
               {{ num('route_ttl_default', 'GA and other routes', hint='GA, charter and unknown. Default 3600 (1 hour)', min=60) }}
@@ -642,16 +642,10 @@
         </div>
       </article>
 
-      <div class="grid grid-2">
-        <article class="card" id="free-api-card">
-          <header class="card-head"><div><h2>Free API accuracy</h2><p>adsbdb vs. paid APIs &middot; commercial flights</p></div></header>
-          <div id="free-api-content"><p class="empty">Loading&hellip;</p></div>
-        </article>
-        <article class="card" id="ga-accuracy-card">
-          <header class="card-head"><div><h2>GA free API accuracy</h2><p>adsbdb and OpenSky vs. FR24 &middot; N-number aircraft</p></div></header>
-          <div id="ga-accuracy-content"><p class="empty">Loading&hellip;</p></div>
-        </article>
-      </div>
+      <article class="card" id="fr24-agree-card">
+        <header class="card-head"><div><h2>FR24 vs paid APIs</h2><p>The same flight: FR24's route against AirLabs, AeroAPI or the 7-day route cache</p></div></header>
+        <div id="fr24-agree-content"><p class="empty">Loading&hellip;</p></div>
+      </article>
     </div>
   </section>
 

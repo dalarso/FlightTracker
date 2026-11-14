@@ -125,17 +125,25 @@ def _sighting_dict(r) -> dict:
     }
 
 
+# The APIs a displayed route can come from, most trusted first.  A label naming several
+# (an old merge such as 'opensky+aeroapi') is credited to the most trusted one.
+_ROUTE_APIS = ("fr24", "airlabs", "aeroapi", "opensky", "adsbdb", "vrs")
+SOURCE_BUCKETS = _ROUTE_APIS + ("override", "none", "other")
+
+
 def _route_bucket(src: str) -> str:
-    """Where a route came from: the same buckets as the old SQL CASE (whose LIKE was
-    case-insensitive, hence the lower())."""
-    if src == "none":
+    """Which API supplied a displayed route.  Labels are lower-cased for matching
+    ('resolved:airlabs2:cached' -> 'airlabs': a 7-day cache hit is credited to the API
+    that resolved it).  'override' and 'none' are their own buckets."""
+    s = (src or "").lower()
+    if s in ("", "none"):
         return "none"
-    if src == "override":
+    if s == "override":
         return "override"
-    s = src.lower()
-    if "airlabs" in s or "aeroapi" in s:
-        return "mixed" if "+" in src else "paid"
-    return "free"
+    for api in _ROUTE_APIS:
+        if api in s:
+            return api
+    return "other"
 
 
 def _top(counter, n: int) -> list:
@@ -311,7 +319,7 @@ def _db_stats(date_from: str, date_to: str, today: str | None = None,
     total_sourced = sum(sources.values())
     source_pct = {}
     if total_sourced:
-        for b in ("free", "paid", "mixed", "none", "override"):
+        for b in SOURCE_BUCKETS:
             if sources.get(b):
                 source_pct[b] = round(sources[b] / total_sourced * 100, 1)
 
