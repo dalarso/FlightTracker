@@ -125,6 +125,7 @@ from stats_data import _db_stats, _parse_log_sightings, _db_recent, _db_search
 from usage_data import _billing_period_start, _billing_period_end, _read_usage_file
 import scoreboard_data
 from scoreboard_data import _fetch_scoreboard_data, _load_persisted_game_ended_at, _persist_game_ended_at, _clear_persisted_game_ended_at
+from utilities.scoreboard_select import LIVE_STATES, FINAL_STATES, estimate_ended_at
 CONFIG_PATH      = BASE_DIR / "config.py"
 PAUSE_FLAG       = Path("/tmp/ft_paused")
 NIGHT_FLAG       = Path("/tmp/ft_night")
@@ -1189,13 +1190,35 @@ def _dismiss_state_for(game):
     return None
 
 
-def _scoreboard_response(cached):
+def _post_game_seconds() -> int:
+    """SCOREBOARD_POST_GAME_MINUTES in seconds — the same window the LED board uses."""
+    try:
+        return max(0, int(read_config().get("SCOREBOARD_POST_GAME_MINUTES", 30))) * 60
+    except Exception:
+        return 30 * 60
+
+
+def _on_board(game, ended_at, now) -> bool:
+    """Is this game what the LED board is showing (flights aside)?  LIVE/CRIT always; a FINAL
+    only inside the post-game window — after that the board is back on the idle scenes, so
+    the UI must stop saying "On the board now" (it used to keep the final up until midnight)."""
+    state = (game or {}).get("state")
+    if state in LIVE_STATES:
+        return True
+    if state in FINAL_STATES:
+        return ended_at is not None and (now - ended_at) <= _post_game_seconds()
+    return False
+
+
+def _scoreboard_response(cached, now=None):
+    now = time.time() if now is None else now
     return jsonify({
         "game":          cached["game"],
         "team_name":     cached["team_name"],
         "sport_key":     cached.get("sport_key", "NHL"),
         "enabled":       cached["enabled"],
         "game_ended_at": cached.get("game_ended_at"),
+        "on_board":      _on_board(cached["game"], cached.get("game_ended_at"), now),
         "dismissed_game_id": _dismiss_state_for(cached["game"]),
     })
 
@@ -1238,33 +1261,28 @@ def _refresh_scoreboard(now):
     game_id = game.get("game_id") if game else None
 
     # Determine game_ended_at before acquiring the lock so file I/O is cheap.
-    if state in ("FINAL", "OFF") and game_id:
-        # Peek at the cached value without the lock (worst case: two threads
-        # both compute the same value on the very first post-game poll).
-        prev_ended_at_peek = _scoreboard_cache.get("game_ended_at")
+    # Peek at the cached game without the lock (worst case: two threads both compute the same
+    # value on the very first post-game poll).
+    prev_game = _scoreboard_cache.get("game") or {}
+    same_game = bool(game_id) and str(prev_game.get("game_id")) == str(game_id)
+    if state in FINAL_STATES and game_id:
+        # Reuse the cached end time only if it belongs to THIS game — a cache still holding
+        # yesterday's final (no request in between) must not mark today's game long-expired.
+        prev_ended_at_peek = _scoreboard_cache.get("game_ended_at") if same_game else None
         if prev_ended_at_peek is None:
             # Try the persisted file first (survives service restart).
             persisted = _load_persisted_game_ended_at(game_id)
             if persisted is None:
-                # Estimate from game start rather than using now, so a service
-                # restart doesn't reset the 30-min window for an already-over game.
-                # Use a period-aware buffer — err on the LATER side so we never
-                # hide the score before the real post-game window expires.
-                #   regulation (period ≤ 3): start + 3 h  (~2.5 h typical)
-                #   OT / SO   (period  > 3): start + 4 h  (conservative for multi-OT)
-                try:
-                    start_utc = game.get("start_time_utc", "")
-                    if start_utc:
-                        start_ts = datetime.fromisoformat(
-                            start_utc.replace("Z", "+00:00")
-                        ).timestamp()
-                        period = game.get("period", 0) or 0
-                        buffer = 4 * 3600 if period > 3 else 3 * 3600
-                        persisted = start_ts + buffer
-                    else:
-                        persisted = now
-                except Exception:
+                if same_game and prev_game.get("state") in LIVE_STATES:
+                    # We watched it go final (page open across the buzzer): now is accurate.
                     persisted = now
+                else:
+                    # First seen already final (page opened later, or a web restart): estimate
+                    # from the start time with the SAME league-aware lengths the LED board uses,
+                    # clamped to now — the old fixed 3 h / 4 h buffer was not clamped, so a
+                    # final first seen soon after the buzzer got an end time in the FUTURE and
+                    # the UI kept showing it well after the board had gone back to idle.
+                    persisted = estimate_ended_at(game, now, sport_key)
                 _persist_game_ended_at(game_id, persisted)
             new_ended_at = persisted
         else:
@@ -1274,8 +1292,8 @@ def _refresh_scoreboard(now):
         _clear_persisted_game_ended_at()
 
     with _scoreboard_cache_lock:
-        # If another thread already set game_ended_at, keep the earlier value.
-        existing = _scoreboard_cache.get("game_ended_at")
+        # If another thread already set game_ended_at FOR THIS GAME, keep the earlier value.
+        existing = _scoreboard_cache.get("game_ended_at") if same_game else None
         if new_ended_at is not None and existing is not None:
             game_ended_at = min(existing, new_ended_at)
         else:
@@ -1290,6 +1308,7 @@ def _refresh_scoreboard(now):
         "sport_key":    sport_key,    # e.g. "NHL", "NFL", "MLB", "NBA", "MLS"
         "enabled":      enabled,
         "game_ended_at": game_ended_at,   # unix timestamp or null
+        "on_board":     _on_board(game, game_ended_at, now),   # what the LED board shows now
         "dismissed_game_id": _dismiss_state_for(game),   # game_id hidden by the user, or null
     })
 

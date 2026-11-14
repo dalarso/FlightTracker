@@ -31,6 +31,33 @@ def _get_session() -> requests.Session:
     return _session
 
 
+def _state_of(game: dict) -> str:
+    """Normalised scoreboard state for an MLB schedule game.
+
+    abstractGameState alone is too coarse (statsapi.mlb.com/api/v1/gameStatus):
+      * Postponed ("D") and Cancelled ("C") are abstract "Final" — they used to paint a phantom
+        "FINAL 0-0" for the post-game window.  → "PPD" (never displayed).
+      * Suspended ("T"/"U") is abstract "Live" — it held the board on a frozen game and polled
+        every 10 s until midnight.  → "PPD".
+      * Warmup (coded "P") is abstract "Live" — the board took over ~20 min before the first
+        pitch, contradicting "the board switches over once play begins".  → "PRE".
+    """
+    status   = game.get("status", {})
+    abstract = status.get("abstractGameState", "Preview")
+    coded    = status.get("codedGameState", "")
+    if coded in ("C", "D"):
+        return "PPD"
+    if abstract == "Live":
+        if coded in ("T", "U"):
+            return "PPD"
+        if coded == "P":
+            return "PRE"
+        return "LIVE"
+    if abstract == "Final":
+        return "FINAL"
+    return "FUT"
+
+
 def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
     """
     Fetch today's game for *team_id* from the official MLB Stats API.
@@ -85,17 +112,7 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
             if str(team_id) not in (str(home_id), str(away_id)):
                 continue
 
-            # ── Game state ────────────────────────────────────────────────
-            abstract = game.get("status", {}).get("abstractGameState", "Preview")
-            if abstract == "Preview":
-                state = "FUT"
-            elif abstract == "Live":
-                state = "LIVE"
-            elif abstract == "Final":
-                state = "FINAL"
-            else:
-                state = "FUT"
-            matches.append((state, game))
+            matches.append((_state_of(game), game))
 
         if not matches:
             return None
@@ -109,7 +126,7 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
                 break
         if chosen is None:
             for _state, _game in matches:
-                if _state == "FUT":
+                if _state in ("FUT", "PRE"):
                     chosen = _game
                     break
         if chosen is None:
@@ -129,16 +146,7 @@ def fetch_mlb_game(team_id: int, tz: ZoneInfo = None) -> dict | None:
         team_data = home if team_home else away
         opp_data  = away if team_home else home
 
-        # ── Game state ────────────────────────────────────────────────
-        abstract = game.get("status", {}).get("abstractGameState", "Preview")
-        if abstract == "Preview":
-            state = "FUT"
-        elif abstract == "Live":
-            state = "LIVE"
-        elif abstract == "Final":
-            state = "FINAL"
-        else:
-            state = "FUT"
+        state = _state_of(game)
 
         # ── Inning / linescore ────────────────────────────────────────
         ls          = game.get("linescore", {})

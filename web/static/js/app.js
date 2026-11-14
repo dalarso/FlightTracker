@@ -252,17 +252,24 @@ function renderSbLive(d) {
   const field = document.getElementById('sb-live-field');
   if (!field) return;
   const g = d && d.enabled ? d.game : null;
-  const active = g && ['LIVE', 'CRIT', 'FINAL', 'OFF'].includes(g.state);
+  // on_board (server-side) applies the board's post-game window, so a final drops off here
+  // when it drops off the LED board; older servers don't send it → fall back to the state.
+  const active = g && (typeof d.on_board === 'boolean'
+    ? d.on_board
+    : ['LIVE', 'CRIT', 'FINAL', 'OFF'].includes(g.state));
   if (!active) { field.style.display = 'none'; _sbGame = null; return; }
   _sbGame = g;
   const gid = g.game_id != null ? String(g.game_id) : '';
   const hidden = !!(_sbDismissedId && gid && _sbDismissedId === gid);
   field.style.display = '';
   field.dataset.hidden = hidden ? '1' : '';
-  const team = d.team_name || '';
-  const opp = g.opp_abbr || '?';
+  // Standard orientation, matching the LED board: AWAY first, HOME second
+  // ("UTA 3–5 VGK" when VGK is at home, "VGK 5–3 UTA" on the road).
+  const team = { abbr: d.team_name || '', score: g.team_score ?? 0 };
+  const opp  = { abbr: g.opp_abbr || '?',  score: g.opp_score ?? 0 };
+  const [away, home] = g.team_home ? [opp, team] : [team, opp];
   document.getElementById('sb-live-text').textContent =
-    `${team} ${g.team_score ?? 0}–${g.opp_score ?? 0} ${opp} · ${_sbStatusLabel(g)}`;
+    `${away.abbr} ${away.score}–${home.score} ${home.abbr} · ${_sbStatusLabel(g)}`;
   document.getElementById('sb-live-dot').classList.toggle('off', hidden);
   const btn = document.getElementById('sb-hide-btn');
   btn.textContent = hidden ? 'Show this game' : 'Hide this game';

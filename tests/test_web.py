@@ -221,6 +221,87 @@ class ScoreboardPersistence(unittest.TestCase):
         self.assertIsNone(scoreboard_data._load_persisted_game_ended_at("game-1"))
 
 
+class ScoreboardOnBoardWindow(unittest.TestCase):
+    """/api/scoreboard's on_board flag follows the LED board's post-game window, and the
+    web's end-time estimate is the board's (league-aware, clamped to now).  The UI used to
+    say "On the board now" for a final until midnight, and its fixed start+3 h/4 h estimate
+    wasn't clamped, so a final first seen soon after the buzzer got a FUTURE end time."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+
+    def setUp(self):
+        import time as _t
+        self.now = _t.time()
+        self._dir = Path(tempfile.mkdtemp())
+        self._patches = [
+            mock.patch.object(scoreboard_data, "_GAME_ENDED_AT_FILE", self._dir / "ended.json"),
+            mock.patch.object(self.srv, "DISMISS_FLAG", self._dir / "dismissed"),
+            mock.patch.object(self.srv, "read_config",
+                              return_value={"SCOREBOARD_POST_GAME_MINUTES": 30}),
+        ]
+        for p in self._patches:
+            p.start()
+        self.srv._scoreboard_cache.update({"game": None, "team_name": "VGK", "sport_key": "NHL",
+                                           "enabled": True, "ts": 0.0, "game_ended_at": None})
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def _game(self, state, hours_ago, gid=101):
+        import datetime as _dt
+        start = _dt.datetime.fromtimestamp(self.now - hours_ago * 3600, _dt.timezone.utc)
+        return {"state": state, "game_id": gid, "team_score": 5, "opp_score": 3,
+                "start_time_utc": start.isoformat().replace("+00:00", "Z")}
+
+    def _refresh(self, game):
+        with mock.patch.object(self.srv, "_fetch_scoreboard_data",
+                               return_value=(game, "VGK", "NHL", True)):
+            with self.srv.app.test_request_context():
+                return self.srv._refresh_scoreboard(self.now).get_json()
+
+    def test_live_is_on_board(self):
+        self.assertTrue(self._refresh(self._game("LIVE", 1.5))["on_board"])
+
+    def test_final_watched_live_ends_now(self):
+        self._refresh(self._game("LIVE", 2.5))
+        d = self._refresh(self._game("FINAL", 2.5))
+        self.assertAlmostEqual(d["game_ended_at"], self.now, delta=1)
+        self.assertTrue(d["on_board"])
+
+    def test_old_final_first_seen_is_off_board(self):
+        d = self._refresh(self._game("FINAL", 10))          # ended hours ago
+        self.assertFalse(d["on_board"])
+        self.assertLess(d["game_ended_at"], self.now - 30 * 60)
+
+    def test_estimate_never_in_the_future(self):
+        # Started 2.5 h ago; NHL length is 3 h → the raw estimate is in the future → clamp.
+        d = self._refresh(self._game("FINAL", 2.5))
+        self.assertLessEqual(d["game_ended_at"], self.now)
+        self.assertTrue(d["on_board"])
+
+    def test_stale_cached_end_time_from_another_game_is_ignored(self):
+        self.srv._scoreboard_cache.update({"game": self._game("FINAL", 30, gid=99),
+                                           "game_ended_at": self.now - 26 * 3600})
+        d = self._refresh(self._game("FINAL", 2.5, gid=101))
+        self.assertTrue(d["on_board"])                      # not yesterday's end time
+
+    def test_on_board_helper(self):
+        on = self.srv._on_board
+        self.assertFalse(on(None, None, self.now))
+        self.assertFalse(on({"state": "FUT"}, None, self.now))
+        self.assertFalse(on({"state": "PPD"}, None, self.now))
+        self.assertTrue(on({"state": "CRIT"}, None, self.now))
+        self.assertTrue(on({"state": "FINAL"}, self.now - 29 * 60, self.now))
+        self.assertFalse(on({"state": "OFF"}, self.now - 31 * 60, self.now))
+        self.assertFalse(on({"state": "FINAL"}, None, self.now))
+
+
 class SecurityAndCSRF(unittest.TestCase):
     """CSRF guard + security headers (guard tested directly — no live side effects)."""
 

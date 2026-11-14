@@ -12,8 +12,44 @@ caller (server.py, via the persisted ended-at file) — is expressed through the
 optional `final_eligible` predicate, NOT by forking the selection order.
 """
 
+import datetime
+
 LIVE_STATES = ("LIVE", "CRIT")
 FINAL_STATES = ("FINAL", "OFF")
+
+# Typical wall-clock length (scheduled start → final buzzer) per league, with ~30 min of
+# headroom baked in for OT / stoppages so we err slightly LATE (never hide a score before its
+# real post-game window ends).  Keyed by league because "period" means different things per
+# sport: a completed BASKETBALL game ends at period 4, a BASEBALL game at inning 9 — so the old
+# "period > 3 → 4 h" heuristic gave a ~2 h WNBA game a 4 h buffer and re-showed it for hours.
+GAME_SECONDS = {
+    "NHL":  int(3.0 * 3600),
+    "MLB":  int(3.5 * 3600),
+    "NFL":  int(3.5 * 3600),
+    "NBA":  int(2.75 * 3600),
+    "WNBA": int(2.5 * 3600),
+    "MLS":  int(2.5 * 3600),
+    "FIFA": int(2.75 * 3600),
+}
+DEFAULT_GAME_SECONDS = int(3.5 * 3600)   # err long for an unknown league
+
+
+def estimate_ended_at(game, now_ts, league=None):
+    """Best-effort end time for a FINAL/OFF game we did NOT watch finish — i.e. a service
+    restart INTO an already-finished game (or, on the web side, a final first seen when the
+    page is opened).  Estimated as the scheduled start plus that league's typical game length
+    (GAME_SECONDS), clamped to now so it is never in the future.
+
+    Without this a restart stamped `now`, giving a game that ended hours ago a fresh post-game
+    window (a redeploy / reboot resurrected the last final for 30 min).  Falls back to now_ts
+    when the start time is missing/unparseable.  Shared by the LED display and the web UI so
+    both agree on when a final leaves the board."""
+    try:
+        start = (game or {}).get("start_time_utc", "")
+        start_ts = datetime.datetime.fromisoformat(start.replace("Z", "+00:00")).timestamp()
+        return min(start_ts + GAME_SECONDS.get(league, DEFAULT_GAME_SECONDS), now_ts)
+    except Exception:
+        return now_ts
 
 
 def select_active(entries, final_eligible=None):
