@@ -65,49 +65,37 @@ get_route() get_aircraft_type()
 
 ## Route Resolution — Source Hierarchy + `_select()`
 
-For each overhead flight the route engine queries a prioritized stack of sources, then a single authority — `_select()` — picks the winning route from everything they returned. Every result is cached in SQLite to avoid redundant calls.
+For each overhead flight the route engine asks **FlightRadar24 first, for every flight**, keeps the 7-day route cache and AirLabs running as before, uses **AeroAPI as the tie-breaker** when FR24 and AirLabs (or the cache) disagree, and lets a single authority — `_select()` — pick the winning route. The free feeds (OpenSky, adsbdb) are a last resort only. Every result is cached in SQLite to avoid redundant calls.
 
 ### Step 0 — Override Rules
-User-defined rules stored in SQLite. Pattern-match by callsign (wildcards supported). Overrides return immediately — no API calls are made. Example: `JANET*` → always display "Janet Airlines" departing LAS.
+User-defined rules stored in SQLite. Pattern-match by callsign (wildcards supported). A full override returns immediately — no API calls are made. Example: `JANET*` → always display "Janet Airlines" departing LAS. A partial rule (one endpoint) skips the paid APIs; FR24, then OpenSky, then adsbdb fill the missing endpoint.
 
-### Step 0.5 — Resolved-Route Cache *(scheduled airlines only)*
-For commercial flights (recognized by ICAO 3-letter prefix), once both endpoints are known from any source, the full route is cached for 7 days — along with the airport coordinates. On subsequent sightings, the cached route is validated with a **geometry plausibility check** before being returned. If the aircraft's current position is inconsistent with the stored route (e.g. the same flight number is being reused for a different city-pair on a different day), the stale cache entry is busted and a fresh lookup runs. This prevents wrong routes from sticking for the full 7-day TTL when an airline reuses a flight number on a different routing.
+### Step 1 — FlightRadar24 *(free, every flight, by tail number — primary)*
+Real-time lookup by aircraft **registration** via the [FlightRadarAPI](https://pypi.org/project/FlightRadarAPI/) library (no API key required). Because it is keyed by the airframe, it answers with the leg that aircraft is flying right now — a reused flight number can't mislead it. The tail comes from the ADS-B feed, the permanent hex → tail cache, or adsbdb's aircraft database; a flight with no known tail can't be looked up (the library has no callsign search). It is read live once per pass — the answer is kept 10 minutes so the 15-second polls of a plane overhead don't re-ask it — and the route that wins is written to the 7-day cache below, so the cache stays warm for when FR24 is unavailable. If FR24 errors (it's an unofficial API and has disappeared before), it backs off for 5 minutes and everything below carries on without it.
 
-### Step 0.75 — VRS Live Route Hint *(Virtual Radar Server only)*
-When the receiver is Virtual Radar Server, it may supply departure and arrival airport codes directly in the feed. Trusted immediately if at least one endpoint is a configured local airport. Stored with a 1-hour TTL so it doesn't interfere with the 7-day resolved cache.
+### Step 1.5 — Resolved-Route Cache *(scheduled airlines only)*
+For airline flights (recognized by ICAO 3-letter prefix), once both endpoints are known, the route is cached for 7 days along with the airport coordinates, so the same flight number later skips the paid APIs. A cached route is validated with a **geometry plausibility check** and busted if the aircraft's position doesn't fit (airlines reuse flight numbers for different city pairs on different days). FR24's answer is still checked against it: if FR24 agrees, the route is credited to FR24. If FR24 has a different complete route, AeroAPI breaks the tie: the side it backs is shown, and FR24's route also replaces the cache entry. If AeroAPI settles nothing, FR24 wins when its route is at least as local as the cached one.
 
-### Step 1 — FlightRadar24 *(free, registration-based — GA first resort)*
-Real-time lookup by aircraft **registration** via the [FlightRadarAPI](https://pypi.org/project/FlightRadarAPI/) library (no API key required). Queried first for N-number / GA registrations, where a registration-based lookup is more accurate than adsbdb's static history. Commercial callsigns are served by FR24 later, at Step 5.
+### Step 1.75 — VRS Live Route Hint *(Virtual Radar Server only)*
+When the receiver is Virtual Radar Server, it may supply departure and arrival airport codes directly in the feed. Used when at least one endpoint is a configured local airport and FR24 has no complete route.
 
-### Step 2 — adsbdb *(free, unlimited)*
-Static historical database queried by callsign. Reliable for GA flights — a callsign like `N12345` consistently maps to the same aircraft. For commercial airlines the result is trusted only with a **local origin** — the historical DB can't know today's specific routing. Cached for 1 hour.
+### Step 2 — AirLabs Primary Key *(1,000 calls/month free)*
+Real-time route lookup by callsign. Returns airport coordinates enabling geometry plausibility checks. Called for every airline flight the resolved cache doesn't already know — FR24's answer doesn't skip it, so the two can be compared and AirLabs is ready when FR24 is down. (For GA / N-number tails a complete FR24 route does skip the paid APIs, as before.) Results cached at the scheduled-airline TTL (7 days) or GA TTL (1 hour). Automatically disables on 402 with 24-hour backoff; resumes immediately when the billing period resets.
 
-### Step 2a — OpenSky Flights API *(free, unlimited)*
-Queries the last 6 hours of flight history by hex code (aircraft radio ID). Returns estimated departure and arrival airports. Trusted only when the departure is a configured **local airport**. Like adsbdb, distrusted for commercial flights unless local-origin. Cached for 1 hour.
-
-### Step 2b — Free-API Consensus
-If adsbdb and OpenSky independently return the **exact same route** (using completely different lookup keys — callsign vs. hex) and geometry plausibility passes, the route is trusted without burning a paid API call.
-
-### Step 2c — GA Cross-Check
-For GA flights, the free sources' results are compared against FR24 and recorded for the accuracy stats — no extra API spend.
-
-### Step 3 — AirLabs Primary Key *(1,000 calls/month free)*
-Real-time route lookup by callsign. Returns airport coordinates enabling geometry plausibility checks. Trusted for any plausible route regardless of origin — paid APIs are not restricted to local departures. Results cached at the scheduled-airline TTL (7 days) or GA TTL (1 hour). Automatically disables on 402 with 24-hour backoff; resumes immediately when the billing period resets.
-
-### Step 3b — AirLabs Secondary Key *(1,000 calls/month free)*
+### Step 2b — AirLabs Secondary Key *(1,000 calls/month free)*
 A second AirLabs API key used as overflow. Fires only when the primary key did not make a live call this invocation (backoff, cache hit, disabled). If the primary returned an empty live response, the secondary is skipped — both keys hit the same backend. Combined, the two keys provide 2,000 free calls/month before AeroAPI spend begins.
 
-### Step 4 — FlightAware AeroAPI *(paid, last resort)*
-Paid real-time route lookup, capped and tracked monthly. Only called when all free/freemium APIs failed to resolve the route. Geometry plausibility is applied even on cache hits since the same callsign can fly a different route on a different day.
+### Step 3 — FlightAware AeroAPI *(paid)*
+Paid real-time route lookup, capped and tracked monthly. When FR24 has no complete route it runs as before: when both AirLabs keys have no usable route, or AirLabs only had a non-local route. When FR24 does have the whole route, AeroAPI isn't asked to repeat it — only to **break a tie** when AirLabs (or the 7-day cache) disagrees with FR24. A tie-break is always a live answer (never AeroAPI's own 7-day cache, which could hold the very route being judged) and is remembered for the flight's pass, so a lingering flight costs one call. Geometry plausibility is applied even on cache hits since the same callsign can fly a different route on a different day.
 
-### Step 5 — FlightRadar24 *(commercial — free, after the paid APIs)*
-A final free fallback for commercial callsigns the paid APIs couldn't resolve (or only returned a non-local route for) — a registration-based FR24 lookup, cached by callsign.
+### Step 4 — The Final Pick — `_select()`
+The steps above don't each decide the route on their own; they gather every trusted source's candidate (FR24, AirLabs, AeroAPI) and a single authority, **`_select()`**, picks the winner. It ranks candidates by **route tier** (a route touching a home airport beats one that doesn't; a complete route beats a partial one), then by a fixed **source priority** — FR24 first, then AirLabs, AeroAPI — and rejects any candidate whose geometry is implausible for the aircraft's current position. When FR24 and AirLabs disagree, the side AeroAPI backs wins. One guard: AirLabs and AeroAPI both key on the flight number and can share a stale leg (MXY243: both answered SYR→CHS for a plane over LAS), so the two of them can't overrule an FR24 route touching a home airport with one that doesn't. When AeroAPI has no clear answer, the tier and then FR24 decide.
 
-### The Final Pick — `_select()`
-The steps above don't each decide the route on their own; they gather every source's candidate and a single authority, **`_select()`**, picks the winner. It ranks candidates by **route tier** (a local endpoint beats a non-local guess; a complete route beats a partial one), breaks ties by a fixed **source priority**, and rejects any candidate whose geometry is implausible for the aircraft's current position. The free-source **trust rule travels into the candidate set**: for a *commercial* callsign a stale local-origin adsbdb/OpenSky route is never allowed to outrank a live paid route — but it still serves as a safety net when the paid chain is empty or every paid route is geometrically implausible.
+### Step 5 — Last Resort: OpenSky, then adsbdb
+Only when none of the trusted sources has a usable route. **OpenSky** (free, by hex) knows the departure airport of a flight in progress but rarely the destination; **adsbdb** (free, by callsign) is a static historical DB — a flight number's old city pair — so it is asked only if OpenSky has nothing either. Neither is queried for flights the trusted sources resolve.
 
 ### Departure Veto
-Some flight numbers fly more than one leg (airline turns like CLT→LAS→CLT, through-flights), and AirLabs sometimes answers with the leg that *ended* at the home airport while the plane is climbing out of it — a departure shown as `ORD→LAS`. When the plane is evidently **departing** a local airport — climbing at ≥ 300 ft/min, or OpenSky's live departure airport is local and the plane isn't descending — any candidate that *arrives* at a local airport from elsewhere is dropped before `_select()` runs (and a cached one is busted). The chain then falls through to AeroAPI (which picks the leg that is actually airborne) or to the free sources' local-origin route.
+Some flight numbers fly more than one leg (airline turns like CLT→LAS→CLT, through-flights), and AirLabs sometimes answers with the leg that *ended* at the home airport while the plane is climbing out of it — a departure shown as `ORD→LAS`. When the plane is evidently **departing** a local airport — climbing at ≥ 300 ft/min, or OpenSky's live departure airport is local and the plane isn't descending — any candidate that *arrives* at a local airport from elsewhere is dropped before `_select()` runs (and a cached one is busted). OpenSky is asked for that evidence only when a candidate route has that inbound shape and the plane isn't descending — a few lookups a day.
 
 ### Paid-Miss Cache
 When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppression entry is written. Prevents repeated quota burns on GA or obscure flights that will never have a filed route.
@@ -116,18 +104,20 @@ When both AirLabs and AeroAPI return empty for the same callsign, a 2-hour suppr
 
 | Cache type | TTL | Notes |
 |---|---|---|
-| Resolved commercial route | 7 days | Set by `ROUTE_TTL_SCHEDULED` — once origin+destination confirmed by any trusted source; geometry-validated on read |
+| FR24 answer | 10 min per flight / 5 min miss | Read live once per pass (keyed by callsign), not every 15 s poll; still used while FR24 is backing off |
+| Resolved commercial route | 7 days | Set by `ROUTE_TTL_SCHEDULED` — once origin+destination confirmed; geometry-validated on read, checked against FR24 |
 | AirLabs / AeroAPI result | 7 days (commercial) / 1 hour (GA) | Same TTL as resolved route when committed |
-| adsbdb result | 1 hour | Cached but not committed for commercial flights |
-| OpenSky result | 1 hour | Cached but not committed for commercial flights |
+| OpenSky result | 1 hour | Only when asked (last resort or departure evidence) |
+| adsbdb route result | 1 hour | Only when asked (absolute last resort) |
 | Paid-miss (no route found) | 2 hours | Suppresses redundant paid API calls for unresolvable callsigns |
 | Aircraft type / registration | Indefinite | Hardware doesn't change — permanent mapping |
 | AirLabs 402 backoff | Until billing period resets | Clears automatically on reset day; no restart needed |
+| FR24 error backoff | 5 minutes | The paid APIs and caches carry on meanwhile |
 
 TTLs can be overridden in `config.py` — see `ROUTE_TTL_SCHEDULED`, `ROUTE_TTL_DEFAULT`, and the other cache TTL constants.
 
-### Cross-Check & Accuracy Tracking
-For commercial flights where adsbdb had a route, the result is compared against what the paid APIs returned and stored in the `free_api_checks` table. The web UI shows a running match-rate percentage — useful for understanding how reliable the free historical DB is for your local traffic.
+### FR24 vs Paid APIs
+Whenever FR24 answers live and a paid API (or the resolved cache) also has the route for the same flight, the pair is stored in the `fr24_checks` table, along with AeroAPI's tie-break answer and verdict when they disagreed and the route the board showed. The Stats page shows how often they agree, split by what FR24 was compared against, how AeroAPI's tie-breaks went, and the recent disagreements side by side so you can judge which source was right.
 
 ---
 
@@ -152,8 +142,10 @@ When no aircraft is overhead, the panel can show a **live sports scoreboard** in
 
 - **Free data sources, no keys** — NHL (`api-web.nhle.com`), MLB (`statsapi.mlb.com`), and NFL / NBA / WNBA / MLS / **FIFA World Cup** (ESPN's public API — e.g. `basketball/wnba`, `soccer/fifa.world`; follow any team or nation).
 - **Priority** — if several configured teams are live at once, `SCOREBOARD_PRIORITY` decides which is shown; a LIVE game always beats a finished one. The LED scene and the web `/api/scoreboard` endpoint pick the game through one shared selector, so they can't disagree.
-- **Celebrations** — a full-screen scroll on a goal/score, and a one-shot "{TEAM} WINS!" at the final. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board — for your NHL team only (other sports celebrate on the panel but never sound the horn).
-- **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume.
+- **Standard layout** — away team on the left, home team on the right (as on any broadcast scoreboard), with your team highlighted in gold on whichever side it plays. The bottom line shows the period plus the game clock while play is live (`2nd 14:32`, `Q4 0:45`, `2nd 67'`), the period alone during breaks, and `FINAL` / `FINAL OT` / `FINAL 2OT` / `FINAL SO` / `FINAL AET` / `FINAL PEN` / `F/10` at the end. The web UI's "On the board now" line and the desktop goal-horn app use the same away-left / home-right order.
+- **Celebrations** — a full-screen scroll on a goal/score (`SCOREBOARD_GOAL_CELEBRATION_SECONDS`), and a one-shot "{TEAM} WINS!" at the final (`SCOREBOARD_WIN_CELEBRATION_SECONDS`; both editable in the web UI, 0 = off). A plane overhead still wins — the scroll pauses and resumes after it. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board — for your NHL team only (other sports celebrate on the panel but never sound the horn).
+- **Final at the horn** — the NHL API reports a "soft final" (`OVER`) for a few minutes before `FINAL`; it is treated as final, so the score and WIN celebration appear at the horn instead of after a detour back to the idle screens. Postponed / cancelled / suspended games (and MLB warmups) never take over the board.
+- **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume. The web UI follows the same window (`on_board` in `/api/scoreboard`).
 
 Enable with `SCOREBOARD_ENABLED = True` and set each sport's team ID/name — see the config block below.
 
@@ -178,7 +170,7 @@ SQLite with WAL mode and NORMAL sync (SD-card friendly). Two persistent connecti
 
 **`api_calls`** — per-day API call counts by source (airlabs, aeroapi, adsbdb, opensky). Powers the daily sparklines in the web UI.
 
-**`free_api_checks`** — per-flight record of whether adsbdb matched the paid API result for commercial flights. Powers the accuracy card on the stats page.
+**`fr24_checks`** — per-flight record of FR24's route next to the paid APIs' (or the route cache's), and whether they agreed. Powers the FR24 vs paid APIs card on the stats page. (Older databases may still hold the retired `free_api_checks` / `ga_free_api_checks` tables; nothing reads them.)
 
 ---
 
@@ -191,7 +183,7 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
 **Trust model (read this):** the dashboard is single-user, **LAN-only, and has no authentication** by design. The header/Origin checks below are **anti-CSRF, not a login** — anyone who can reach `:5000` on your network has full control (toggle night mode, edit config, restart the service). That's an acceptable model for a home LAN behind a router; it is **not** safe to expose to the internet. Harden it for your network:
 
 - **Binds `0.0.0.0:5000`** (reachable from any device on your LAN). Keep the Pi behind your router/firewall — do **not** port-forward `:5000` to the internet.
-- **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The dashboard's 👁 button reveals one key on demand (one request per field).
+- **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The eye button next to a key reveals that one key on demand (one request per field).
 - **CSRF-guarded, two layers:** every state-changing request must carry an `X-Requested-With: FlightTracker` header (the dashboard sends it automatically), so a malicious page you happen to visit can't drive the dashboard through your browser. In addition, a request whose browser `Origin` resolves to a **non-LAN** host is rejected — this blocks DNS-rebinding (where a public name is rebound to the Pi's LAN IP), which the static header alone can't catch. LAN/loopback/`*.local`/bare-hostname origins (and header-less clients like `curl`) are allowed. **Tailscale is fully supported** for remote access — both the CGNAT IP range (`100.64.0.0/10`) and MagicDNS names (`*.ts.net`) pass, so you can reach the dashboard from anywhere on your tailnet.
 - **Health endpoint:** `GET /api/health` returns a liveness snapshot the display process writes each poll — `last_poll_age_sec`, `processing`, `active_threads`, `cache_write_failures`, `uptime_sec`, and an `ok` flag. Point an uptime monitor at it to catch a wedged poll or a failing SD card (rising `cache_write_failures`) before the panel visibly goes stale.
 - **Production server:** served by [`waitress`](https://pypi.org/project/waitress/) when installed (it's in `requirements.txt`); falls back to the Flask dev server otherwise.
@@ -201,47 +193,37 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
   pi ALL=(root) NOPASSWD: /usr/bin/systemctl start FlightTracker, /usr/bin/systemctl stop FlightTracker, /usr/bin/systemctl restart FlightTracker
   ```
 
-### Live Display Tab
-- Current overhead flights with route, aircraft type, and registration
-- Leaflet map showing the configured zone
-- Manual route test: enter any callsign to run the full resolution stack and see exactly which APIs returned what
+### Layout
+- One responsive page with no build step: tabs across the top on a desktop, a bottom tab bar on a phone, light and dark themes (follows the OS; the sun/moon button overrides it). Icons are an inline SVG sprite, so there are no emoji and no icon font.
+- **Header:** a connection badge (green when the Pi answers, amber when the display self-check in `/api/health` reports a problem, red when the Pi is unreachable) and the Display / Night / Service / APIs switches, inline on wide screens and under the power button on smaller ones. The switches stay disabled until the Pi has reported their real state.
+- Tabs: Stats (home), Map, APIs, Rules, Settings, Log. The open tab is kept in the URL (`#map`, `#config`, …) so a reload or a bookmark lands on it. Polling pauses while the page is hidden.
 
-### Stats Tab
-- **Today**: flights seen, unique airlines, API calls used
-- **Top Airlines**: sorted by sighting count, with N-number registrations (private / GA) grouped into a single "N-reg" row
-- **Top Tail #s**: 25 most-seen registrations, each annotated with airline name and aircraft type where known
-- **Recent Flights**: last 20 sightings with origin → destination and aircraft type
-- **Free API Accuracy**: 30-day adsbdb vs. paid API match rate with mismatch history
-- **90-Day Period**: rolling totals with per-day sparklines, filterable by custom date range
+### Settings
+Live editing of `config.py` without SSH, in cards with a section index: zone, altitude filter, home location and timezone, display hardware, weather, scoreboard, receiver, API keys (masked), billing limits and reset days, and cache lifetimes. A sticky save bar shows when the form differs from what's saved, the browser warns before you leave with unsaved edits, and impossible values (an upside-down zone, minimum altitude above maximum) are flagged before anything is sent. **Save & restart display** applies the settings that need a restart. Footer links go to this repo and Colin Waddell's original project.
 
-### API Management Tab
-Stack of all configured APIs showing:
-- Enable/disable toggles (flag files in `/tmp/` — auto-cleared on reboot)
-- Monthly usage with progress bars and billing period dates
-- Manual usage adjustment (correct the counter if a period was mis-counted)
-- Per-API notes explaining trust rules and caching behavior
+### Map
+A Leaflet map (loaded the first time the tab opens, pinned with Subresource Integrity) showing the zone rectangle and home. Drag the corner handles to resize the zone, then **Save zone**.
 
-### Config Tab
-Live editing of `config.py` without SSH:
-- Location and zone settings
-- Timezone (IANA name)
-- API keys (masked by default)
-- Billing limits and reset days for AirLabs and AeroAPI
-- Cache TTL overrides
-- Display options: brightness, night brightness, poll intervals, time/date format
-- Save & Restart button
-- Footer links to this repo and Colin Waddell's original project
+### APIs
+- Usage meters for AirLabs 1, AirLabs 2 and FlightAware AeroAPI with billing periods, plus a manual correction if a period was mis-counted
+- The route data stack in the order a route is trusted (FR24, AirLabs 1 and 2, AeroAPI, then OpenSky and adsbdb as the last resort), with per-source enable/disable (flag files in `/tmp/`, cleared on reboot), cache entry counts and per-source cache clearing
+- Clear a single cache entry by tail number or callsign
 
-### Overrides Tab
-Full CRUD for the override rule table:
-- Add/edit/delete/reorder rules
-- Wildcard patterns (e.g. `JANET*`)
-- Per-flight display name (shown on LED), aircraft type, origin, destination, note
-- Changes take effect on the next poll via version-counter cache invalidation
+### Stats (the home tab)
+Refreshed every minute while it's open:
+- **Today:** flights so far against the same time yesterday, distinct aircraft, the 7-day daily average, paid lookups, flights by hour, and the top airlines (N-number registrations grouped into one "N-reg" row)
+- **Recent flights**, newest first ("12 min ago" within the last hour; new arrivals flash), and **history search** by flight number, tail or airport
+- **Period:** a preset (yesterday, 7, 30 or 90 days) or a custom range, with a daily chart (7-day average line, tap or hover for the day's numbers), totals, the busiest day, distinct aircraft, top airlines, tails, routes and aircraft types, busiest hours, where routes came from (which API supplied each displayed route: FR24, AirLabs, AeroAPI, the last-resort feeds, overrides), and a daily table
+- **FR24 vs paid APIs**: how often FR24's route agreed with AirLabs, AeroAPI or the route cache for the same flight, with a 30-day daily trend and the recent disagreements side by side
 
-### Cache Management
-- Clear cache by source (adsbdb, opensky, airlabs-1, airlabs-2, aeroapi, resolved, paid-miss)
-- Live cache statistics: entry counts by source
+The data stays in SQLite (`ft_flights.db`, WAL mode). Days before today never change, so the server aggregates them once and caches the result; each request re-reads only today's rows, and a whole response is reused until the database changes. On the Pi Zero 2 W that took the 90-day view from about 0.75 s to about 60 ms, and search from 0.34 s to 0.14 s (with a `seen_at` index the web service adds at start-up).
+
+### Rules
+- **Test a flight lookup:** run the full resolution stack for any callsign or tail (cached, or live-only) and see what each API returned and what the display shows
+- **Override rules:** add, edit, delete and reorder (drag on a desktop, arrow buttons anywhere); wildcard patterns (e.g. `JANET*`); per-flight display name, aircraft type, origin, destination and note. Changes take effect on the next poll via version-counter cache invalidation.
+
+### Log
+The live log stream with a text filter, an auto-scroll that stops following while you're scrolled up, and a line count.
 
 ---
 
@@ -254,7 +236,7 @@ Two flag-file controls let you manage the display without restarting the service
 | `/tmp/ft_paused` | Blanks the matrix (brightness → 0) while the file exists |
 | `/tmp/ft_night` | Drops brightness to `NIGHT_BRIGHTNESS` while the file exists |
 
-The web UI's Display tab has toggle buttons for both. Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
+The web UI header has Display and Night switches for both (real buttons: Tab to one, Enter or Space flips it). Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
 
 ---
 
@@ -396,14 +378,15 @@ Override rules let you hard-code routing and display info for specific aircraft,
 
 ## Trust Rules Summary
 
-| Callsign type | FR24 | adsbdb | OpenSky | AirLabs | AeroAPI |
+| Callsign type | FR24 | AirLabs | AeroAPI | OpenSky | adsbdb |
 |---|---|---|---|---|---|
-| **Commercial** (SWA, DAL, etc.) | ✅ Last resort (Step 5) | Local-origin safety net | Local-origin safety net | ✅ Trusted | ✅ Trusted (last resort) |
-| **GA** (N-numbers) | ✅ By registration (Step 1) | ✅ If local origin | ✅ If local origin | ⛔ Skipped | ⛔ Skipped |
-| **Military/Gov** (RCH, SAM…) | — | ✅ If local origin | ✅ If local origin | ⛔ Skipped | ⛔ Skipped |
-| **Override match** | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped |
+| **Commercial** (SWA, DAL, etc.) | ✅ Every flight | ✅ Unless the route cache knows the flight | ✅ Tie-breaker when FR24 disagrees; else when FR24 and AirLabs have no usable route | Last resort | Absolute last resort |
+| **GA / charter** (N-number tails) | ✅ Every flight; a complete route skips the paid APIs | When FR24 has no complete route* | When FR24 has no complete route* | Last resort | Absolute last resort |
+| **Military/Gov** (RCH, SAM…) | ✅ When the tail is known | ⛔ Skipped | ⛔ Skipped | Last resort | Absolute last resort |
+| **Partial override** | ✅ Fills the blank | ⛔ Skipped | ⛔ Skipped | Fills the blank | Fills the blank |
+| **Full override** | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped | ⛔ Skipped |
 
-GA and military callsigns skip the paid APIs because N-numbers don't file the instrument flight plans AirLabs or AeroAPI would have on record. For commercial flights the free historical DBs are only a **safety net** — `_select()` never lets a stale local-origin free route outrank a live paid route, since the same callsign can fly different routings on different days.
+\* N-number callsigns (`N12345`) skip the paid APIs entirely — VFR GA flights don't file the instrument flight plans AirLabs or AeroAPI would have on record. OpenSky and adsbdb are asked only when FR24, AirLabs and AeroAPI all have no usable route (OpenSky is also asked for departure evidence when a paid route looks like the previous, inbound leg).
 
 ---
 

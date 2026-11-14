@@ -33,6 +33,28 @@ def _get_session() -> requests.Session:
 
 _PERIOD_NAMES = {1: "1st", 2: "2nd", 3: "3rd"}
 
+# The API's gameState lifecycle is FUT → PRE → LIVE/CRIT → OVER → FINAL → OFF.  "OVER" is the
+# soft final: the horn has gone but the result isn't official yet, and it lasts a few minutes.
+# It is in neither the scoreboard's LIVE nor its FINAL tier, so the board used to hand back to
+# the idle scenes at the final horn and only return — with the WIN celebration — once the API
+# flipped to FINAL (2026-11-11 UTA@VGK: horn 21:22:54, "VGK WINS!" 21:25:02).  The score at
+# the horn IS the final score, so report OVER as FINAL.
+_STATE_ALIASES = {"OVER": "FINAL"}
+
+# gameScheduleState for a game that won't be played as scheduled.  Its gameState stays
+# pre-game, so tag it "PPD" (never displayed) instead of letting it look like an upcoming game.
+_UNPLAYED_SCHEDULE_STATES = frozenset({"PPD", "SUSP", "CNCL"})
+
+
+def _normalise_state(game: dict) -> str:
+    """Map the API's gameState (+ gameScheduleState) onto the scoreboard's state vocabulary."""
+    state = game.get("gameState") or "FUT"
+    state = _STATE_ALIASES.get(state, state)
+    if (game.get("gameScheduleState") in _UNPLAYED_SCHEDULE_STATES
+            and state not in ("LIVE", "CRIT", "FINAL", "OFF")):
+        return "PPD"
+    return state
+
 
 def _period_label(number, period_type, in_intermission):
     """Return a compact period label like '2nd', 'OT', '2OT', 'SO', '2nd INT'.
@@ -57,7 +79,8 @@ def fetch_game(team_id: int, tz: ZoneInfo = None):
 
     Dict keys
     ---------
-    state           : str  — "FUT" | "PRE" | "LIVE" | "CRIT" | "FINAL" | "OFF"
+    state           : str  — "FUT" | "PRE" | "LIVE" | "CRIT" | "FINAL" | "OFF" | "PPD"
+                             (the API's soft-final "OVER" is reported as "FINAL")
     team_score      : int  — configured team's score
     opp_score       : int  — opponent's score
     opp_abbr        : str  — e.g. "EDM"
@@ -99,7 +122,7 @@ def fetch_game(team_id: int, tz: ZoneInfo = None):
                 pnum      = pd.get("number", 0)
 
                 return {
-                    "state":           game.get("gameState", "FUT"),
+                    "state":           _normalise_state(game),
                     "team_score":      team.get("score", 0),
                     "opp_score":       opp.get("score", 0),
                     "opp_abbr":        opp.get("abbrev", "???"),

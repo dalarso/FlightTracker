@@ -833,6 +833,153 @@ class HornIsNhlOnly(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertTrue(sent[0].startswith("STATE|LIVE|VGK|2|EDM|1|"))
 
+    def test_state_carries_venue_as_last_field(self):
+        # 'H'/'A' lets the desktop app draw away-left / home-right like the board.  It is the
+        # LAST field so an older listener (which reads the first 7) is unaffected.
+        nhl = _make_slot(key="NHL", team_name="VGK")
+        nhl["game"] = dict(_game("LIVE", team_score=2, opp_score=1, opp_abbr="EDM",
+                                 period_label="2nd"), game_id=7, team_home=True)
+        self.assertEqual(self._send_state([nhl]), ["STATE|LIVE|VGK|2|EDM|1|2nd|7|H"])
+        nhl["game"]["team_home"] = False
+        self.assertTrue(self._send_state([nhl])[0].endswith("|7|A"))
+
+
+# ── 2026-11 review: standard home/away orientation on the LED board ─────────────
+class HomeAwayLayout(unittest.TestCase):
+    """Away team on the LEFT, home team on the RIGHT (the standard scoreboard format).  The
+    configured team keeps its gold highlight on whichever side it plays."""
+
+    def _draw(self, game, team_name="VGK"):
+        calls = []
+
+        def rec(canvas, font, x, y, colour, text):
+            calls.append((x, y, colour, text))
+            return len(text) * 6
+
+        scene = sportscore.SportScoreScene.__new__(sportscore.SportScoreScene)
+        sportscore.SportScoreScene.__init__(scene)
+        scene.canvas = MagicMock(name="canvas")
+        with mock.patch.object(sportscore.graphics, "DrawText", rec):
+            scene._draw_score(_make_slot(team_name=team_name), game)
+        return calls
+
+    @staticmethod
+    def _row(calls, y):
+        return sorted((c for c in calls if c[1] == y), key=lambda c: c[0])
+
+    def test_road_game_puts_team_on_the_left(self):
+        g = dict(_game("LIVE", team_score=3, opp_score=2, opp_abbr="EDM", period_label="2nd"),
+                 team_home=False)
+        calls = self._draw(g)
+        abbr = self._row(calls, sportscore._ABBR_Y)
+        self.assertEqual([(c[0], c[3]) for c in abbr], [(1, "VGK"), (46, "EDM")])
+        self.assertIs(abbr[0][2], sportscore.TEAM_GOLD)
+        scores = [c for c in self._row(calls, sportscore._SCORE_Y) if c[3] != "-"]
+        self.assertEqual([c[3] for c in scores], ["3", "2"])          # VGK 3 - 2 EDM
+        self.assertIs(scores[0][2], sportscore.TEAM_GOLD)
+
+    def test_home_game_puts_team_on_the_right(self):
+        g = dict(_game("LIVE", team_score=5, opp_score=3, opp_abbr="UTA", period_label="3rd"),
+                 team_home=True)
+        calls = self._draw(g)
+        abbr = self._row(calls, sportscore._ABBR_Y)
+        self.assertEqual([(c[0], c[3]) for c in abbr], [(1, "UTA"), (46, "VGK")])
+        self.assertIs(abbr[1][2], sportscore.TEAM_GOLD)
+        self.assertIs(abbr[0][2], sportscore.colours.WHITE)
+        scores = [c for c in self._row(calls, sportscore._SCORE_Y) if c[3] != "-"]
+        self.assertEqual([c[3] for c in scores], ["3", "5"])          # UTA 3 - 5 VGK
+        self.assertIs(scores[1][2], sportscore.TEAM_GOLD)
+        # Scores still hug the separator: left one right-aligned, right one left-aligned.
+        self.assertEqual(scores[0][0], sportscore._score_x("3", True))
+        self.assertEqual(scores[1][0], sportscore._RIGHT_SCORE_LEFT)
+
+    def test_home_win_final_is_green_on_the_right(self):
+        g = dict(_game("FINAL", team_score=5, opp_score=3, opp_abbr="UTA", period_label="3rd"),
+                 team_home=True)
+        scores = [c for c in self._row(self._draw(g), sportscore._SCORE_Y) if c[3] != "-"]
+        self.assertIs(scores[1][2], sportscore.colours.GREEN)
+        self.assertIs(scores[0][2], sportscore.colours.WHITE)
+        status = self._row(self._draw(g), sportscore._STATUS_Y)
+        self.assertEqual([c[3] for c in status], ["FINAL"])
+
+    def test_shootout_win_with_level_score_is_green(self):
+        g = dict(_game("FINAL", team_score=1, opp_score=1, period_type="SO", period_label="PEN"),
+                 team_home=False, team_won=True)
+        scores = [c for c in self._row(self._draw(g), sportscore._SCORE_Y) if c[3] != "-"]
+        self.assertIs(scores[0][2], sportscore.colours.GREEN)
+
+    def test_four_letter_home_abbr_right_aligned(self):
+        g = dict(_game("LIVE", team_score=1, opp_score=0, opp_abbr="SEA"), team_home=True)
+        abbr = self._row(self._draw(g, team_name="LVAC"), sportscore._ABBR_Y)
+        self.assertEqual((abbr[1][0], abbr[1][3]), (40, "LVAC"))
+
+    def test_missing_venue_defaults_to_team_left(self):
+        g = _game("LIVE", team_score=1, opp_score=0, opp_abbr="SEA")   # no team_home key
+        abbr = self._row(self._draw(g), sportscore._ABBR_Y)
+        self.assertEqual(abbr[0][3], "VGK")
+
+    def test_live_status_shows_game_clock(self):
+        ls = sportscore._live_status
+        self.assertEqual(ls({"period_label": "2nd", "time_remaining": "14:32"}), "2nd 14:32")
+        self.assertEqual(ls({"period_label": "3rd", "time_remaining": "04:10"}), "3rd 4:10")
+        self.assertEqual(ls({"period_label": "Q4", "time_remaining": "0:45.3"}), "Q4 0:45.3")
+        self.assertEqual(ls({"period_label": "2nd", "time_remaining": "90'+3'"}), "2nd 90'+3'")
+        # No clock: intermission / break, stopped at zero, clockless sport, or too wide.
+        self.assertEqual(ls({"period_label": "1st INT", "time_remaining": "12:41",
+                             "in_intermission": True}), "1st INT")
+        self.assertEqual(ls({"period_label": "SO", "time_remaining": "00:00"}), "SO")
+        self.assertEqual(ls({"period_label": "BOT 7", "time_remaining": ""}), "BOT 7")
+        self.assertEqual(ls({"period_label": "Q2 END", "time_remaining": "15:00:00"}), "Q2 END")
+
+    def test_clock_change_triggers_a_redraw(self):
+        slot = _make_slot()
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, dict(_game("LIVE", period_label="2nd"), game_id=5,
+                                  time_remaining="14:32"))
+            h.tick()
+            first = slot["last_draw"]
+            h.set_game(slot, dict(_game("LIVE", period_label="2nd"), game_id=5,
+                                  time_remaining="14:22"))
+            h.tick()
+            self.assertNotEqual(slot["last_draw"], first)
+
+    def test_final_status_lines(self):
+        fs = sportscore._final_status
+        self.assertEqual(fs({"period_label": "3rd", "period_type": "REG"}), "FINAL")
+        self.assertEqual(fs({"period_label": "2OT", "period_type": "OT"}), "FINAL 2OT")
+        self.assertEqual(fs({"period_label": "SO", "period_type": "SO"}), "FINAL SO")
+        self.assertEqual(fs({"period_label": "AET", "period_type": "OT"}), "FINAL AET")
+        self.assertEqual(fs({"period_label": "F/10", "period_type": "OT"}), "F/10")
+
+
+class WinDetectionAndPolling(unittest.TestCase):
+    def test_shootout_win_fires_win_celebration(self):
+        # ESPN reports a penalty-shootout win as a level score + winner flag.
+        slot = _make_slot(key="FIFA", team_name="USA")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, dict(_game("LIVE", team_score=1, opp_score=1), game_id=9)); h.tick()
+            h.set_game(slot, dict(_game("FINAL", team_score=1, opp_score=1, period_type="SO",
+                                        period_label="PEN"), game_id=9, team_won=True))
+            h.tick()
+        self.assertEqual(h.scene._celebration_text, "USA WINS!")
+
+    def test_level_score_without_winner_flag_is_not_a_win(self):
+        slot = _make_slot(key="MLS", team_name="LV")
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, dict(_game("LIVE", team_score=1, opp_score=1), game_id=3)); h.tick()
+            h.set_game(slot, dict(_game("FINAL", team_score=1, opp_score=1), game_id=3)); h.tick()
+        self.assertNotIn("WINS", h.scene._celebration_text)
+
+    def test_postponed_game_polls_hourly_and_never_shows(self):
+        now = 1_000_000.0
+        due = sportscore._next_poll({"state": "PPD"}, now)
+        self.assertLessEqual(due - now, sportscore._POLL_NO_GAME)
+        self.assertGreater(due - now, sportscore._POLL_IDLE)
+        slot = _make_slot()
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, dict(_game("PPD"), game_id=4)); h.tick()
+            self.assertFalse(h.scene._scoreboard_active)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

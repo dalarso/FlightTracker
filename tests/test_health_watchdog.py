@@ -89,7 +89,8 @@ class HealthSnapshot(unittest.TestCase):
         self.assertEqual(
             set(h),
             {"ts", "uptime_sec", "processing", "last_poll_ok_ts",
-             "last_poll_age_sec", "active_threads", "cache_write_failures"},
+             "last_poll_age_sec", "active_threads", "cache_write_failures",
+             "last_poll_start_age_sec", "display"},
         )
         self.assertFalse(h["processing"])
         self.assertIsNone(h["last_poll_age_sec"])   # no successful poll yet

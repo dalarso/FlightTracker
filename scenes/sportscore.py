@@ -3,7 +3,7 @@ SportScoreScene — multi-sport live scoreboard for the LED matrix.
 
 Behaviour
 ---------
-* Supports NHL, NFL, NBA, MLB, and MLS simultaneously.  Each sport is
+* Supports NHL, NFL, MLB, NBA, WNBA, MLS, and the FIFA World Cup.  Each sport is
   configured independently with its own team ID and can be enabled or
   disabled without affecting the others.
 * While a configured team's game is LIVE (or just finished, within the
@@ -36,8 +36,10 @@ Poll cadence (per sport slot)
 
 Display layout (64 × 32 LED matrix)
 ------------------------------------
-  y = 8   TEAM (gold)                OPP (white)
-  y = 22  [score] (large or regular)  –  [score]
+Standard scoreboard orientation: AWAY on the left, HOME on the right.  The configured team
+keeps its gold highlight on whichever side it plays; the opponent is white.
+  y = 7   AWAY abbr                  HOME abbr
+  y = 20  [away score]      –      [home score]
   y = 31  period / inning / FINAL
 """
 
@@ -54,7 +56,9 @@ from utilities.animator import Animator
 from utilities.nhl  import fetch_game   as _fetch_nhl
 from utilities.espn import fetch_espn_game
 from utilities.mlb  import fetch_mlb_game as _fetch_mlb
-from utilities.scoreboard_select import select_active
+from utilities.scoreboard_select import (select_active, estimate_ended_at as _estimate_ended_at,
+                                         GAME_SECONDS as _GAME_SECONDS,
+                                         DEFAULT_GAME_SECONDS as _DEFAULT_GAME_SECONDS)
 from setup import colours, fonts, frames, screen
 from rgbmatrix import graphics
 
@@ -79,6 +83,14 @@ except Exception:
 
 
 # ── Shared scoreboard settings ────────────────────────────────────────────────
+def _clog(msg: str) -> None:
+    """Timestamped line in plane.log (same shape as overhead._log) for the celebration
+    lifecycle — arm / show / suspend / end.  Celebrations used to leave no trace, so the
+    2026-06-25 and 2026-10-08 blank-panel hangs could only be reconstructed afterwards."""
+    ts = datetime.datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [sportscore] {msg}", flush=True)
+
+
 def _cfg(name, default):
     try:
         import config
@@ -154,7 +166,9 @@ def _send_state(slots, now_ts: float) -> None:
     reportable — the listener is the NHL horn, so another sport's game never shows there:
     its LIVE/CRIT game, else its FINAL game still inside POST_GAME_SECONDS; otherwise NONE
     (still sent, so the heartbeat keeps the app "connected").
-    Wire format: 'STATE|state|team|tscore|opp|oscore|period|gameid'  or  'STATE|NONE'."""
+    Wire format: 'STATE|state|team|tscore|opp|oscore|period|gameid|venue'  or  'STATE|NONE'.
+    venue is 'H' (team at home) / 'A' (away) so the listener can draw away-left/home-right
+    like the board; it is the LAST field, so an older listener (which reads 7) ignores it."""
     global _last_horn_ping
     if _horn_sock is None or now_ts - _last_horn_ping < GOAL_HORN_PING_SECS:
         return
@@ -182,10 +196,11 @@ def _send_state(slots, now_ts: float) -> None:
                 break
     if rep is not None:
         g = rep["game"]
-        msg = "STATE|{}|{}|{}|{}|{}|{}|{}".format(
+        msg = "STATE|{}|{}|{}|{}|{}|{}|{}|{}".format(
             _clean(g.get("state", "")), _clean(rep["team_name"]), _clean(g.get("team_score", 0)),
             _clean(g.get("opp_abbr", "?")), _clean(g.get("opp_score", 0)),
-            _clean(g.get("period_label", "")), _clean(g.get("game_id", "")))
+            _clean(g.get("period_label", "")), _clean(g.get("game_id", "")),
+            "H" if g.get("team_home") else "A")
     else:
         msg = "STATE|NONE"
     try:
@@ -240,16 +255,18 @@ _CELE_FONT     = fonts.huge       # 10×20 — celebration text
 _ABBR_Y   = 7    # 6×12: first visible row = baseline-6; baseline 7 → 1 px top margin
 _SCORE_Y  = 20   # centred between abbr (bottom y=7) and period (top y=25): 2 px gap each side
 _STATUS_Y = 31
-_TEAM_X   = 1
+_LEFT_X   = 1             # left (away) abbreviation
 _SEP_X    = 31            # separator centred on the 64 px display (+2 from old 29)
 
-_TEAM_SCORE_RIGHT = 29   # right edge of team-score area (+2 from old 27)
-_OPP_SCORE_LEFT   = 38   # left edge of opp-score area  (+2 from old 36)
+_LEFT_SCORE_RIGHT = 29   # right edge of the left (away) score area
+_RIGHT_SCORE_LEFT = 38   # left edge of the right (home) score area
 _SCORE_CHAR_PX    = 9    # approx px per char — 8×13B bold (actual DWIDTH=8; 9 is conservative)
+_ABBR_CHAR_PX     = 6    # 6×12 abbreviation font advance
 
 # ── Poll intervals ─────────────────────────────────────────────────────────────
 _POLL_LIVE = 10    # seconds — active period
 _POLL_IDLE = 120   # seconds — pre/post/intermission
+_POLL_NO_GAME = 3600   # seconds — no game known yet (fetch failed or none today): re-check hourly
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
@@ -289,10 +306,17 @@ def _secs_until_pregame(start_time_utc: str) -> float:
 def _next_poll(game: dict | None, now_ts: float, ended_at: float | None = None) -> float:
     """Return the timestamp of the next poll for a slot given its current game."""
     if game is None:
-        return now_ts + _secs_until_midnight()
+        # No game known yet.  The fetchers return None both for "no game today" and for a
+        # transport/HTTP error, so re-check at least hourly: sleeping to midnight here meant
+        # ONE failed fetch right after a restart hid that sport's board and horn all day.
+        return now_ts + min(_secs_until_midnight(), _POLL_NO_GAME)
     state = game.get("state", "FUT")
     if state in ("LIVE", "CRIT"):
         return now_ts + _POLL_LIVE
+    if state == "PPD":
+        # Postponed / cancelled / suspended: nothing to show, but re-check hourly in case the
+        # provider corrects it (or a doubleheader's other game is still to come).
+        return now_ts + min(_secs_until_midnight(), _POLL_NO_GAME)
     if state == "FUT":
         secs = _secs_until_pregame(game.get("start_time_utc", ""))
         return now_ts + (secs if secs > _POLL_IDLE else _POLL_IDLE)
@@ -323,34 +347,95 @@ def _poll_slot_async(slot: dict, now_ts: float) -> None:
     def _work():
         try:
             result = fetch_fn(team_id, _TZ)
+        except Exception:
+            result = None   # keep last-known game
+        try:
             if result is not None:
                 slot["game"]     = result
                 slot["poll_due"] = _next_poll(result, time.time(), slot["game_ended_at"])
+            else:
+                # Error or "no game": the up-front schedule may be a long sleep (to 00:05,
+                # or to a pre-game window computed from yesterday's game) — never wait
+                # longer than _POLL_NO_GAME on a fetch that returned nothing.
+                slot["poll_due"] = min(slot["poll_due"], time.time() + _POLL_NO_GAME)
         except Exception:
-            pass   # keep last-known game; poll_due already scheduled above
+            pass
         finally:
             slot["_inflight"] = False
 
-    threading.Thread(target=_work, daemon=True).start()
+    try:
+        threading.Thread(target=_work, daemon=True).start()
+    except Exception:
+        # Couldn't spawn the worker (e.g. thread exhaustion): clear the guard so the next
+        # tick retries — otherwise _inflight stays True and this sport never polls again.
+        slot["_inflight"] = False
+        raise
 
 
-def _score_x(score_str: str, is_team: bool, char_px: int = _SCORE_CHAR_PX) -> int:
-    """Right-align team score to centre-left; left-align opp score from centre-right."""
+def _score_x(score_str: str, left: bool, char_px: int = _SCORE_CHAR_PX) -> int:
+    """Right-align the left (away) score to centre-left; left-align the right (home) score
+    from centre-right, so both hug the separator whatever their digit count."""
     w = len(score_str) * char_px
-    return max(1, _TEAM_SCORE_RIGHT - w) if is_team else _OPP_SCORE_LEFT
+    return max(1, _LEFT_SCORE_RIGHT - w) if left else _RIGHT_SCORE_LEFT
 
 
-def _opp_x(abbr: str) -> int:
-    """Right-align opp abbreviation to 1 px from the right edge of the display.
-    Small-font chars are 4 px wide + 1 px spacing = 5 px advance;
-    total width = 5*n - 1.  Start x = 64 - 5*n  (gives 1 px right margin).
-    Handles both 3-char (→ x=49) and 4-char (→ x=44) team abbreviations.
-    """
-    return max(_SEP_X + 8, 64 - len(abbr) * 6)
+def _right_abbr_x(abbr: str) -> int:
+    """Right-align the right-hand (home) abbreviation against the display's right edge.
+    The 6×12 font advances 6 px per char, so x = WIDTH - 6n: 3 chars → x=46, 4 chars → x=40.
+    Clamped so a long name never starts left of the separator column."""
+    return max(_SEP_X + 8, screen.WIDTH - len(abbr) * _ABBR_CHAR_PX)
 
 
 def _center_x(text: str, char_w: int = 6) -> int:
     return max(0, (screen.WIDTH - len(text) * char_w) // 2)
+
+
+def _team_won(game: dict) -> bool:
+    """Did the configured team win this finished game?  Prefers the fetcher's explicit
+    team_won flag (ESPN marks the winner — the only way to see a penalty-shootout win, where
+    the scores are level) and falls back to comparing scores."""
+    won = game.get("team_won")
+    if won is not None:
+        return bool(won)
+    return game.get("team_score", 0) > game.get("opp_score", 0)
+
+
+_STATUS_MAX_CHARS = 64 // 6   # the 6×12 status font fits 10 chars across the 64 px panel
+
+
+def _live_status(game: dict) -> str:
+    """Status line for a LIVE/CRIT game: the period plus the game clock when there is one —
+    "2nd 14:32", "OT 3:12", "Q4 0:45", "2nd 67'".  Falls back to the bare period label in an
+    intermission / at a period break (the label already says "1st INT", "HALF", "Q2 END"),
+    when the clock is stopped at zero (period over, shootout), for clockless sports (MLB),
+    or when the combined text wouldn't fit the panel.  The clock refreshes with the 10 s live
+    poll, so it steps rather than ticks — the period alone used to be all the board showed."""
+    label = game.get("period_label", "") or ""
+    clock = str(game.get("time_remaining") or "").strip()
+    if not clock or game.get("in_intermission"):
+        return label
+    if len(clock) == 5 and clock[0] == "0" and clock[2] == ":":
+        clock = clock[1:]                       # NHL "04:10" → "4:10"
+    if clock.strip("0:.") == "":
+        return label                            # "00:00" / "0:00" / "0.0" — nothing to add
+    text = f"{label} {clock}" if label else clock
+    return text if len(text) <= _STATUS_MAX_CHARS else label
+
+
+def _final_status(game: dict) -> str:
+    """Status line for a FINAL/OFF game: "FINAL", "FINAL OT", "FINAL 2OT", "FINAL SO",
+    "FINAL AET", "FINAL PEN", or MLB's extra-inning "F/10".
+
+    period_label is used only for MLB-style extra-inning labels ("F/10") and for the OT/SO
+    suffix; for a regulation final it holds the live period name ("3rd", "Q4"), which is not
+    appropriate on a FINAL line."""
+    pl = game.get("period_label", "")
+    pt = game.get("period_type", "REG")
+    if pl.startswith("F/"):       # MLB extra innings only (e.g. "F/10")
+        return pl
+    if pt in ("OT", "SO"):        # period_label carries the OT-aware name: "OT","2OT","SO","AET"
+        return f"FINAL {pl}" if pl else f"FINAL {pt}"
+    return "FINAL"
 
 
 def _build_slots() -> list[dict]:
@@ -486,37 +571,8 @@ def _read_dismissed_game_id():
         return None
 
 
-# Typical wall-clock length (scheduled start → final buzzer) per league, with ~30 min of
-# headroom baked in for OT / stoppages so we err slightly LATE (never hide a score before its
-# real post-game window ends).  Keyed by league because "period" means different things per
-# sport: a completed BASKETBALL game ends at period 4, a BASEBALL game at inning 9 — so the old
-# "period > 3 → 4 h" heuristic gave a ~2 h WNBA game a 4 h buffer and re-showed it for hours.
-_GAME_SECONDS = {
-    "NHL":  int(3.0 * 3600),
-    "MLB":  int(3.5 * 3600),
-    "NFL":  int(3.5 * 3600),
-    "NBA":  int(2.75 * 3600),
-    "WNBA": int(2.5 * 3600),
-    "MLS":  int(2.5 * 3600),
-    "FIFA": int(2.75 * 3600),
-}
-_DEFAULT_GAME_SECONDS = int(3.5 * 3600)   # err long for an unknown league
-
-
-def _estimate_ended_at(game, now_ts, league=None):
-    """Best-effort end time for a FINAL/OFF game we did NOT witness go live — i.e. a service
-    restart INTO an already-finished game.  Estimated as the scheduled start plus that league's
-    typical game length (_GAME_SECONDS), clamped to now so it is never in the future.
-
-    Without this the display stamped `now` on every restart, giving a game that ended hours ago a
-    fresh POST_GAME_SECONDS window (so a redeploy / reboot resurrected the last final for 30 min).
-    Falls back to now_ts when the start time is missing/unparseable (the original behaviour)."""
-    try:
-        start = (game or {}).get("start_time_utc", "")
-        start_ts = datetime.datetime.fromisoformat(start.replace("Z", "+00:00")).timestamp()
-        return min(start_ts + _GAME_SECONDS.get(league, _DEFAULT_GAME_SECONDS), now_ts)
-    except Exception:
-        return now_ts
+# Restart-into-a-final end-time estimate (_estimate_ended_at / _GAME_SECONDS) now lives in
+# utilities.scoreboard_select so the web UI uses the same numbers — imported above.
 
 
 # ── Scene ─────────────────────────────────────────────────────────────────────
@@ -538,45 +594,35 @@ class SportScoreScene(object):
     # ── Drawing helpers ────────────────────────────────────────────────────────
 
     def _draw_score(self, slot: dict, game: dict) -> None:
-        """Paint the scoreboard for *slot*/*game* onto self.canvas."""
+        """Paint the scoreboard for *slot*/*game* onto self.canvas.
+
+        Standard orientation — AWAY left, HOME right: a road game reads "VGK 3 - 2 EDM", a
+        home game "EDM 2 - 3 VGK".  The configured team keeps its gold highlight (green score
+        on a FINAL it won) on whichever side it plays; the opponent is white.
+        """
         state     = game.get("state", "")
-        opp       = game.get("opp_abbr", "?")
-        team_s    = str(game.get("team_score", 0))
-        opp_s     = str(game.get("opp_score", 0))
+        live      = state in ("LIVE", "CRIT")
+        final     = state in ("FINAL", "OFF")
         font      = slot["score_font"]
         char_px   = slot["score_char_px"]
-        team_name = slot["team_name"]
+
+        team_score_colour = colours.GREEN if (final and _team_won(game)) else TEAM_GOLD
+        # (abbreviation, score text, abbreviation colour, score colour)
+        team = (slot["team_name"], str(game.get("team_score", 0)), TEAM_GOLD, team_score_colour)
+        opp  = (game.get("opp_abbr", "?"), str(game.get("opp_score", 0)), colours.WHITE, colours.WHITE)
+        left, right = (opp, team) if game.get("team_home") else (team, opp)
 
         # Abbreviation row
-        graphics.DrawText(self.canvas, _ABBR_FONT, _TEAM_X,     _ABBR_Y, TEAM_GOLD,     team_name)
-        graphics.DrawText(self.canvas, _ABBR_FONT, _opp_x(opp), _ABBR_Y, colours.WHITE, opp)
+        graphics.DrawText(self.canvas, _ABBR_FONT, _LEFT_X,                 _ABBR_Y, left[2],  left[0])
+        graphics.DrawText(self.canvas, _ABBR_FONT, _right_abbr_x(right[0]), _ABBR_Y, right[2], right[0])
 
-        if state in ("LIVE", "CRIT"):
-            graphics.DrawText(self.canvas, font,      _score_x(team_s, True,  char_px), _SCORE_Y, TEAM_GOLD,     team_s)
-            graphics.DrawText(self.canvas, _SEP_FONT, _SEP_X,                            _SCORE_Y, colours.GREY,  "-")
-            graphics.DrawText(self.canvas, font,      _score_x(opp_s,  False, char_px), _SCORE_Y, colours.WHITE, opp_s)
-            lbl = game.get("period_label", "")
-            graphics.DrawText(self.canvas, _ABBR_FONT, _center_x(lbl), _STATUS_Y, colours.GREY, lbl)
-
-        elif state in ("FINAL", "OFF"):
-            won    = game.get("team_score", 0) > game.get("opp_score", 0)
-            colour = colours.GREEN if won else TEAM_GOLD
-            graphics.DrawText(self.canvas, font,      _score_x(team_s, True,  char_px), _SCORE_Y, colour,        team_s)
-            graphics.DrawText(self.canvas, _SEP_FONT, _SEP_X,                            _SCORE_Y, colours.GREY,  "-")
-            graphics.DrawText(self.canvas, font,      _score_x(opp_s,  False, char_px), _SCORE_Y, colours.WHITE, opp_s)
-            # Use period_label only for MLB-style extra-inning labels ("F/10",
-            # "F/12", etc.).  For all other sports, period_label holds the live
-            # period name ("3rd", "Q4", "OT") which is NOT appropriate for a
-            # FINAL line — build "FINAL" / "FINAL OT" / "FINAL SO" from period_type.
-            pl     = game.get("period_label", "")
-            pt     = game.get("period_type", "REG")
-            if pl.startswith("F/"):       # MLB extra innings only (e.g. "F/10")
-                status = pl
-            elif pt in ("OT", "SO"):      # OT/SO final — period_label carries the OT-aware
-                status = f"FINAL {pl}" if pl else f"FINAL {pt}"   # name: "OT","2OT","SO" → "FINAL 2OT"
-            else:
-                status = "FINAL"
-            graphics.DrawText(self.canvas, _ABBR_FONT, _center_x(status), _STATUS_Y, colours.GREY, status)
+        if not (live or final):
+            return
+        graphics.DrawText(self.canvas, font,      _score_x(left[1],  True,  char_px), _SCORE_Y, left[3],      left[1])
+        graphics.DrawText(self.canvas, _SEP_FONT, _SEP_X,                             _SCORE_Y, colours.GREY, "-")
+        graphics.DrawText(self.canvas, font,      _score_x(right[1], False, char_px), _SCORE_Y, right[3],     right[1])
+        status = _live_status(game) if live else _final_status(game)
+        graphics.DrawText(self.canvas, _ABBR_FONT, _center_x(status), _STATUS_Y, colours.GREY, status)
 
     def _reset_sport_draws(self) -> None:
         """Clear per-slot draw keys so sports_score repaints on next tick."""
@@ -625,7 +671,23 @@ class SportScoreScene(object):
         # overhead plane — the opposite of the documented priority.  The LAN horn already
         # fired when the celebration armed, so cutting the on-panel scroll short loses no
         # audio cue; the celebration simply doesn't draw while flights are present.
+        #
+        # SUSPEND, don't just skip: drop the active flag and reset_scene() so the flight
+        # scenes' divisor-0 drawers (flight_details / journey / journey_arrow) actually
+        # paint — they only draw inside reset_scene().  Returning while the flag stayed
+        # True was the 2026-10-08 deadlock: this early return also skipped the expiry
+        # cleanup below, nothing drew, plane_details never finished a pass, and with 2+
+        # flights grab_new_data stopped polling forever (panel black all night).
+        # _celebration_until is left alone, so if the flyover ends inside the window the
+        # init branch below re-arms and the scroll resumes; otherwise the board returns.
         if len(self._data):
+            if self._goal_celebration_active:
+                self._goal_celebration_active = False
+                _left = self._celebration_until - time.time()
+                _clog(f"celebration {self._celebration_text!r} suspended — {len(self._data)} "
+                      f"flight(s) overhead ({max(0, _left):.0f}s of its window left)")
+                self._reset_sport_draws()
+                self.reset_scene()
             return
 
         now_ts = time.time()
@@ -633,12 +695,15 @@ class SportScoreScene(object):
         if now_ts >= self._celebration_until:
             if self._goal_celebration_active:
                 self._goal_celebration_active = False
+                _clog(f"celebration {self._celebration_text!r} ended")
                 self._reset_sport_draws()
                 self.reset_scene()
             return
 
         # ── First frame: initialise ────────────────────────────────────────────
         if not self._goal_celebration_active:
+            _clog(f"celebration {self._celebration_text!r} on screen "
+                  f"({self._celebration_until - now_ts:.0f}s left)")
             self._goal_celebration_active   = True
             self._scoreboard_active    = True
             self._celebration_scroll_x = screen.WIDTH
@@ -700,6 +765,7 @@ class SportScoreScene(object):
                 and str(self._celebration_game_id) == dismissed_id
                 and now_ts < self._celebration_until):
             self._celebration_until = 0.0
+            _clog(f"celebration {self._celebration_text!r} cut short — game {dismissed_id} hidden")
 
         # Stamp the post-game window start BEFORE _send_state reads it, so a FINAL that
         # actually ended hours ago (e.g. process restarted long after the buzzer) is
@@ -817,7 +883,7 @@ class SportScoreScene(object):
                 # game_ended_at set above so a buzzer-beater goal celebration can't swallow
                 # it.  Reuses the goal-celebration scroll machinery.
                 if (slot["was_live"] and not slot["win_shown"]
-                        and game.get("team_score", 0) > game.get("opp_score", 0)
+                        and _team_won(game)
                         and not _is_dismissed(game)):
                     self._celebration_until    = now_ts + WIN_CELEBRATION_SECONDS
                     self._celebration_text     = f'{slot["team_name"]} WINS!'
@@ -825,6 +891,8 @@ class SportScoreScene(object):
                     self._celebration_game_id  = game.get("game_id")
                     slot["win_shown"]          = True
                     _nudge_horn("WIN", slot, game, game.get("team_score", 0))   # LAN win sound (NHL only)
+                    _clog(f"celebration armed: {self._celebration_text!r} for {WIN_CELEBRATION_SECONDS}s "
+                          f"(game {self._celebration_game_id}, {game.get('team_score', 0)}-{game.get('opp_score', 0)})")
 
         # ── Find highest-priority displayable game ─────────────────────────────
         # Shared selection contract with the web side (utilities.scoreboard_select):
@@ -885,6 +953,8 @@ class SportScoreScene(object):
             self._celebration_scroll_x = screen.WIDTH
             self._celebration_game_id  = game.get("game_id")
             _nudge_horn("GOAL", active_slot, game, new_score)   # LAN horn, in sync (NHL only)
+            _clog(f"celebration armed: {self._celebration_text!r} for {GOAL_CELEBRATION_SECONDS}s "
+                  f"(game {self._celebration_game_id}, {new_score}-{game.get('opp_score', 0)})")
         active_slot["last_team_score"] = new_score
 
         # Yield to upcoming celebration
@@ -902,6 +972,7 @@ class SportScoreScene(object):
             game.get("period_type", ""),
             game.get("period_label", ""),   # needed: NFL/NBA "Q2 END"→"HALF" share same period+in_int
             game.get("in_intermission", False),
+            _live_status(game) if state in ("LIVE", "CRIT") else "",   # game clock on the status line
         )
 
         slot_changed = (active_slot is not self._active_slot)
@@ -909,6 +980,8 @@ class SportScoreScene(object):
         if not self._scoreboard_active or slot_changed or draw_key != active_slot["last_draw"]:
             self._scoreboard_active    = True
             self._active_slot          = active_slot
-            active_slot["last_draw"]   = draw_key
             self.reset_scene()
             self._draw_score(active_slot, game)
+            # Record the key only AFTER a successful paint: if _draw_score raised, the next
+            # tick retries instead of leaving the board blank until the score changes.
+            active_slot["last_draw"]   = draw_key

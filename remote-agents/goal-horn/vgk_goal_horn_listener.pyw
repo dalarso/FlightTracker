@@ -5,9 +5,10 @@ VGK Goal Horn — LAN game mirror + horn for the FlightTracker scoreboard.
 Open this window on the Windows machine.  It mirrors your NHL team's game on the LED board
 and sounds the horn in sync, driven entirely by UDP packets from the Raspberry Pi.  The Pi
 sends ONLY the NHL team's game here — other sports never reach this app:
-  • "STATE|…"   — heartbeat every ~5 s carrying the NHL game (score, opponent, period) or
-    "STATE|NONE".  Drives the connection status AND the on-screen game data, and resets
-    the window in lock-step with the board's 30-min post-game window.
+  • "STATE|…"   — heartbeat every ~5 s carrying the NHL game (score, opponent, period, and
+    whether we're home or away) or "STATE|NONE".  Drives the connection status AND the
+    on-screen game data, and resets the window in lock-step with the board's 30-min
+    post-game window.  The score reads like the board: AWAY on the left, HOME on the right.
   • "GOAL|team|ts|opp|os"  — fired the instant the board shows "VGK GOAL!"; logs it +
     plays the goal horn.
   • "WIN|team|ts|opp|os"   — fired on "VGK WINS!"; logs it + plays the win sound.
@@ -88,6 +89,7 @@ class HornApp:
         self.last_ping = 0.0
         self.bind_err  = None
         self.game_id   = None           # current game; change → reset score + log
+        self.team_home = False          # from STATE's venue field ('H'/'A'): orients the score line
         self.mp3_ok    = ensure_horn_file()
 
         root.title("VGK Goal Horn")
@@ -179,20 +181,33 @@ class HornApp:
             self.set_idle()
             return
         state, team, ts, opp, os_, period, gid = f[0], f[1], f[2], f[3], f[4], f[5], f[6]
+        # Optional 8th field (newer Pis): 'H' = our team is home, 'A' = away.  An older Pi
+        # doesn't send it, so keep the last known orientation (default: away).
+        if len(f) >= 8 and f[7] in ("H", "A"):
+            self.team_home = f[7] == "H"
         if gid and gid != self.game_id:                 # new game → reset
             self.game_id = gid
             self.log.delete(0, tk.END)
-            self._log(f"--- {team} vs {opp} ---")
-        self.score.config(text=f"{team}   {ts} - {os_}   {opp}", fg=WHITE)
+            self._log(f"--- {self._matchup(team, opp)} ---")
+        self.score.config(text=self._score_line(team, ts, opp, os_), fg=WHITE)
         if state in ("LIVE", "CRIT"):
             self.state.config(text=period or "Live", fg=GREY)
         elif state in ("FINAL", "OFF"):
             try: won = int(ts) > int(os_)
             except Exception: won = False
-            self.state.config(text=("FINAL  —  VEGAS WINS!" if won else "FINAL"),
+            self.state.config(text=(f"FINAL  —  {team} WINS!" if won else "FINAL"),
                               fg=(GREEN if won else GREY))
         else:
             self.set_idle()
+
+    def _score_line(self, team, ts, opp, os_):
+        """Away on the left, home on the right — same orientation as the LED board."""
+        if self.team_home:
+            return f"{opp}   {os_} - {ts}   {team}"
+        return f"{team}   {ts} - {os_}   {opp}"
+
+    def _matchup(self, team, opp):
+        return f"{opp} @ {team}" if self.team_home else f"{team} @ {opp}"
 
     def set_idle(self):
         if self.game_id is not None:                    # game just cleared (post-game window ended)
@@ -203,7 +218,7 @@ class HornApp:
 
     # ── horn events ───────────────────────────────────────────────────────────
     def on_goal(self, team, ts, opp, os_):
-        self.score.config(text=f"{team}   {ts} - {os_}   {opp}", fg=WHITE)   # instant, with the horn
+        self.score.config(text=self._score_line(team, ts, opp, os_), fg=WHITE)   # instant, with the horn
         self._log(f"{self._t()}   GOAL   {team} {ts}-{os_}")
         if not self.muted.get():
             try: play_file(HORN_FILE)

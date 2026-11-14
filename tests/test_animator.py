@@ -84,5 +84,28 @@ class AnimatorResilience(unittest.TestCase):
         self.assertEqual(self.a._keyframe_error_frames["bad"], 1)
 
 
+class _ResetHarness(Animator):
+    @Animator.KeyFrame.add(0)
+    def a_raises(self):
+        raise ValueError("boom")
+
+    @Animator.KeyFrame.add(0)
+    def b_paints(self):
+        self.painted += 1
+
+
+class ResetSceneIsolation(unittest.TestCase):
+    def test_raising_reset_drawer_does_not_skip_the_others(self):
+        # reset_scene() is called from inside other keyframes (celebration hand-off, the
+        # scoreboard paint); one raising divisor-0 drawer must neither skip its siblings
+        # (blank rows) nor propagate into the caller.
+        a = _ResetHarness()
+        a.painted = 0
+        with mock.patch.object(animator_mod.sys, "stderr"):
+            a.reset_scene()
+        self.assertEqual(a.painted, 1)
+        self.assertIn("a_raises", a._keyframe_error_frames)
+
+
 if __name__ == "__main__":
     unittest.main()

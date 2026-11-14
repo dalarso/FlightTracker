@@ -121,10 +121,11 @@ if str(_WEB_DIR) not in sys.path:
 
 from functools import partial as _partial
 import stats_data
-from stats_data import _db_stats, _parse_log_sightings, _db_recent, _db_search
+from stats_data import _db_stats, _parse_log_sightings, _db_search
 from usage_data import _billing_period_start, _billing_period_end, _read_usage_file
 import scoreboard_data
 from scoreboard_data import _fetch_scoreboard_data, _load_persisted_game_ended_at, _persist_game_ended_at, _clear_persisted_game_ended_at
+from utilities.scoreboard_select import LIVE_STATES, FINAL_STATES, estimate_ended_at
 CONFIG_PATH      = BASE_DIR / "config.py"
 PAUSE_FLAG       = Path("/tmp/ft_paused")
 NIGHT_FLAG       = Path("/tmp/ft_night")
@@ -225,6 +226,7 @@ _CONFIG_SCHEMA = [
     ("SCOREBOARD_ENABLED",                  "bool",  False),
     ("SCOREBOARD_POST_GAME_MINUTES",        "int0",  30),  # 0 = hide immediately (valid)
     ("SCOREBOARD_GOAL_CELEBRATION_SECONDS", "int0",  30),  # 0 = disable celebration (valid)
+    ("SCOREBOARD_WIN_CELEBRATION_SECONDS",  "int0",  180), # 0 = disable the WIN scroll (valid)
     ("SCOREBOARD_PRIORITY",                 "list",  ["NHL", "NFL", "MLB", "NBA", "WNBA", "MLS", "FIFA"]),
     ("SCOREBOARD_NHL_ENABLED",  lambda e: str(bool(e.get("SCOREBOARD_NHL_ENABLED", e.get("SCOREBOARD_ENABLED", True))))),
     ("SCOREBOARD_NHL_TEAM_ID",  lambda e: str(int(e.get("SCOREBOARD_NHL_TEAM_ID") or e.get("SCOREBOARD_TEAM_ID") or 0))),
@@ -460,10 +462,15 @@ def get_health():
         snap_age = max(0, int(time.time()) - int(h.get("ts", 0))) if h.get("ts") else None
         h["snapshot_age_sec"] = snap_age
         poll_age = h.get("last_poll_age_sec")
-        # Healthy = the display wrote a fresh snapshot AND a poll succeeded recently.
+        # Healthy = the display wrote a fresh snapshot AND a poll succeeded recently AND
+        # the render thread is alive with no logical stall (blank-panel deadlock guard).
+        disp = h.get("display") or {}
+        hb = disp.get("heartbeat_age_sec")
+        h["display_ok"] = bool(not disp or (hb is not None and hb < 90 and not disp.get("problem")))
         h["ok"] = bool(
             snap_age is not None and snap_age < 90
             and poll_age is not None and poll_age < 120
+            and h["display_ok"]
         )
     except Exception:
         h.setdefault("ok", False)
@@ -748,15 +755,134 @@ def combined_status():
     })
 
 
+# /api/stats response cache.  The Stats page is the dashboard's home and re-asks every
+# minute, but the data only changes when the display process commits a write — and every
+# commit appends to the WAL file, so its mtime/size (plus the main file's) is a free
+# change marker.  The TTL is only a safety net.
+_STATS_CACHE: dict = {}
+_STATS_CACHE_LOCK = threading.Lock()
+_STATS_CACHE_TTL = 300   # seconds
+
+
+def _db_marker():
+    try:
+        st = DB_FILE.stat()
+        try:
+            wal = DB_FILE.with_name(DB_FILE.name + "-wal").stat()
+            w = (wal.st_mtime_ns, wal.st_size)
+        except OSError:
+            w = None
+        return (st.st_mtime_ns, st.st_size, w)
+    except OSError:
+        return None
+
+
+def _cached_stats(key, build):
+    """Return build()'s payload, reusing the last one for `key` while the DB is unchanged.
+    The marker is taken before building, so a write that lands mid-build invalidates."""
+    marker = _db_marker()
+    now = time.time()
+    with _STATS_CACHE_LOCK:
+        hit = _STATS_CACHE.get(key)
+        if hit and marker is not None and hit[0] == marker and now - hit[1] < _STATS_CACHE_TTL:
+            return hit[2]
+    payload = build()
+    if payload is not None and marker is not None:
+        with _STATS_CACHE_LOCK:
+            if len(_STATS_CACHE) >= 16:
+                _STATS_CACHE.clear()
+            _STATS_CACHE[key] = (marker, now, payload)
+    return payload
+
+
+def _stats_cutoff(now):
+    """First day of the default 90-day window: today and the 89 days before it, the same
+    span as the page's 90d preset and the 90 bars it draws (it used to reach 91 days back,
+    so the total counted a day the chart never showed)."""
+    return (now - timedelta(days=89)).strftime("%Y-%m-%d")
+
+
+def _warm_stats():
+    """Pre-compute the finished days of the default window so the first visit is fast."""
+    now = datetime.now(_PACIFIC)
+    stats_data.warm(_stats_cutoff(now), (now - timedelta(days=1)).strftime("%Y-%m-%d"))
+
+
+def _stats_history(db, dates):
+    out = []
+    for d in dates:
+        day_ac = db["day_api_calls"].get(d, {})
+        out.append({
+            "date":    d,
+            "total":   db["day_counts"].get(d, 0),
+            "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
+            "aeroapi": day_ac.get("aeroapi", 0),
+        })
+    return out
+
+
+def _paid_calls(calls):
+    return {"airlabs": calls.get("airlabs", 0) + calls.get("airlabs2", 0), "aeroapi": calls.get("aeroapi", 0)}
+
+
+def _range_stats(range_from, range_to, today):
+    db = _db_stats(range_from, range_to, live_date=today)
+    if db is None:
+        return None
+    start = datetime.strptime(range_from, "%Y-%m-%d")
+    n = (datetime.strptime(range_to, "%Y-%m-%d") - start).days + 1
+    return {
+        "mode":         "range",
+        "today":        today,
+        "range_from":   range_from,
+        "range_to":     range_to,
+        "total":        db["range_total"],
+        "api_calls":    _paid_calls(db["range_api_calls"]),
+        "top_today":    db["range_top"],
+        "rollup":       db["rollup"],
+        "history":      _stats_history(db, [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]),
+        "recent":       db["recent"],
+        "hourly":       db["hourly"],
+        "range_unique": db["range_unique"],
+    }
+
+
+def _default_stats(days, today, now):
+    cutoff = _stats_cutoff(now)
+    db = _db_stats(cutoff, today, today=today)
+    if db is None:
+        return None
+    return {
+        "mode":            "default",
+        "today":           today,
+        "range_from":      cutoff,
+        "range_to":        today,
+        "total":           db["today_total"],
+        "api_calls":       _paid_calls(db["today_api_calls"]),
+        "range_api_calls": _paid_calls(db["range_api_calls"]),
+        "top_today":       db["today_top"],
+        "today_unique":    db["today_unique"],
+        "today_hourly":    db["today_hourly"],
+        "yesterday_times": db["yesterday_times"],
+        "rollup":          db["rollup"],
+        "history":         _stats_history(db, [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days - 1, -1, -1)]),
+        "recent":          db["recent"],
+        "hourly":          db["hourly"],
+        "range_unique":    db["range_unique"],
+    }
+
+
 @app.route("/api/stats", methods=["GET"])
 def flight_stats():
     """
     Return flight stats.  Supports two modes:
       Default (?days=N): today card + rolling 90-day period.
       Range   (?from=YYYY-MM-DD&to=YYYY-MM-DD): stats for a custom date range.
-    Source: ft_flights.db (sightings + api_calls tables).
+    Source: ft_flights.db (sightings + api_calls tables), cached until the DB changes.
+    `server_now` (Pi local time) lets the page compare today with "this time yesterday".
     """
-    today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+    now = datetime.now(_PACIFIC)
+    today = now.strftime("%Y-%m-%d")
     try:
         days = min(int(request.args.get("days", 90)), 90)
     except (ValueError, TypeError):
@@ -775,72 +901,14 @@ def flight_stats():
         except ValueError:
             return jsonify({"error": "Invalid date — use YYYY-MM-DD"}), 400
 
-    # ── Range mode ───────────────────────────────────────────────────────────
     if is_range:
-        db = _db_stats(range_from, range_to)
-        if db is None:
-            return jsonify({"error": "Database unavailable"}), 503
-
-        history  = []
-        cur_date = datetime.strptime(range_from, "%Y-%m-%d")
-        end_date = datetime.strptime(range_to,   "%Y-%m-%d")
-        while cur_date <= end_date:
-            d      = cur_date.strftime("%Y-%m-%d")
-            day_ac = db["day_api_calls"].get(d, {})
-            history.append({
-                "date":    d,
-                "total":   db["day_counts"].get(d, 0),
-                "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
-                "aeroapi": day_ac.get("aeroapi", 0),
-            })
-            cur_date += timedelta(days=1)
-
-        return jsonify({
-            "mode":       "range",
-            "today":      today,
-            "range_from": range_from,
-            "range_to":   range_to,
-            "total":      db["range_total"],
-            "api_calls":  {"airlabs": db["range_api_calls"].get("airlabs", 0) + db["range_api_calls"].get("airlabs2", 0),
-                           "aeroapi": db["range_api_calls"].get("aeroapi", 0)},
-            "top_today":  db["range_top"],
-            "rollup":     db["rollup"],
-            "history":    history,
-            "recent":     _db_recent(range_from, range_to),
-        })
-
-    # ── Default mode: today card + 90-day period ─────────────────────────────
-    cutoff = (datetime.now(_PACIFIC) - timedelta(days=90)).strftime("%Y-%m-%d")
-    db = _db_stats(cutoff, today, today=today)
-    if db is None:
+        payload = _cached_stats(("range", range_from, range_to, today),
+                                lambda: _range_stats(range_from, range_to, today))
+    else:
+        payload = _cached_stats(("default", days, today), lambda: _default_stats(days, today, now))
+    if payload is None:
         return jsonify({"error": "Database unavailable"}), 503
-
-    history = []
-    for i in range(days - 1, -1, -1):
-        d      = (datetime.now(_PACIFIC) - timedelta(days=i)).strftime("%Y-%m-%d")
-        day_ac = db["day_api_calls"].get(d, {})
-        history.append({
-            "date":    d,
-            "total":   db["day_counts"].get(d, 0),
-            "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
-            "aeroapi": day_ac.get("aeroapi", 0),
-        })
-
-    ac     = db["today_api_calls"]
-    rac    = db["range_api_calls"]
-    return jsonify({
-        "mode":             "default",
-        "today":            today,
-        "range_from":       cutoff,
-        "range_to":         today,
-        "total":            db["today_total"],
-        "api_calls":        {"airlabs": ac.get("airlabs", 0) + ac.get("airlabs2", 0),  "aeroapi": ac.get("aeroapi", 0)},
-        "range_api_calls":  {"airlabs": rac.get("airlabs", 0) + rac.get("airlabs2", 0), "aeroapi": rac.get("aeroapi", 0)},
-        "top_today":        db["today_top"],
-        "rollup":           db["rollup"],
-        "history":          history,
-        "recent":           _db_recent(cutoff, today),
-    })
+    return jsonify({**payload, "server_now": now.strftime("%Y-%m-%d %H:%M:%S")})
 
 
 @app.route("/api/stats/search", methods=["GET"])
@@ -891,9 +959,11 @@ def stats_search():
     })
 
 
-@app.route("/api/free-api-accuracy", methods=["GET"])
-def free_api_accuracy():
-    """Accuracy report: adsbdb (free) vs. paid-API route cross-checks."""
+@app.route("/api/fr24-agreement", methods=["GET"])
+def fr24_agreement():
+    """How often FR24's route matched the paid APIs' (or the 7-day resolved cache's) for
+    the same flight, and — when they disagreed — which side AeroAPI backed as the
+    tie-breaker and what the display showed, so the disagreements can be checked by eye."""
     if not DB_FILE.exists():
         return jsonify({"error": "Database unavailable"}), 503
     conn = None
@@ -901,127 +971,65 @@ def free_api_accuracy():
         today      = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
         thirty_ago = (datetime.now(_PACIFIC) - timedelta(days=29)).strftime("%Y-%m-%d")
         conn = sqlite3.connect(str(DB_FILE))
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
 
         def _row_stats(row):
-            total     = row["total"]     or 0
-            matches   = int(row["matches"]   or 0)
-            mismatches= int(row["mismatches"]or 0)
-            pct       = round(matches / total * 100, 1) if total else None
-            return {"total": total, "matches": matches, "mismatches": mismatches, "pct": pct}
+            total      = (row["total"] if row else 0) or 0
+            matches    = int((row["matches"] if row else 0) or 0)
+            pct        = round(matches / total * 100, 1) if total else None
+            return {"total": total, "matches": matches, "mismatches": total - matches, "pct": pct}
 
-        # ── Today ──────────────────────────────────────────────────────────
-        t = conn.execute(
-            """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
-               FROM free_api_checks WHERE date=?""", (today,)
-        ).fetchone()
+        empty = {"today": _row_stats(None), "thirty_day": _row_stats(None),
+                 "by_source": {}, "tie_breaks": {}, "last_mismatches": [], "daily": []}
+        # The display service creates the table; until it has run once, report no data.
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fr24_checks'").fetchone():
+            return jsonify(empty)
+        # The tie-break columns arrive with a later display-service start (it migrates the
+        # table); until then report them blank rather than failing.
+        _cols = {r[1] for r in conn.execute("PRAGMA table_info(fr24_checks)")}
+        _ref_cols = ", ".join(c if c in _cols else f"'' AS {c}"
+                              for c in ("referee", "referee_route", "shown_route"))
 
-        # ── 30-day ─────────────────────────────────────────────────────────
-        t30 = conn.execute(
-            """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
-               FROM free_api_checks WHERE date>=?""", (thirty_ago,)
-        ).fetchone()
-
-        # ── Last 10 mismatches ──────────────────────────────────────────────
+        _sql = "SELECT COUNT(*) total, SUM(matched) matches FROM fr24_checks WHERE "
+        t   = conn.execute(_sql + "date=?",  (today,)).fetchone()
+        t30 = conn.execute(_sql + "date>=?", (thirty_ago,)).fetchone()
+        by_source = {
+            r["other_source"]: _row_stats(r)
+            for r in conn.execute(
+                """SELECT other_source, COUNT(*) total, SUM(matched) matches
+                   FROM fr24_checks WHERE date>=? GROUP BY other_source""", (thirty_ago,))
+        }
+        # AeroAPI's verdicts when it broke a tie: 'fr24', 'other' or 'split'.
+        tie_breaks = {}
+        if "referee" in _cols:
+            tie_breaks = {
+                r[0]: r[1] for r in conn.execute(
+                    """SELECT referee, COUNT(*) FROM fr24_checks
+                       WHERE date>=? AND referee!='' GROUP BY referee""", (thirty_ago,))
+            }
         mm = conn.execute(
-            """SELECT seen_at, callsign, free_route, paid_route
-               FROM free_api_checks WHERE matched=0
-               ORDER BY id DESC LIMIT 10"""
+            f"""SELECT seen_at, callsign, registration, fr24_route, other_route, other_source,
+                       {_ref_cols}
+                FROM fr24_checks WHERE matched=0 AND date>=?
+                ORDER BY id DESC LIMIT 15""", (thirty_ago,)
         ).fetchall()
-
-        # ── Daily breakdown ─────────────────────────────────────────────────
         daily = conn.execute(
             """SELECT date, COUNT(*) total, SUM(matched) matches
-               FROM free_api_checks WHERE date>=?
+               FROM fr24_checks WHERE date>=?
                GROUP BY date ORDER BY date""", (thirty_ago,)
         ).fetchall()
-
         return jsonify({
             "today":           _row_stats(t),
             "thirty_day":      _row_stats(t30),
+            "by_source":       by_source,
+            "tie_breaks":      tie_breaks,
             "last_mismatches": [dict(r) for r in mm],
             "daily":           [{"date": r["date"], "total": r["total"],
                                  "matches": r["matches"] or 0} for r in daily],
         })
     except Exception as e:
-        _log(f"[server] free-api-accuracy error: {e}")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-
-@app.route("/api/ga-accuracy", methods=["GET"])
-def ga_accuracy():
-    """Accuracy report: adsbdb / OpenSky (free) vs. FR24 route cross-checks for GA (N-number) aircraft."""
-    if not DB_FILE.exists():
-        return jsonify({"error": "Database unavailable"}), 503
-    conn = None
-    try:
-        today      = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
-        thirty_ago = (datetime.now(_PACIFIC) - timedelta(days=29)).strftime("%Y-%m-%d")
-        conn = sqlite3.connect(str(DB_FILE))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.row_factory = sqlite3.Row
-
-        # Silently return empty data if the table doesn't exist yet
-        # (e.g. running an old DB before the migration has run).
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
-        if "ga_free_api_checks" not in tables:
-            return jsonify({
-                "adsbdb":  {"today": {"total": 0}, "thirty_day": {"total": 0}, "last_mismatches": [], "daily": []},
-                "opensky": {"today": {"total": 0}, "thirty_day": {"total": 0}, "last_mismatches": [], "daily": []},
-            })
-
-        def _row_stats(row):
-            total      = row["total"]      or 0
-            matches    = int(row["matches"]    or 0)
-            mismatches = int(row["mismatches"] or 0)
-            pct        = round(matches / total * 100, 1) if total else None
-            return {"total": total, "matches": matches, "mismatches": mismatches, "pct": pct}
-
-        def _api_stats(api_name):
-            t = conn.execute(
-                """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
-                   FROM ga_free_api_checks WHERE date=? AND free_api=?""",
-                (today, api_name),
-            ).fetchone()
-            t30 = conn.execute(
-                """SELECT COUNT(*) total, SUM(matched) matches, SUM(1-matched) mismatches
-                   FROM ga_free_api_checks WHERE date>=? AND free_api=?""",
-                (thirty_ago, api_name),
-            ).fetchone()
-            mm = conn.execute(
-                """SELECT seen_at, registration, callsign, free_route, fr24_route
-                   FROM ga_free_api_checks WHERE matched=0 AND free_api=?
-                   ORDER BY id DESC LIMIT 10""",
-                (api_name,),
-            ).fetchall()
-            daily = conn.execute(
-                """SELECT date, COUNT(*) total, SUM(matched) matches
-                   FROM ga_free_api_checks WHERE date>=? AND free_api=?
-                   GROUP BY date ORDER BY date""",
-                (thirty_ago, api_name),
-            ).fetchall()
-            return {
-                "today":           _row_stats(t),
-                "thirty_day":      _row_stats(t30),
-                "last_mismatches": [dict(r) for r in mm],
-                "daily":           [{"date": r["date"], "total": r["total"],
-                                     "matches": r["matches"] or 0} for r in daily],
-            }
-
-        return jsonify({
-            "adsbdb":  _api_stats("adsbdb"),
-            "opensky": _api_stats("opensky"),
-        })
-    except Exception as e:
-        _log(f"[server] ga-accuracy error: {e}")
+        _log(f"[server] fr24-agreement error: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn:
@@ -1184,13 +1192,35 @@ def _dismiss_state_for(game):
     return None
 
 
-def _scoreboard_response(cached):
+def _post_game_seconds() -> int:
+    """SCOREBOARD_POST_GAME_MINUTES in seconds — the same window the LED board uses."""
+    try:
+        return max(0, int(read_config().get("SCOREBOARD_POST_GAME_MINUTES", 30))) * 60
+    except Exception:
+        return 30 * 60
+
+
+def _on_board(game, ended_at, now) -> bool:
+    """Is this game what the LED board is showing (flights aside)?  LIVE/CRIT always; a FINAL
+    only inside the post-game window — after that the board is back on the idle scenes, so
+    the UI must stop saying "On the board now" (it used to keep the final up until midnight)."""
+    state = (game or {}).get("state")
+    if state in LIVE_STATES:
+        return True
+    if state in FINAL_STATES:
+        return ended_at is not None and (now - ended_at) <= _post_game_seconds()
+    return False
+
+
+def _scoreboard_response(cached, now=None):
+    now = time.time() if now is None else now
     return jsonify({
         "game":          cached["game"],
         "team_name":     cached["team_name"],
         "sport_key":     cached.get("sport_key", "NHL"),
         "enabled":       cached["enabled"],
         "game_ended_at": cached.get("game_ended_at"),
+        "on_board":      _on_board(cached["game"], cached.get("game_ended_at"), now),
         "dismissed_game_id": _dismiss_state_for(cached["game"]),
     })
 
@@ -1233,33 +1263,28 @@ def _refresh_scoreboard(now):
     game_id = game.get("game_id") if game else None
 
     # Determine game_ended_at before acquiring the lock so file I/O is cheap.
-    if state in ("FINAL", "OFF") and game_id:
-        # Peek at the cached value without the lock (worst case: two threads
-        # both compute the same value on the very first post-game poll).
-        prev_ended_at_peek = _scoreboard_cache.get("game_ended_at")
+    # Peek at the cached game without the lock (worst case: two threads both compute the same
+    # value on the very first post-game poll).
+    prev_game = _scoreboard_cache.get("game") or {}
+    same_game = bool(game_id) and str(prev_game.get("game_id")) == str(game_id)
+    if state in FINAL_STATES and game_id:
+        # Reuse the cached end time only if it belongs to THIS game — a cache still holding
+        # yesterday's final (no request in between) must not mark today's game long-expired.
+        prev_ended_at_peek = _scoreboard_cache.get("game_ended_at") if same_game else None
         if prev_ended_at_peek is None:
             # Try the persisted file first (survives service restart).
             persisted = _load_persisted_game_ended_at(game_id)
             if persisted is None:
-                # Estimate from game start rather than using now, so a service
-                # restart doesn't reset the 30-min window for an already-over game.
-                # Use a period-aware buffer — err on the LATER side so we never
-                # hide the score before the real post-game window expires.
-                #   regulation (period ≤ 3): start + 3 h  (~2.5 h typical)
-                #   OT / SO   (period  > 3): start + 4 h  (conservative for multi-OT)
-                try:
-                    start_utc = game.get("start_time_utc", "")
-                    if start_utc:
-                        start_ts = datetime.fromisoformat(
-                            start_utc.replace("Z", "+00:00")
-                        ).timestamp()
-                        period = game.get("period", 0) or 0
-                        buffer = 4 * 3600 if period > 3 else 3 * 3600
-                        persisted = start_ts + buffer
-                    else:
-                        persisted = now
-                except Exception:
+                if same_game and prev_game.get("state") in LIVE_STATES:
+                    # We watched it go final (page open across the buzzer): now is accurate.
                     persisted = now
+                else:
+                    # First seen already final (page opened later, or a web restart): estimate
+                    # from the start time with the SAME league-aware lengths the LED board uses,
+                    # clamped to now — the old fixed 3 h / 4 h buffer was not clamped, so a
+                    # final first seen soon after the buzzer got an end time in the FUTURE and
+                    # the UI kept showing it well after the board had gone back to idle.
+                    persisted = estimate_ended_at(game, now, sport_key)
                 _persist_game_ended_at(game_id, persisted)
             new_ended_at = persisted
         else:
@@ -1269,8 +1294,8 @@ def _refresh_scoreboard(now):
         _clear_persisted_game_ended_at()
 
     with _scoreboard_cache_lock:
-        # If another thread already set game_ended_at, keep the earlier value.
-        existing = _scoreboard_cache.get("game_ended_at")
+        # If another thread already set game_ended_at FOR THIS GAME, keep the earlier value.
+        existing = _scoreboard_cache.get("game_ended_at") if same_game else None
         if new_ended_at is not None and existing is not None:
             game_ended_at = min(existing, new_ended_at)
         else:
@@ -1285,6 +1310,7 @@ def _refresh_scoreboard(now):
         "sport_key":    sport_key,    # e.g. "NHL", "NFL", "MLB", "NBA", "MLS"
         "enabled":      enabled,
         "game_ended_at": game_ended_at,   # unix timestamp or null
+        "on_board":     _on_board(game, game_ended_at, now),   # what the LED board shows now
         "dismissed_game_id": _dismiss_state_for(game),   # game_id hidden by the user, or null
     })
 
@@ -1500,50 +1526,39 @@ def api_stack():
         if s >= 60:    return f"{s // 60}m"
         return f"{s}s"
 
-    # Estimates based on observed log data: ~5–10 unique flights/hour in zone,
-    # 1-hour cache TTL, adsbdb handles most LAS-origin commercial traffic directly.
+    # Listed in the order a route is trusted: FR24 (asked for every flight), the paid
+    # APIs (which still run as they always have, behind the route caches), then the free
+    # feeds as a last resort.  Priority 0 rows are notes, not sources in the chain.
     return jsonify({
         "stack": [
             {
                 "priority":     1,
-                "name":         "adsbdb",
-                "api_key":      "adsbdb",
-                "type":         "Route data (static historical DB)",
-                "url":          "https://api.adsbdb.com",
-                "cost":         "Free — no key required",
+                "name":         "FlightRadar24",
+                "api_key":      "fr24",
+                "type":         "Route data (real-time, by tail number) — primary",
+                "url":          "https://www.flightradar24.com",
+                "cost":         "Free — no key required (unofficial API)",
                 "key_set":      False,
                 "requires_key": False,
-                "disabled":     ADSBDB_DISABLED_FLAG.exists(),
-                "cache_ttl":    _adsbdb_ttl,
-                "cache_ttl_fmt": _fmt_ttl(_adsbdb_ttl),
-                "notes":    "Queried for every callsign (result cached to avoid repeat calls). "
-                            "Trusted for GA / non-scheduled flights when origin is a configured "
-                            "local airport AND passes a plausibility check. "
-                            "Commercial airline callsigns (scheduled prefix) are NOT trusted — "
-                            "adsbdb's static historical DB can reflect a prior leg flown by the "
-                            "same aircraft on a different day. AirLabs / AeroAPI are used instead "
-                            "and their result is logged against adsbdb for visibility. "
-                            f"Cache TTL: {_fmt_ttl(_adsbdb_ttl)}.",
+                "disabled":     FR24_DISABLED_FLAG.exists(),
+                "cache_ttl":    600,
+                "cache_ttl_fmt": _fmt_ttl(600),
+                "notes":    "Asked for every flight, by tail number (the library has no callsign "
+                            "search, so a flight with no known tail skips it). Its answer is the "
+                            "aircraft's live leg. When AirLabs or the 7-day cache disagrees with it, "
+                            "AeroAPI breaks the tie; with no clear answer, FR24 wins unless only the "
+                            "other route touches a home airport. Compared with the paid answer on "
+                            "the Stats page. For GA / N-number "
+                            "tails a complete FR24 route skips the paid APIs. If it errors it backs "
+                            "off 5 min and the paid APIs and caches carry on. Not affected by the "
+                            "APIs On/Off toggle (free). Also step 4 of the aircraft type lookup. "
+                            "Read live once per pass of a flight (memo: 10m / "
+                            f"{_fmt_ttl(_miss_ttl)} miss), before the 7-day route cache is "
+                            "consulted; its winning routes also refill that cache, so it's warm "
+                            "if FR24 goes away.",
             },
             {
                 "priority":     2,
-                "name":         "OpenSky",
-                "api_key":      "opensky",
-                "type":         "Route data (real-time, by hex — free, unlimited)",
-                "url":          "https://opensky-network.org",
-                "cost":         "Free with credentials — no monthly limit",
-                "key_set":      bool(cfg.get("OPENSKY_CLIENT_ID")),
-                "requires_key": True,
-                "disabled":     OPENSKY_DISABLED_FLAG.exists(),
-                "cache_ttl":    _opensky_ttl,
-                "cache_ttl_fmt": _fmt_ttl(_opensky_ttl),
-                "notes":    "Queried before AirLabs to conserve the monthly quota. "
-                            "Result trusted when origin is a configured local airport "
-                            "(LOCAL_AIRPORTS) — only departures are accepted. "
-                            f"Cache TTL: {_fmt_ttl(_opensky_ttl)}.",
-            },
-            {
-                "priority":     3,
                 "name":         "AirLabs 1",
                 "api_key":      "airlabs",
                 "type":         "Route data (real-time, by callsign — primary key)",
@@ -1554,15 +1569,18 @@ def api_stack():
                 "disabled":     AIRLABS_DISABLED_FLAG.exists(),
                 "cache_ttl":    _sched_ttl,
                 "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
-                "notes":    "Primary AirLabs key. Called first for commercial routes. "
-                            "Returns airport coordinates for geometry plausibility. "
+                "notes":    "Called for every airline flight the 7-day resolved-route cache doesn't "
+                            "already know (FR24's answer doesn't skip it, so the two can be compared "
+                            "and it is the fallback when FR24 is down). Returns airport coordinates "
+                            "for the geometry check. Can answer with the previous leg of a reused "
+                            "flight number; the departure check drops those. "
                             "Non-local routes cached at miss TTL (5 min) — never persisted long-term. "
                             f"Local route cache TTL: {_fmt_ttl(_default_ttl)}. "
                             f"Per-callsign miss cache: {_fmt_ttl(_miss_ttl)}. "
                             "Falls back to AirLabs 2 automatically when this key's quota is exhausted.",
             },
             {
-                "priority":     4,
+                "priority":     3,
                 "name":         "AirLabs 2",
                 "api_key":      "airlabs2",
                 "type":         "Route data (real-time, secondary key)",
@@ -1582,7 +1600,7 @@ def api_stack():
                             f"Combined paid-API miss suppression: {_fmt_ttl(_paid_miss)}.",
             },
             {
-                "priority":     5,
+                "priority":     4,
                 "name":         "FlightAware AeroAPI",
                 "api_key":      "flightaware",
                 "type":         "Route data (real-time, paid)",
@@ -1593,38 +1611,76 @@ def api_stack():
                 "disabled":     AEROAPI_DISABLED_FLAG.exists(),
                 "cache_ttl":    _sched_ttl,
                 "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
-                "notes":    "Called when all free sources and both AirLabs keys return no route. "
-                            "Falls back to FR24 (§5) if still no result. "
-                            "Cascades automatically on 402 (credit exhausted) or 429. "
+                "notes":    "The tie-breaker: when FR24 and AirLabs (or the 7-day cache) disagree, "
+                            "AeroAPI is asked live — once per pass of the flight — and the side it "
+                            "backs is shown. Not asked when FR24 already has the whole route and "
+                            "nothing disagrees. Without a full FR24 route it runs as before: when "
+                            "both AirLabs keys return no usable route, or AirLabs held a non-local "
+                            "route. Cascades automatically on 402 (credit exhausted) or 429. "
                             f"Cache TTL: {_fmt_ttl(_sched_ttl)} (scheduled) / {_fmt_ttl(_default_ttl)} (GA). "
                             f"Miss suppression: {_fmt_ttl(_paid_miss)}.",
             },
             {
+                "priority":     5,
+                "name":         "OpenSky",
+                "api_key":      "opensky",
+                "type":         "Last resort (real-time departure airport, by hex)",
+                "url":          "https://opensky-network.org",
+                "cost":         "Free with credentials — no monthly limit",
+                "key_set":      bool(cfg.get("OPENSKY_CLIENT_ID")),
+                "requires_key": True,
+                "disabled":     OPENSKY_DISABLED_FLAG.exists(),
+                "cache_ttl":    _opensky_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_opensky_ttl),
+                "notes":    "Not asked for every flight. Used only when FR24, AirLabs and AeroAPI "
+                            "all have no usable route (it usually knows only the departure "
+                            "airport mid-flight), and when a paid answer looks like the plane's "
+                            "previous, inbound leg on a plane that isn't descending — its live "
+                            "departure airport is what confirms the plane just left home. "
+                            f"Cache TTL: {_fmt_ttl(_opensky_ttl)}.",
+            },
+            {
                 "priority":     6,
-                "name":         "FlightRadar24",
-                "api_key":      "fr24",
-                "type":         "Route data (real-time, free — unofficial API)",
-                "url":          "https://www.flightradar24.com",
+                "name":         "adsbdb",
+                "api_key":      "adsbdb",
+                "type":         "Absolute last resort for routes; tail numbers and aircraft types",
+                "url":          "https://api.adsbdb.com",
                 "cost":         "Free — no key required",
                 "key_set":      False,
                 "requires_key": False,
-                "disabled":     FR24_DISABLED_FLAG.exists(),
-                "cache_ttl":    _default_ttl,
-                "cache_ttl_fmt": _fmt_ttl(_default_ttl),
-                "notes":    "Serves three roles: §1 first resort for GA (N-number) aircraft — "
-                            "real-time registration lookup, more reliable than adsbdb's static DB. "
-                            "§5 last resort for commercial flights — called only when all paid APIs "
-                            "return no route. Step 5 of the aircraft type lookup chain — queries by "
-                            "registration when all static databases miss. "
-                            "Not affected by the APIs On/Off toggle (free). "
-                            f"Route cache TTL: {_fmt_ttl(_sched_ttl)} commercial / "
-                            f"{_fmt_ttl(_default_ttl)} GA / {_fmt_ttl(_miss_ttl)} miss.",
+                "disabled":     ADSBDB_DISABLED_FLAG.exists(),
+                "cache_ttl":    _adsbdb_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_adsbdb_ttl),
+                "notes":    "Its callsign→route data is a static historical guess (a flight number's "
+                            "old city pair), so it is asked for a route only after OpenSky, when "
+                            "nothing else has one. Its aircraft database is what supplies tail "
+                            "numbers for FR24 when the ADS-B feed doesn't carry one, and step 2 of "
+                            "the aircraft type lookup (those don't use this switch). "
+                            f"Route cache TTL: {_fmt_ttl(_adsbdb_ttl)}.",
             },
             {
                 "priority":     0,
-                "name":         "LOCAL_AIRPORTS trust filter",
+                "name":         "Resolved-route cache",
                 "api_key":      None,
-                "type":         "Trust filter (not a data source)",
+                "type":         "7-day route memory for airline flights (not an API)",
+                "url":          None,
+                "cost":         "Free",
+                "key_set":      True,
+                "requires_key": False,
+                "disabled":     False,
+                "cache_ttl":    _sched_ttl,
+                "cache_ttl_fmt": _fmt_ttl(_sched_ttl),
+                "notes":    "An airline route that resolves with a home-airport endpoint is kept "
+                            f"{_fmt_ttl(_sched_ttl)}, so the same flight number later skips AirLabs "
+                            "and AeroAPI. FR24 is still asked and checked against it: when FR24 "
+                            "has a different complete route touching a home airport, FR24's is "
+                            "shown and replaces the entry.",
+            },
+            {
+                "priority":     0,
+                "name":         "Home-airport preference",
+                "api_key":      None,
+                "type":         "Selection rule (not a data source)",
                 "url":          None,
                 "cost":         "Free",
                 "key_set":      bool(cfg.get("LOCAL_AIRPORTS") or cfg.get("LOCAL_AIRPORT")),
@@ -1632,9 +1688,11 @@ def api_stack():
                 "disabled":     False,
                 "cache_ttl":    None,
                 "cache_ttl_fmt": None,
-                "notes":    "Routes from adsbdb and OpenSky are only accepted when the "
-                            "departure airport is one of the configured LOCAL_AIRPORTS. "
-                            "Paid APIs (AirLabs, AeroAPI) use geometry plausibility instead.",
+                "notes":    "When sources disagree, a route that starts or ends at one of the "
+                            "configured LOCAL_AIRPORTS beats one that doesn't, a complete route beats "
+                            "a partial one, and then FR24 beats AirLabs, AeroAPI and the free feeds. "
+                            "Every route also has to pass the geometry check against the plane's "
+                            "position.",
             },
             {
                 "priority":     0,
@@ -1864,6 +1922,8 @@ def log_stream():
 
 if __name__ == "__main__":
     _host, _port = "0.0.0.0", 5000
+    stats_data.ensure_indexes()   # one-time: seen_at index for "newest first" queries
+    threading.Thread(target=_warm_stats, name="stats-warm", daemon=True).start()
     try:
         from waitress import serve
         _log("[web] serving via waitress (production WSGI, bounded thread pool)")

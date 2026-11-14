@@ -15,8 +15,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 _ROOT = Path(__file__).resolve().parent.parent
 _WEB = _ROOT / "web"
@@ -88,6 +90,7 @@ class StatsDataLayer(unittest.TestCase):
         _make_db(self._tmp.name)
         self._orig = stats_data.DB_FILE
         stats_data.DB_FILE = Path(self._tmp.name)
+        stats_data._past_cache.clear()
 
     def tearDown(self):
         stats_data.DB_FILE = self._orig
@@ -110,6 +113,48 @@ class StatsDataLayer(unittest.TestCase):
         stats_data.DB_FILE = Path("/nonexistent/missing.db")
         self.assertIsNone(stats_data._db_stats("2026-06-01", "2026-06-03"))
 
+    def test_db_stats_today_fields(self):
+        # The Stats page's tiles: today's count / tails / hours, and yesterday's times so it
+        # can compare with "by now yesterday".
+        d = stats_data._db_stats("2026-06-01", "2026-06-03", today="2026-06-03")
+        self.assertEqual(d["today_total"], 3)
+        self.assertEqual(d["today_unique"], 3)
+        self.assertEqual(d["today_hourly"][10], 3)
+        self.assertEqual(sum(d["today_hourly"]), 3)
+        self.assertEqual(d["yesterday_times"], ["09:00:00"])
+        self.assertEqual({a["prefix"]: a["count"] for a in d["today_top"]}, {"SWA": 2, "AAL": 1})
+        self.assertEqual(d["range_unique"], 4)
+        self.assertEqual((d["hourly"][9], d["hourly"][10]), (1, 3))
+        self.assertEqual([r["callsign"] for r in d["recent"]], ["AAL789", "SWA456", "SWA123", "UAL111"])
+        # One bucket per API that supplied the displayed route.
+        self.assertEqual(d["rollup"]["source_pct"],
+                         {"airlabs": 25.0, "aeroapi": 25.0, "adsbdb": 25.0, "opensky": 25.0})
+
+    def test_split_read_matches_a_fresh_read(self):
+        # Finished days come from the cache and the live day is re-read; the numbers must be
+        # exactly what one read of the whole range gives.
+        fresh = stats_data._db_stats("2026-06-01", "2026-06-03")
+        split = stats_data._db_stats("2026-06-01", "2026-06-03", live_date="2026-06-03")
+        for k in ("range_total", "day_counts", "range_api_calls", "range_unique", "hourly", "rollup"):
+            self.assertEqual(fresh[k], split[k], k)
+        self.assertEqual([r["callsign"] for r in fresh["recent"]], [r["callsign"] for r in split["recent"]])
+
+    def test_finished_days_are_cached_and_the_live_day_is_not(self):
+        first = stats_data._db_stats("2026-06-01", "2026-06-03", live_date="2026-06-03")
+        conn = sqlite3.connect(self._tmp.name)
+        conn.executemany(
+            "INSERT INTO sightings (seen_at,date,callsign,registration,origin,destination,"
+            "aircraft,route_source,airline) VALUES (?,?,?,?,?,?,?,?,?)",
+            [("2026-06-03T11:00:00", "2026-06-03", "DAL1", "N5DL", "LAS", "ATL", "A321", "adsbdb", "DAL"),
+             # A row landing in a finished day only happens with a manual backfill.
+             ("2026-06-02T11:00:00", "2026-06-02", "DAL2", "N6DL", "LAS", "ATL", "A321", "adsbdb", "DAL")])
+        conn.commit()
+        conn.close()
+        second = stats_data._db_stats("2026-06-01", "2026-06-03", live_date="2026-06-03")
+        self.assertEqual(second["day_counts"]["2026-06-03"], first["day_counts"]["2026-06-03"] + 1)
+        self.assertEqual(second["day_counts"]["2026-06-02"], first["day_counts"]["2026-06-02"])
+        self.assertEqual(second["recent"][0]["callsign"], "DAL1")
+
     def test_db_recent_newest_first(self):
         rows = stats_data._db_recent("2026-06-01", "2026-06-03", limit=10)
         self.assertEqual(len(rows), 4)
@@ -128,6 +173,176 @@ class StatsDataLayer(unittest.TestCase):
     def test_db_search_missing_db_returns_none(self):
         stats_data.DB_FILE = Path("/nonexistent/missing.db")
         self.assertIsNone(stats_data._db_search("SWA"))
+
+
+class Fr24AgreementEndpoint(unittest.TestCase):
+    """/api/fr24-agreement: FR24's route vs the paid APIs' / route cache's for the same
+    flight (the Stats card that replaced the free-API accuracy cards)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._db = self._dir / "ft_flights.db"
+        _make_db(str(self._db))
+        self._orig = self.srv.DB_FILE
+        self.srv.DB_FILE = self._db
+
+    def tearDown(self):
+        self.srv.DB_FILE = self._orig
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def _seed(self, rows, tie_break_cols=True):
+        conn = sqlite3.connect(str(self._db))
+        _extra = (", referee TEXT NOT NULL DEFAULT '', referee_route TEXT NOT NULL DEFAULT '',"
+                  " shown_route TEXT NOT NULL DEFAULT ''") if tie_break_cols else ""
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS fr24_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, seen_at TEXT NOT NULL, date TEXT NOT NULL,
+            callsign TEXT NOT NULL DEFAULT '', registration TEXT NOT NULL DEFAULT '',
+            fr24_route TEXT NOT NULL DEFAULT '', other_route TEXT NOT NULL DEFAULT '',
+            other_source TEXT NOT NULL DEFAULT '', matched INTEGER NOT NULL DEFAULT 0{_extra})""")
+        if tie_break_cols:
+            rows = [r if len(r) == 11 else r + ("", "", "") for r in rows]
+            conn.executemany(
+                "INSERT INTO fr24_checks (seen_at,date,callsign,registration,fr24_route,"
+                "other_route,other_source,matched,referee,referee_route,shown_route)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+        else:
+            conn.executemany(
+                "INSERT INTO fr24_checks (seen_at,date,callsign,registration,fr24_route,"
+                "other_route,other_source,matched) VALUES (?,?,?,?,?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+
+    def test_no_table_yet_reports_no_data(self):
+        d = self.client.get("/api/fr24-agreement").get_json()
+        self.assertEqual(d["thirty_day"]["total"], 0)
+        self.assertEqual((d["by_source"], d["last_mismatches"], d["daily"]), ({}, [], []))
+
+    def test_totals_split_and_disagreements(self):
+        today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+        self._seed([
+            (f"{today} 09:00:00", today, "SWA1", "N1", "LAS->DEN", "LAS->DEN", "airlabs", 1),
+            (f"{today} 09:05:00", today, "SWA2", "N2", "LAS->MDW", "LAS->BNA", "airlabs", 0,
+             "fr24", "LAS->MDW", "LAS->MDW"),
+            (f"{today} 09:10:00", today, "SWA3", "N3", "LAS->OAK", "LAS->OAK", "cache", 1),
+            (f"{today} 09:15:00", today, "AAL4", "N4", "LAS->SEA", "ORD->LAS", "aeroapi", 0),
+            ("2025-01-01 09:00:00", "2025-01-01", "OLD1", "N9", "LAS->X", "LAS->Y", "airlabs", 0),
+        ])
+        d = self.client.get("/api/fr24-agreement").get_json()
+        self.assertEqual(d["thirty_day"], {"total": 4, "matches": 2, "mismatches": 2, "pct": 50.0})
+        self.assertEqual(d["today"]["total"], 4)
+        self.assertEqual(d["by_source"]["airlabs"]["pct"], 50.0)
+        self.assertEqual(d["by_source"]["cache"]["pct"], 100.0)
+        self.assertEqual(d["by_source"]["aeroapi"]["matches"], 0)
+        # newest first, and the 2025 row is outside the 30-day window
+        self.assertEqual([r["callsign"] for r in d["last_mismatches"]], ["AAL4", "SWA2"])
+        self.assertEqual(d["last_mismatches"][0]["other_source"], "aeroapi")
+        self.assertEqual(d["daily"], [{"date": today, "total": 4, "matches": 2}])
+        # AeroAPI's tie-break verdicts and what the board showed
+        self.assertEqual(d["tie_breaks"], {"fr24": 1})
+        swa2 = d["last_mismatches"][1]
+        self.assertEqual((swa2["referee"], swa2["referee_route"], swa2["shown_route"]),
+                         ("fr24", "LAS->MDW", "LAS->MDW"))
+
+    def test_table_without_tie_break_columns_still_serves(self):
+        # The display service adds the tie-break columns when it starts; the web service may
+        # read the table before that — it must report them blank, not fail.
+        today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+        self._seed([(f"{today} 09:05:00", today, "SWA2", "N2", "LAS->MDW", "LAS->BNA", "airlabs", 0)],
+                   tie_break_cols=False)
+        r = self.client.get("/api/fr24-agreement")
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertEqual(d["tie_breaks"], {})
+        self.assertEqual(d["last_mismatches"][0]["referee"], "")
+
+
+class RouteSourceBuckets(unittest.TestCase):
+    """The Stats 'Where routes came from' split credits each displayed route to one API."""
+
+    def test_buckets(self):
+        b = stats_data._route_bucket
+        self.assertEqual(b("fr24"), "fr24")
+        self.assertEqual(b("fr24:cached"), "fr24")
+        self.assertEqual(b("resolved:airlabs2:cached"), "airlabs")
+        self.assertEqual(b("resolved:fr24:cached"), "fr24")
+        self.assertEqual(b("aeroapi:cached"), "aeroapi")
+        self.assertEqual(b("opensky+aeroapi"), "aeroapi")      # credited to the trusted one
+        self.assertEqual(b("adsbdb+opensky"), "opensky")
+        self.assertEqual(b("adsbdb"), "adsbdb")
+        self.assertEqual(b("override"), "override")
+        self.assertEqual(b("none"), "none")
+        self.assertEqual(b(""), "none")
+        self.assertEqual(b("resolved:cached"), "other")
+
+
+class StatsEndpointAndCache(unittest.TestCase):
+    """/api/stats over a seeded DB, and the response cache keyed on the DB's file stats."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._db = self._dir / "ft_flights.db"
+        _make_db(str(self._db))
+        self._orig = (self.srv.DB_FILE, stats_data.DB_FILE)
+        self.srv.DB_FILE = stats_data.DB_FILE = self._db
+        self.srv._STATS_CACHE.clear()
+        stats_data._past_cache.clear()
+
+    def tearDown(self):
+        self.srv.DB_FILE, stats_data.DB_FILE = self._orig
+        self.srv._STATS_CACHE.clear()
+        stats_data._past_cache.clear()
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def test_range_response_shape(self):
+        d = self.client.get("/api/stats?from=2026-06-01&to=2026-06-03").get_json()
+        self.assertEqual(d["mode"], "range")
+        self.assertEqual(d["total"], 4)
+        self.assertEqual(len(d["history"]), 3)
+        self.assertEqual(d["range_unique"], 4)
+        self.assertEqual(len(d["hourly"]), 24)
+        self.assertEqual(d["recent"][0]["callsign"], "AAL789")
+        self.assertRegex(d["server_now"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_default_window_is_exactly_90_days(self):
+        d = self.client.get("/api/stats?days=90").get_json()
+        self.assertEqual(len(d["history"]), 90)
+        self.assertEqual(d["range_from"], d["history"][0]["date"])
+        self.assertEqual(d["range_to"], d["today"])
+
+    def test_payload_reused_until_the_db_changes(self):
+        builds = []
+
+        def build():
+            builds.append(1)
+            return {"n": len(builds)}
+
+        a = self.srv._cached_stats(("k",), build)
+        b = self.srv._cached_stats(("k",), build)
+        self.assertEqual(len(builds), 1)
+        self.assertIs(a, b)
+        # Any commit rewrites the DB or its WAL; simulate one by moving the mtime forward.
+        st = self._db.stat()
+        os.utime(self._db, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))
+        self.srv._cached_stats(("k",), build)
+        self.assertEqual(len(builds), 2)
+        # A WAL appearing or growing counts as a change too.
+        (self._dir / "ft_flights.db-wal").write_bytes(b"x" * 32)
+        self.srv._cached_stats(("k",), build)
+        self.assertEqual(len(builds), 3)
 
 
 class ParseLogSightings(unittest.TestCase):
@@ -221,6 +436,87 @@ class ScoreboardPersistence(unittest.TestCase):
         self.assertIsNone(scoreboard_data._load_persisted_game_ended_at("game-1"))
 
 
+class ScoreboardOnBoardWindow(unittest.TestCase):
+    """/api/scoreboard's on_board flag follows the LED board's post-game window, and the
+    web's end-time estimate is the board's (league-aware, clamped to now).  The UI used to
+    say "On the board now" for a final until midnight, and its fixed start+3 h/4 h estimate
+    wasn't clamped, so a final first seen soon after the buzzer got a FUTURE end time."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+
+    def setUp(self):
+        import time as _t
+        self.now = _t.time()
+        self._dir = Path(tempfile.mkdtemp())
+        self._patches = [
+            mock.patch.object(scoreboard_data, "_GAME_ENDED_AT_FILE", self._dir / "ended.json"),
+            mock.patch.object(self.srv, "DISMISS_FLAG", self._dir / "dismissed"),
+            mock.patch.object(self.srv, "read_config",
+                              return_value={"SCOREBOARD_POST_GAME_MINUTES": 30}),
+        ]
+        for p in self._patches:
+            p.start()
+        self.srv._scoreboard_cache.update({"game": None, "team_name": "VGK", "sport_key": "NHL",
+                                           "enabled": True, "ts": 0.0, "game_ended_at": None})
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def _game(self, state, hours_ago, gid=101):
+        import datetime as _dt
+        start = _dt.datetime.fromtimestamp(self.now - hours_ago * 3600, _dt.timezone.utc)
+        return {"state": state, "game_id": gid, "team_score": 5, "opp_score": 3,
+                "start_time_utc": start.isoformat().replace("+00:00", "Z")}
+
+    def _refresh(self, game):
+        with mock.patch.object(self.srv, "_fetch_scoreboard_data",
+                               return_value=(game, "VGK", "NHL", True)):
+            with self.srv.app.test_request_context():
+                return self.srv._refresh_scoreboard(self.now).get_json()
+
+    def test_live_is_on_board(self):
+        self.assertTrue(self._refresh(self._game("LIVE", 1.5))["on_board"])
+
+    def test_final_watched_live_ends_now(self):
+        self._refresh(self._game("LIVE", 2.5))
+        d = self._refresh(self._game("FINAL", 2.5))
+        self.assertAlmostEqual(d["game_ended_at"], self.now, delta=1)
+        self.assertTrue(d["on_board"])
+
+    def test_old_final_first_seen_is_off_board(self):
+        d = self._refresh(self._game("FINAL", 10))          # ended hours ago
+        self.assertFalse(d["on_board"])
+        self.assertLess(d["game_ended_at"], self.now - 30 * 60)
+
+    def test_estimate_never_in_the_future(self):
+        # Started 2.5 h ago; NHL length is 3 h → the raw estimate is in the future → clamp.
+        d = self._refresh(self._game("FINAL", 2.5))
+        self.assertLessEqual(d["game_ended_at"], self.now)
+        self.assertTrue(d["on_board"])
+
+    def test_stale_cached_end_time_from_another_game_is_ignored(self):
+        self.srv._scoreboard_cache.update({"game": self._game("FINAL", 30, gid=99),
+                                           "game_ended_at": self.now - 26 * 3600})
+        d = self._refresh(self._game("FINAL", 2.5, gid=101))
+        self.assertTrue(d["on_board"])                      # not yesterday's end time
+
+    def test_on_board_helper(self):
+        on = self.srv._on_board
+        self.assertFalse(on(None, None, self.now))
+        self.assertFalse(on({"state": "FUT"}, None, self.now))
+        self.assertFalse(on({"state": "PPD"}, None, self.now))
+        self.assertTrue(on({"state": "CRIT"}, None, self.now))
+        self.assertTrue(on({"state": "FINAL"}, self.now - 29 * 60, self.now))
+        self.assertFalse(on({"state": "OFF"}, self.now - 31 * 60, self.now))
+        self.assertFalse(on({"state": "FINAL"}, None, self.now))
+
+
 class SecurityAndCSRF(unittest.TestCase):
     """CSRF guard + security headers (guard tested directly — no live side effects)."""
 
@@ -283,7 +579,7 @@ class EndpointSmoke(unittest.TestCase):
         # 200 when the flight DB is present (the Pi), else a *handled* 503 on a DB-less
         # checkout — the point is that they never 500 / raise.
         for url in ["/api/stats?range=today", "/api/stats/search?q=SWA",
-                    "/api/free-api-accuracy", "/api/ga-accuracy"]:
+                    "/api/fr24-agreement"]:
             with self.subTest(url=url):
                 self.assertIn(self.client.get(url).status_code, (200, 503))
 
@@ -356,6 +652,16 @@ class ConfigWriteRoundTrip(unittest.TestCase):
         self.assertEqual(cfg["GPIO_SLOWDOWN"], 0)
         self.assertEqual(cfg["SCOREBOARD_POST_GAME_MINUTES"], 0)            # int0: 0 survives
         self.assertEqual(cfg["SCOREBOARD_GOAL_CELEBRATION_SECONDS"], 0)     # int0: 0 survives
+
+    def test_win_celebration_seconds_managed(self):
+        # New UI field (2026-11): absent → the 180 s default the display already used; a set
+        # value (incl. 0 = WIN scroll off) round-trips.
+        self._write()
+        self.assertEqual(self.srv.read_config()["SCOREBOARD_WIN_CELEBRATION_SECONDS"], 180)
+        self._write(SCOREBOARD_WIN_CELEBRATION_SECONDS=0)
+        self.assertEqual(self.srv.read_config()["SCOREBOARD_WIN_CELEBRATION_SECONDS"], 0)
+        self._write(SCOREBOARD_WIN_CELEBRATION_SECONDS=90)
+        self.assertEqual(self.srv.read_config()["SCOREBOARD_WIN_CELEBRATION_SECONDS"], 90)
 
     def test_zero_feeder_credit_preserved(self):
         # A real 0.0 feeder credit (e.g. a non-feeding user) must round-trip to 0.0, not
@@ -800,6 +1106,59 @@ class ScoreboardDismiss(unittest.TestCase):
         self._seed_cache({"game_id": "G9", "state": "LIVE", "team_score": 0, "opp_score": 0})
         self.assertIsNone(self.client.get("/api/scoreboard").get_json()["dismissed_game_id"])
         self.assertFalse(self.srv.DISMISS_FLAG.exists())
+
+
+class DashboardPage(unittest.TestCase):
+    """The dashboard template renders, carries every element id app.js looks up by name, and
+    stays emoji-free (2026-11 refresh: emoji were replaced by an inline SVG icon sprite)."""
+
+    # Elements app.js creates at runtime, so they are legitimately absent from the template.
+    _RUNTIME_IDS = {"edit-pattern", "edit-origin", "edit-dest", "edit-display", "edit-plane",
+                    "edit-note", "search-more-btn", "search-table", "test-countdown",
+                    "test-countdown-num"}
+    _EMOJI = ("[\U0001F000-\U0001FAFF☀-➿⬀-⯿⌀-⏿"
+              "■-◿⠀-⣿️]")
+
+    @classmethod
+    def setUpClass(cls):
+        resp = _load_server().app.test_client().get("/")
+        cls.status = resp.status_code
+        cls.html = resp.get_data(as_text=True)
+        cls.js = (_WEB / "static" / "js" / "app.js").read_text(encoding="utf-8")
+        cls.css = (_WEB / "static" / "css" / "app.css").read_text(encoding="utf-8")
+
+    def test_page_renders(self):
+        self.assertEqual(self.status, 200)
+        self.assertIn("<!DOCTYPE html>", self.html)
+        self.assertIn('id="config-form"', self.html)
+
+    def test_every_id_app_js_looks_up_exists(self):
+        import re
+        ids = set(re.findall(r"\$\('([A-Za-z0-9_-]+)'\)", self.js))
+        ids |= set(re.findall(r"getElementById\('([A-Za-z0-9_-]+)'\)", self.js))
+        missing = sorted(i for i in ids - self._RUNTIME_IDS if f'id="{i}"' not in self.html)
+        self.assertEqual(missing, [], "app.js looks up ids the page doesn't have")
+
+    def test_every_icon_used_is_in_the_sprite(self):
+        import re
+        defined = set(re.findall(r'<symbol id="i-([a-z-]+)"', self.html))
+        used = set(re.findall(r'href="#i-([a-z-]+)"', self.html))
+        used |= set(re.findall(r"icon\('([a-z-]+)'", self.js))
+        used |= set(re.findall(r"'#i-([a-z-]+)'", self.js))
+        self.assertEqual(sorted(used - defined), [])
+
+    def test_no_emoji_anywhere_in_the_ui(self):
+        import re
+        pat = re.compile(self._EMOJI)
+        for name, text in (("index.html", self.html), ("app.js", self.js), ("app.css", self.css)):
+            with self.subTest(file=name):
+                self.assertEqual(pat.findall(text), [])
+
+    def test_leaflet_is_lazy_and_pinned(self):
+        # Leaflet loads with the Map tab, not in <head>, and stays pinned with SRI.
+        self.assertNotIn("leaflet.js", self.html)
+        self.assertIn("sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=", self.js)
+        self.assertIn("sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=", self.js)
 
 
 if __name__ == "__main__":

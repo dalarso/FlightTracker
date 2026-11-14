@@ -71,7 +71,9 @@ _HARNESS = textwrap.dedent(r"""
         removeChild(c){ const i=children.indexOf(c); if(i>=0) children.splice(i,1); el.firstChild = children[0]||null; return c; },
         querySelector(){ return null; }, querySelectorAll(){ return []; },
         addEventListener(){}, remove(){}, setLatLng(){}, bindTooltip(){ return el; },
-        getAttribute(){ return ''; }, isConnected: true,
+        attrs: {},
+        getAttribute(k){ return k in el.attrs ? el.attrs[k] : ''; },
+        setAttribute(k, v){ el.attrs[k] = String(v); }, isConnected: true,
       };
       return el;
     }
@@ -103,7 +105,7 @@ _HARNESS = textwrap.dedent(r"""
       getBounds(){ return { getNorth:()=>0,getSouth:()=>0,getWest:()=>0,getEast:()=>0 }; },
       addTo(){ return r; } }; rects.push(r); return r; }
     const L = {
-      map(){ return { setView(){ return this; }, invalidateSize(){}, }; },
+      map(){ return { setView(){ return this; }, invalidateSize(){}, fitBounds(){ return this; } }; },
       tileLayer(){ return { addTo(){ return this; } }; },
       rectangle(bounds){ return LRect(bounds); },
       circleMarker(){ return { addTo(){ return { bindTooltip(){ return {}; } }; } }; },
@@ -135,12 +137,14 @@ _HARNESS = textwrap.dedent(r"""
 
       async statsReqSeq() {
         // loadStatsTab fires first (slow), applyStatsPeriod second (fast).  The fast/newer
-        // response resolves first; the slow/older one must be discarded by the seq guard.
+        // range resolves first; when the slow/older default response lands it may refresh the
+        // live parts (today, recent flights) but must NOT repaint the period card over the
+        // newer range the user picked.
         let renderCalls = [];
         sandbox.renderTodayStats = ()=>{};
-        sandbox.renderRecentFlights = d => renderCalls.push(d.__tag);
+        sandbox.renderRecentFlights = ()=>{};
         sandbox.renderPeriodStats   = d => renderCalls.push(d.__tag);
-        sandbox.renderFreeApiAccuracy = ()=>{}; sandbox.renderGaAccuracy = ()=>{};
+        sandbox.renderFr24Agreement = ()=>{};
         sandbox.showToast = ()=>{};
         getEl('period-from').value='2026-06-01'; getEl('period-to').value='2026-06-02';
 
@@ -273,30 +277,120 @@ _HARNESS = textwrap.dedent(r"""
       },
 
       async checkInitialStatusExhausted() {
-        // Every /api/status fetch fails.  After retries are exhausted the toggles must stay
-        // hidden (no removeProperty('display')) and a slow re-poll must be scheduled.
+        // Every /api/status fetch fails.  After retries are exhausted the header switches must
+        // be disabled (never left usable in an unconfirmed HTML-default state), the connection
+        // badge must say offline, and a slow re-poll must be scheduled.
         sandbox.updateServiceBtn=()=>{}; sandbox.updateDisplayBtn=()=>{};
         sandbox.updateNightBtn=()=>{}; sandbox.updateAPIsBtn=()=>{};
         // Make all status fetches fail, then drain the checkInitialStatus() call app.js fires at
-        // module load (its default-fetch success would otherwise reveal the toggles and pollute
-        // this assertion) before resetting our observation state.
+        // module load (its default-fetch success enables the switches) before observing.
         sandbox.__fetch = ()=>Promise.reject(new Error('down'));
         await flush(); await flush();
         const toggles = ['display-toggle','night-toggle','service-toggle','apis-toggle'];
-        toggles.forEach(id=>{ const e=getEl(id); e.style._removed = {}; });
+        toggles.forEach(id=>{ getEl(id).disabled = false; });
 
         sandbox.__timeouts.length = 0;
         await sandbox.checkInitialStatus(0);   // 0 retries -> straight to exhausted branch
         await flush();
 
         toggles.forEach(id=>{
-          const rm = getEl(id).style._removed || {};
-          assert(!rm.display, id + ' must NOT be revealed on exhausted retry');
+          assert(getEl(id).disabled === true, id + ' must be disabled after exhausted retries');
         });
+        assert(getEl('conn-status').dataset.state === 'offline', 'connection badge must read offline');
         // a re-poll must be scheduled (~10s)
         const repoll = sandbox.__timeouts.find(t=>t.ms === 10000);
         assert(repoll, 'a slow (10s) re-poll must be scheduled after exhausted retries');
       },
+    };
+
+    // 2026-11 review: the "On the board now" line reads like the LED board.
+    scenarios.scoreboardLineOrientation = async () => {
+      const game = { state:'LIVE', team_score:2, opp_score:1, opp_abbr:'NSH', game_id:7,
+                     period_label:'2nd', time_remaining:'04:10', in_intermission:false };
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK',
+                             game:{ ...game, team_home:true } });
+      let txt = getEl('sb-live-text').textContent;
+      assert(txt === 'NSH 1–2 VGK · 2nd 4:10', 'home game: away first + clock, got ' + txt);
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK',
+                             game:{ ...game, team_home:false } });
+      txt = getEl('sb-live-text').textContent;
+      assert(txt === 'VGK 2–1 NSH · 2nd 4:10', 'road game: team first, got ' + txt);
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK',
+                             game:{ ...game, team_home:true, period_label:'2nd INT', in_intermission:true } });
+      txt = getEl('sb-live-text').textContent;
+      assert(txt.endsWith('· 2nd INT'), 'no clock in an intermission, got ' + txt);
+    };
+
+    scenarios.scoreboardOnBoardWindow = async () => {
+      const fin = { state:'FINAL', team_score:5, opp_score:3, opp_abbr:'UTA', game_id:9, team_home:true };
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK', game:fin });
+      assert(getEl('sb-live-field').hidden === false, 'final inside the window is shown');
+      sandbox.renderSbLive({ enabled:true, on_board:false, team_name:'VGK', game:fin });
+      assert(getEl('sb-live-field').hidden === true, 'final past the window must hide');
+      // An older server (no on_board key) falls back to the state check.
+      sandbox.renderSbLive({ enabled:true, team_name:'VGK', game:fin });
+      assert(getEl('sb-live-field').hidden === false, 'fallback shows a FINAL');
+    };
+
+    scenarios.headerSwitchAria = async () => {
+      // The header switches are <button role="switch">: Enter / Space come from the browser,
+      // so what the script owns is keeping aria-checked in step with the real state...
+      sandbox.updateNightBtn(true);
+      assert(getEl('night-toggle').getAttribute('aria-checked') === 'true', 'night on → aria-checked true');
+      sandbox.updateDisplayBtn(false);
+      assert(getEl('display-toggle').getAttribute('aria-checked') === 'false', 'display off → aria-checked false');
+      // ...and ignoring a second activation while the first request is still in flight
+      // (a double tap used to fire two toggles and flip the setting back).
+      let posts = 0, release;
+      sandbox.__fetch = (url, init) => {
+        if (init && init.method === 'POST') posts++;
+        return new Promise(r => { release = r; });
+      };
+      const p1 = sandbox.toggleAPIs();
+      const p2 = sandbox.toggleAPIs();
+      release({ ok:true, json:()=>Promise.resolve({ ok:true, apis_disabled:true }) });
+      await flush(); await p1; await p2;
+      assert(posts === 1, 'a second toggle while busy must be ignored, got ' + posts + ' POSTs');
+      assert(getEl('apis-toggle').getAttribute('aria-checked') === 'false', 'APIs switch reflects the server state');
+      assert(getEl('apis-toggle').dataset.busy === '', 'busy flag cleared after the request');
+    };
+
+    scenarios.statsTodayTiles = async () => {
+      // "vs by now yesterday" compares today so far with yesterday up to the same Pi time.
+      sandbox.renderTodayStats({
+        today:'2026-11-13', total:10, today_unique:7, api_calls:{ airlabs:3, aeroapi:1 },
+        yesterday_times:['08:00:00', '12:00:00', '23:00:00'], server_now:'2026-11-13 12:30:00',
+        today_hourly:new Array(24).fill(0), top_today:[], history:[],
+      });
+      const vs = getEl('kpi-today-vs').innerHTML;
+      assert(vs.includes('8') && vs.includes('vs 2 by now yesterday'), 'today vs yesterday-by-now, got ' + vs);
+      assert(getEl('kpi-calls').textContent === '4', 'paid lookups = AirLabs + AeroAPI');
+      // "x min ago" only within the last hour of the same Pi day.
+      assert(sandbox._ago('2026-11-13 21:14:05', '2026-11-13 21:34:00') === '20 min ago', 'minutes ago');
+      assert(sandbox._ago('2026-11-13 21:33:40', '2026-11-13 21:34:00') === 'just now', 'just now');
+      assert(sandbox._ago('2026-11-13 20:14:05', '2026-11-13 21:34:00') === '', 'over an hour: no label');
+      assert(sandbox._ago('2026-11-12 21:30:00', '2026-11-13 21:34:00') === '', 'another day: no label');
+    };
+
+    scenarios.dirtyMeansDifferent = async () => {
+      // "Unsaved changes" tracks a real difference from what was loaded: an edit sets it,
+      // reverting the edit clears it again.
+      sandbox.showToast = ()=>{};
+      documentStub.querySelectorAll = ()=>[];
+      const cfg = { LOCATION_HOME:[36.1,-115.3,0.8717], ZONE_HOME:{tl_y:36.2,tl_x:-115.3,br_y:36.1,br_x:-115.2},
+                    MIN_ALTITUDE:100, MAX_ALTITUDE:15000, BRIGHTNESS:80, NIGHT_BRIGHTNESS:20, GPIO_SLOWDOWN:2 };
+      sandbox.__fetch = ()=>jsonResp(cfg);
+      await sandbox.loadConfig(); await flush();
+      assert(getEl('savebar').dataset.state === 'clean', 'a freshly loaded form is clean');
+      getEl('brightness').value = '55'; sandbox._refreshDirty();
+      assert(getEl('savebar').dataset.state === 'dirty', 'an edit makes the form dirty');
+      getEl('brightness').value = '80'; sandbox._refreshDirty();
+      assert(getEl('savebar').dataset.state === 'clean', 'reverting the edit makes it clean again');
+      // Whole-foot altitudes survive a ft -> m/km -> ft round trip (integer metres lost 2 ft).
+      [0, 100, 1234, 15000, 45000].forEach(ft => ['m', 'km'].forEach(u => {
+        const back = sandbox.unitToFt(sandbox.ftToUnit(ft, u), u);
+        assert(back === ft, `${ft} ft via ${u} came back as ${back}`);
+      }));
     };
 
     (async () => {
@@ -353,6 +447,26 @@ class FrontendAppJs(unittest.TestCase):
     def test_check_initial_status_exhausted_retry(self):
         # Finding 6: exhausted retries must not reveal default-state toggles; must re-poll.
         self._assert_scenario("checkInitialStatusExhausted")
+
+    def test_scoreboard_line_away_home_and_clock(self):
+        # 2026-11: away first / home second like the LED board, plus the game clock.
+        self._assert_scenario("scoreboardLineOrientation")
+
+    def test_scoreboard_line_follows_post_game_window(self):
+        # 2026-11: a FINAL leaves "On the board now" when on_board says the board dropped it.
+        self._assert_scenario("scoreboardOnBoardWindow")
+
+    def test_stats_today_tiles(self):
+        # 2026-11: headline tiles compare with "by now yesterday"; feed rows say "x min ago".
+        self._assert_scenario("statsTodayTiles")
+
+    def test_unsaved_changes_track_real_differences(self):
+        # 2026-11: dirty = differs from the loaded config; unit switches round-trip exactly.
+        self._assert_scenario("dirtyMeansDifferent")
+
+    def test_header_switches_aria_and_busy_guard(self):
+        # 2026-11: switches keep aria-checked in sync and ignore a second tap mid-request.
+        self._assert_scenario("headerSwitchAria")
 
 
 if __name__ == "__main__":

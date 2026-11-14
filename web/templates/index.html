@@ -1,747 +1,755 @@
+{#- Form-field helpers: every input gets a real <label for>, and hints are tied to their
+    input with aria-describedby so screen readers read them. -#}
+{% macro num(id, label, hint='', min=none, max=none, step=none, mode='numeric', unit=none, placeholder='') -%}
+<div class="field">
+  <label for="{{ id }}">{{ label|safe }}</label>
+  {%- if unit %}<div class="input-group">{% endif %}
+  <input type="number" id="{{ id }}"{% if min is not none %} min="{{ min }}"{% endif %}{% if max is not none %} max="{{ max }}"{% endif %}{% if step is not none %} step="{{ step }}"{% endif %}{% if mode %} inputmode="{{ mode }}"{% endif %}{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if hint %} aria-describedby="{{ id }}-hint"{% endif %}>
+  {%- if unit %}<span class="input-addon unit-label">{{ unit }}</span></div>{% endif %}
+  {%- if hint %}<p class="hint" id="{{ id }}-hint">{{ hint|safe }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro text(id, label, hint='', placeholder='', upper=false, maxlength=none) -%}
+<div class="field">
+  <label for="{{ id }}">{{ label|safe }}</label>
+  <input type="text" id="{{ id }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if maxlength %} maxlength="{{ maxlength }}"{% endif %}{% if upper %} class="upper" autocapitalize="characters"{% endif %} spellcheck="false" autocomplete="off"{% if hint %} aria-describedby="{{ id }}-hint"{% endif %}>
+  {%- if hint %}<p class="hint" id="{{ id }}-hint">{{ hint|safe }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro secret(id, label, hint='') -%}
+<div class="field">
+  <label for="{{ id }}">{{ label|safe }}</label>
+  <div class="input-group">
+    <input type="password" id="{{ id }}" autocomplete="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore{% if hint %} aria-describedby="{{ id }}-hint"{% endif %}>
+    <button type="button" class="input-addon addon-btn" data-action="eye" data-target="{{ id }}" aria-label="Show value" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg></button>
+  </div>
+  {%- if hint %}<p class="hint" id="{{ id }}-hint">{{ hint|safe }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro toggle(id, label, desc) -%}
+<div class="field">
+  <span class="field-label" id="{{ id }}-label">{{ label }}</span>
+  <label class="switch-field">
+    <input type="checkbox" role="switch" id="{{ id }}" aria-labelledby="{{ id }}-label" aria-describedby="{{ id }}-desc">
+    <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+    <span class="switch-desc" id="{{ id }}-desc">{{ desc }}</span>
+  </label>
+</div>
+{%- endmacro %}
+
+{% macro units(label) -%}
+<div class="segmented" role="group" aria-label="{{ label }}">
+  <button type="button" class="seg" data-action="unit" data-unit="ft" aria-pressed="true">ft</button>
+  <button type="button" class="seg" data-action="unit" data-unit="m" aria-pressed="false">m</button>
+  <button type="button" class="seg" data-action="unit" data-unit="km" aria-pressed="false">km</button>
+</div>
+{%- endmacro %}
+
+{% macro ico(name, cls='icon') -%}
+<svg class="{{ cls }}" aria-hidden="true"><use href="#i-{{ name }}"/></svg>
+{%- endmacro %}
+
+{% set tabs = [
+  ('stats', 'Stats', 'chart'),
+  ('map', 'Map', 'map'),
+  ('apis', 'APIs', 'api'),
+  ('rules', 'Rules', 'rules'),
+  ('config', 'Settings', 'settings'),
+  ('log', 'Log', 'log'),
+] %}
+
+{% set leagues = [
+  ('NHL', 'nhl', 'https://api-web.nhle.com/v1/standings/now', 'NHL standings API'),
+  ('NFL', 'nfl', 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams', 'ESPN NFL teams'),
+  ('MLB', 'mlb', 'https://statsapi.mlb.com/api/v1/teams?sportId=1', 'MLB Stats API'),
+  ('NBA', 'nba', 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams', 'ESPN NBA teams'),
+  ('WNBA', 'wnba', 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams', 'ESPN WNBA teams'),
+  ('MLS', 'mls', 'https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/teams', 'ESPN MLS teams'),
+  ('FIFA', 'fifa', 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/teams', 'ESPN World Cup teams'),
+] %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f7fa" media="(prefers-color-scheme: light)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="FlightTracker">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>FlightTracker</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path fill='%2338bdf8' d='M28 13.5c0-1.4-1.1-2.5-2.5-2.5H19L13 2H10l3 9H7L5 9H2l2 7-2 7h3l2-2h6l-3 9h3l6-9h6.5c1.4 0 2.5-1.1 2.5-2.5v-5z'/></svg>">
-
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=swap">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path fill='%234c9bff' d='M28 13.5c0-1.4-1.1-2.5-2.5-2.5H19L13 2H10l3 9H7L5 9H2l2 7-2 7h3l2-2h6l-3 9h3l6-9h6.5c1.4 0 2.5-1.1 2.5-2.5v-5z'/></svg>">
+<script>
+  /* Apply a saved light/dark choice before first paint (no flash). Default follows the OS. */
+  try { var t = localStorage.getItem('ft-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
 
-<header>
-  <h1>✈ Flight<span>Tracker</span></h1>
-  <button id="hamburger" onclick="toggleHamburger()" aria-label="Menu" title="Menu">☰</button>
-  <nav>
-    <button class="active" onclick="showTab('config',this)">⚙ Config</button>
-    <button onclick="showTab('map',this)">🗺 Zone Map</button>
-    <button onclick="showTab('apis',this)">📡 APIs</button>
-    <button onclick="showTab('stats',this)">📈 Stats</button>
-    <button onclick="showTab('rules',this)">✏️ Rules</button>
-    <button onclick="showTab('log',this)">📋 Log</button>
-    <div class="nav-sep"></div>
-    <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Dim/undim LED display (service keeps running)" style="display:none">
-      <div class="dot"></div>
-      <span id="display-label">Display On</span>
-    </div>
-    <div class="display-toggle off" id="night-toggle" onclick="toggleNight()" title="Dim display to night brightness without turning it off" style="display:none">
-      <div class="dot"></div>
-      <span id="night-label">Night Off</span>
-    </div>
-    <div class="display-toggle" id="service-toggle" onclick="toggleService()" title="Stop/start FlightTracker service (stops API polling)" style="display:none">
-      <div class="dot"></div>
-      <span id="service-label">Service On</span>
-    </div>
-    <div class="display-toggle" id="apis-toggle" onclick="toggleAPIs()" title="Enable/disable limited APIs: AirLabs + FlightAware (falls back to OpenSky + adsbdb)" style="display:none">
-      <div class="dot"></div>
-      <span id="apis-label">APIs On</span>
-    </div>
+<svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-plane" viewBox="0 0 32 32"><path fill="currentColor" stroke="none" d="M28 13.5c0-1.4-1.1-2.5-2.5-2.5H19L13 2H10l3 9H7L5 9H2l2 7-2 7h3l2-2h6l-3 9h3l6-9h6.5c1.4 0 2.5-1.1 2.5-2.5v-5z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
+  <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4 3 6.5V20l6-2.5 6 2.5 6-2.5V4l-6 2.5z"/><path d="M9 4v13.5M15 6.5V20"/></symbol>
+  <symbol id="i-api" viewBox="0 0 24 24"><circle cx="12" cy="10" r="2"/><path d="M12 12v9M8.5 6.5a5 5 0 0 0 0 7M15.5 6.5a5 5 0 0 1 0 7M5.6 3.6a9 9 0 0 0 0 12.8M18.4 3.6a9 9 0 0 1 0 12.8"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 20h18M5 16v-4M10 16V7M15 16v-6M20 16V9"/></symbol>
+  <symbol id="i-rules" viewBox="0 0 24 24"><path d="M10 6h10M10 12h10M10 18h10"/><path d="m3.5 6 1.5 1.5L7.5 5M3.5 12l1.5 1.5L7.5 11M3.5 18l1.5 1.5L7.5 17"/></symbol>
+  <symbol id="i-log" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M10.6 5.6A9.7 9.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-2.6 3.5M6.6 6.6C3.9 8.3 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.4-.6 4.7-1.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18"/></symbol>
+  <symbol id="i-grip" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></g></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8.5 8.5"/><path d="M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6"/><path d="m6 7 1 12.5A1.5 1.5 0 0 0 8.5 21h7a1.5 1.5 0 0 0 1.5-1.5L18 7M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1L3.5 8.5"/><path d="M3.5 3.5v5h5"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h8"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5M12 17.5h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5h.01"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 0 1-14.6 5.9L3.5 15.5M3.5 12A8.5 8.5 0 0 1 18.1 6.1l2.4 2.4"/><path d="M20.5 3.5v5h-5M3.5 20.5v-5h5"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8.5 20h7M12 16v4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+</svg>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="brand-mark">{{ ico('plane') }}</span>
+    <span class="brand-name">Flight<b>Tracker</b></span>
+  </div>
+
+  <nav class="tabs" id="tabs" aria-label="Sections">
+    {%- for key, label, icon in tabs %}
+    <button type="button" class="tab" data-action="tab" data-tab="{{ key }}" aria-controls="{{ key }}-tab"{% if loop.first %} aria-current="page"{% endif %}>{{ ico(icon) }}<span>{{ label }}</span></button>
+    {%- endfor %}
   </nav>
+
+  <div class="appbar-actions">
+    <span class="conn" id="conn-status" data-state="pending" title="Connecting to the Pi">
+      <span class="conn-dot" aria-hidden="true"></span><span class="conn-label">Connecting</span>
+    </span>
+    <button type="button" class="icon-btn" id="theme-btn" data-action="theme" aria-label="Switch to light theme" title="Switch theme">
+      {{ ico('sun', 'icon theme-icon-light') }}{{ ico('moon', 'icon theme-icon-dark') }}
+    </button>
+    <button type="button" class="icon-btn controls-btn" id="controls-btn" data-action="controls" aria-expanded="false" aria-controls="device-controls" aria-label="Display controls" title="Display controls">
+      {{ ico('power') }}<span class="controls-dot" aria-hidden="true"></span>
+    </button>
+
+    <div class="device-controls" id="device-controls" data-ready="false" role="group" aria-label="Display controls">
+      <p class="dc-title">Display controls</p>
+      <button type="button" class="dswitch" id="display-toggle" role="switch" aria-checked="true" data-action="toggle-display" data-tone="ok" disabled
+              title="Light or blank the LED matrix (the service keeps running)">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span class="dswitch-text"><span class="dswitch-name">Display</span><span class="dswitch-desc">Light or blank the LED matrix</span></span>
+        <span class="dswitch-state" id="display-label">On</span>
+      </button>
+      <button type="button" class="dswitch" id="night-toggle" role="switch" aria-checked="false" data-action="toggle-night" data-tone="night" disabled
+              title="Dim the display to night brightness without turning it off">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span class="dswitch-text"><span class="dswitch-name">Night</span><span class="dswitch-desc">Dim to night brightness</span></span>
+        <span class="dswitch-state" id="night-label">Off</span>
+      </button>
+      <button type="button" class="dswitch" id="service-toggle" role="switch" aria-checked="true" data-action="toggle-service" data-tone="ok" disabled
+              title="Stop or start the FlightTracker service (stops all API polling)">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span class="dswitch-text"><span class="dswitch-name">Service</span><span class="dswitch-desc">Stopping it halts all polling</span></span>
+        <span class="dswitch-state" id="service-label">On</span>
+      </button>
+      <button type="button" class="dswitch" id="apis-toggle" role="switch" aria-checked="true" data-action="toggle-apis" data-tone="ok" data-off-tone="warn" disabled
+              title="AirLabs and FlightAware lookups; off leaves FR24, the route cache and the last-resort feeds">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span class="dswitch-text"><span class="dswitch-name">APIs</span><span class="dswitch-desc">AirLabs and FlightAware lookups</span></span>
+        <span class="dswitch-state" id="apis-label">On</span>
+      </button>
+    </div>
+  </div>
 </header>
 
-<!-- CONFIG TAB -->
-<div class="toast" id="toast"></div>
+<main id="main">
 
-<div class="tab-content active" id="config-tab">
-  <div class="config-scroll">
-
-    <div class="section">
-      <div class="section-header">
-        Zone Boundaries
-        <button class="btn" onclick="goToTab('map')" style="font-size:11px;padding:3px 10px;margin-left:auto;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer">🗺 Edit on Map</button>
+  <!-- ═════════════════════════════ SETTINGS ═════════════════════════════ -->
+  <section class="panel" id="config-tab" data-panel="config" aria-labelledby="config-title" hidden>
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title" id="config-title">Settings</h1>
+        <p class="page-sub">Display, data sources and integrations. Changes apply when you save.</p>
       </div>
-      <div class="field-grid">
-        <div class="field"><label>Top-Left Latitude (N)</label><input type="number" step="0.000001" id="zone_tl_y"></div>
-        <div class="field"><label>Top-Left Longitude (W)</label><input type="number" step="0.000001" id="zone_tl_x"></div>
-        <div class="field"><label>Bottom-Right Latitude (S)</label><input type="number" step="0.000001" id="zone_br_y"></div>
-        <div class="field"><label>Bottom-Right Longitude (E)</label><input type="number" step="0.000001" id="zone_br_x"></div>
+
+      <div class="banner banner-error" id="config-error" role="alert" hidden>
+        {{ ico('alert') }}<span>Couldn't load settings from the Pi.</span>
+        <button type="button" class="btn btn-secondary btn-sm" data-action="reload-config">{{ ico('refresh') }}Retry</button>
       </div>
-    </div>
 
-    <div class="section">
-      <div class="section-header">
-        Altitude Filter
-        <div class="unit-selector">
-          <button class="unit-btn active" onclick="setAltUnit('ft',this)">ft</button>
-          <button class="unit-btn" onclick="setAltUnit('m',this)">m</button>
-          <button class="unit-btn" onclick="setAltUnit('km',this)">km</button>
-        </div>
-      </div>
-      <div class="field-grid">
-        <div class="field">
-          <label>Min Altitude</label>
-          <div class="input-wrap"><input type="number" step="1" id="min_altitude"><span class="unit-label" id="alt-unit-label-1">ft</span></div>
-        </div>
-        <div class="field">
-          <label>Max Altitude</label>
-          <div class="input-wrap"><input type="number" step="1" id="max_altitude"><span class="unit-label" id="alt-unit-label-2">ft</span></div>
-        </div>
-        <div class="field"><label>Local Airports</label><input type="text" id="local_airports" style="width:100%;max-width:280px"><div class="hint">Comma-separated local airports used as origin/destination fallback (e.g. LAS,VGT,HSH)</div></div>
-      </div>
-    </div>
+      <div class="settings-layout">
+        <nav class="section-index" id="section-index" aria-label="Settings sections">
+          <button type="button" data-action="jump" data-target="sec-zone" class="is-active">Zone</button>
+          <button type="button" data-action="jump" data-target="sec-altitude">Altitude</button>
+          <button type="button" data-action="jump" data-target="sec-location">Location</button>
+          <button type="button" data-action="jump" data-target="sec-display">Display</button>
+          <button type="button" data-action="jump" data-target="sec-weather">Weather</button>
+          <button type="button" data-action="jump" data-target="sec-scoreboard">Scoreboard</button>
+          <button type="button" data-action="jump" data-target="sec-receiver">Receiver</button>
+          <button type="button" data-action="jump" data-target="sec-keys">API keys</button>
+          <button type="button" data-action="jump" data-target="sec-billing">Billing</button>
+          <button type="button" data-action="jump" data-target="sec-cache">Cache</button>
+        </nav>
 
-    <div class="section">
-      <div class="section-header">
-        Home Location
-        <div class="unit-selector">
-          <button class="unit-btn active" onclick="setAltUnit('ft',this)">ft</button>
-          <button class="unit-btn" onclick="setAltUnit('m',this)">m</button>
-          <button class="unit-btn" onclick="setAltUnit('km',this)">km</button>
-        </div>
-      </div>
-      <div class="field-grid">
-        <div class="field"><label>Latitude</label><input type="number" step="0.000001" id="loc_lat"></div>
-        <div class="field"><label>Longitude</label><input type="number" step="0.000001" id="loc_lon"></div>
-        <div class="field"><label id="loc-alt-label">Antenna Altitude (ft ASL)</label>
-          <div class="input-wrap"><input type="number" step="1" id="loc_alt"><span class="unit-label" id="alt-unit-label-3">ft</span></div>
-          <div class="hint">Antenna height for distance calc</div>
-        </div>
-        <div class="field"><label>Timezone</label><input type="text" id="timezone" placeholder="America/Los_Angeles"><div class="hint">IANA timezone — <a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank" style="color:var(--accent)">full list</a></div></div>
-      </div>
-    </div>
+        <form id="config-form" class="settings-form" autocomplete="off" novalidate>
 
-    <div class="section">
-      <div class="section-header">Display Hardware</div>
-      <div class="field-grid">
-        <div class="field"><label>Brightness (0–100)</label><input type="number" min="0" max="100" id="brightness"></div>
-        <div class="field"><label>Night Brightness (0–100)</label><input type="number" min="0" max="100" id="night_brightness"><div class="hint">Brightness when Night Mode is on</div></div>
-        <div class="field"><label>GPIO Slowdown</label><input type="number" min="1" max="4" id="gpio_slowdown"><div class="hint">Increase if display flickers</div></div>
-        <div class="field"><label>Journey Code</label><input type="text" id="journey_code"></div>
-        <div class="field"><label>Journey Blank Filler</label><input type="text" id="journey_blank"></div>
-        <div class="field"><label>Date Format</label>
-          <select id="date_format" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
-            <option value="MDY">M/D/YYYY — 5/14/2026 (US)</option>
-            <option value="DMY">D/M/YYYY — 14/5/2026 (UK/EU)</option>
-            <option value="YMD">YYYY-MM-DD — 2026-05-14 (ISO)</option>
-          </select>
-        </div>
-        <div class="field"><label>HAT PWM Enabled</label>
-          <div class="toggle-wrap">
-            <label class="toggle"><input type="checkbox" id="hat_pwm"><span class="toggle-slider"></span></label>
-            <span style="font-size:12px;color:var(--muted)">Reduces flicker on some HATs</span>
-          </div>
-        </div>
-        <div class="field"><label>Loading LED Enabled</label>
-          <div class="toggle-wrap">
-            <label class="toggle"><input type="checkbox" id="loading_led_enabled"><span class="toggle-slider"></span></label>
-            <span style="font-size:12px;color:var(--muted)">Physical LED indicator while data loads</span>
-          </div>
-        </div>
-        <div class="field"><label>Loading LED GPIO Pin</label>
-          <input type="number" min="1" max="40" id="loading_led_gpio_pin">
-          <div class="hint">GPIO pin for loading LED (default 25)</div>
-        </div>
-      </div>
-    </div>
+          <section class="card" id="sec-zone" aria-labelledby="sec-zone-h">
+            <header class="card-head">
+              <div><h2 id="sec-zone-h">Zone boundaries</h2><p>Aircraft inside this box show on the display.</p></div>
+              <button type="button" class="btn btn-secondary btn-sm" data-action="tab" data-tab="map">{{ ico('map') }}Edit on map</button>
+            </header>
+            <div class="fields fields-2">
+              {{ num('zone_tl_y', 'Top-left latitude (N)', step='0.000001', mode=none) }}
+              {{ num('zone_tl_x', 'Top-left longitude (W)', step='0.000001', mode=none) }}
+              {{ num('zone_br_y', 'Bottom-right latitude (S)', step='0.000001', mode=none) }}
+              {{ num('zone_br_x', 'Bottom-right longitude (E)', step='0.000001', mode=none) }}
+            </div>
+          </section>
 
-    <div class="section">
-      <div class="section-header">Weather</div>
-      <div class="field-grid">
-        <div class="field"><label>Location</label><input type="text" id="weather_location"><div class="hint">e.g. spring%20valley,nv,us</div></div>
-        <div class="field"><label>Units</label>
-          <select id="temp_units">
-            <option value="imperial">Imperial (°F)</option>
-            <option value="metric">Metric (°C)</option>
-          </select>
-        </div>
-        <div class="field"><label>OpenWeather API Key</label>
-          <div class="input-wrap"><input type="password" id="ow_key"><button class="eye-btn" onclick="toggleEye('ow_key',this)">👁</button></div>
-        </div>
-        <div class="field"><label>Rainfall Enabled</label>
-          <div class="toggle-wrap">
-            <label class="toggle"><input type="checkbox" id="rainfall_enabled"><span class="toggle-slider"></span></label>
-            <span style="font-size:12px;color:var(--muted)">Show rainfall overlay on weather display</span>
-          </div>
-        </div>
-      </div>
-    </div>
+          <section class="card" id="sec-altitude" aria-labelledby="sec-altitude-h">
+            <header class="card-head">
+              <div><h2 id="sec-altitude-h">Altitude filter</h2><p>Ignore aircraft outside this altitude band.</p></div>
+              {{ units('Altitude units') }}
+            </header>
+            <div class="fields fields-2">
+              {{ num('min_altitude', 'Minimum altitude', step='1', mode='decimal', unit='ft') }}
+              {{ num('max_altitude', 'Maximum altitude', step='1', mode='decimal', unit='ft') }}
+            </div>
+          </section>
 
-    <div class="section">
-      <div class="section-header">Scoreboard</div>
-      <div class="field-grid">
+          <section class="card" id="sec-location" aria-labelledby="sec-location-h">
+            <header class="card-head">
+              <div><h2 id="sec-location-h">Home location</h2><p>Used for distances and local-airport fallbacks.</p></div>
+              {{ units('Antenna altitude units') }}
+            </header>
+            <div class="fields fields-2">
+              {{ num('loc_lat', 'Latitude', step='0.000001', mode=none) }}
+              {{ num('loc_lon', 'Longitude', step='0.000001', mode=none) }}
+              <div class="field">
+                <label for="loc_alt" id="loc-alt-label">Antenna altitude (ft ASL)</label>
+                <div class="input-group">
+                  <input type="number" step="1" id="loc_alt" inputmode="decimal" aria-describedby="loc_alt-hint">
+                  <span class="input-addon unit-label">ft</span>
+                </div>
+                <p class="hint" id="loc_alt-hint">Antenna height, for the distance calculation</p>
+              </div>
+              {{ text('timezone', 'Timezone', hint='IANA name, e.g. America/Los_Angeles &middot; <a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank" rel="noopener">full list</a>', placeholder='America/Los_Angeles') }}
+              {{ text('local_airports', 'Local airports', hint='Comma-separated codes used as an origin/destination fallback, e.g. LAS,VGT,HSH', placeholder='LAS,VGT,HSH', upper=true) }}
+            </div>
+          </section>
 
-        <div class="field" id="sb-live-field" style="grid-column:1/-1;display:none">
-          <label>On the board now</label>
-          <div class="sb-live">
-            <span class="sb-live-dot" id="sb-live-dot"></span>
-            <span class="sb-live-text" id="sb-live-text">—</span>
-            <button type="button" class="btn" id="sb-hide-btn" onclick="toggleHideGame()">Hide this game</button>
-          </div>
-          <div class="hint">Swap the live scoreboard for the normal idle scene. It comes back on its own for the next game.</div>
-        </div>
+          <section class="card" id="sec-display" aria-labelledby="sec-display-h">
+            <header class="card-head">
+              <div><h2 id="sec-display-h">Display hardware</h2><p>LED matrix brightness, timing and labels.</p></div>
+            </header>
+            <div class="fields fields-3">
+              {{ num('brightness', 'Brightness <span class="label-note">0&ndash;100</span>', min=0, max=100) }}
+              {{ num('night_brightness', 'Night brightness <span class="label-note">0&ndash;100</span>', hint='Used while Night mode is on', min=0, max=100) }}
+              {{ num('gpio_slowdown', 'GPIO slowdown', hint='Raise it if the display flickers', min=1, max=4) }}
+              {{ text('journey_code', 'Journey code') }}
+              {{ text('journey_blank', 'Journey blank filler') }}
+              <div class="field">
+                <label for="date_format">Date format</label>
+                <select id="date_format">
+                  <option value="MDY">M/D/YYYY (5/14/2026, US)</option>
+                  <option value="DMY">D/M/YYYY (14/5/2026, UK/EU)</option>
+                  <option value="YMD">YYYY-MM-DD (2026-05-14, ISO)</option>
+                </select>
+              </div>
+              {{ toggle('hat_pwm', 'HAT PWM', 'Reduces flicker on some HATs') }}
+              {{ toggle('loading_led_enabled', 'Loading LED', 'Physical LED lights while data loads') }}
+              {{ num('loading_led_gpio_pin', 'Loading LED GPIO pin', hint='Default 25', min=1, max=40) }}
+            </div>
+          </section>
 
-        <div class="field" style="grid-column:1/-1">
-          <label>Scoreboard</label>
-          <div class="toggle-wrap">
-            <label class="toggle"><input type="checkbox" id="scoreboard_enabled" onchange="toggleScoreboardBody()"><span class="toggle-slider"></span></label>
-            <span style="font-size:12px;color:var(--muted)">Replace idle display with live scores when a team plays — disabled by default</span>
-          </div>
-        </div>
+          <section class="card" id="sec-weather" aria-labelledby="sec-weather-h">
+            <header class="card-head">
+              <div><h2 id="sec-weather-h">Weather</h2><p>Temperature and rainfall on the idle screen.</p></div>
+            </header>
+            <div class="fields fields-2">
+              {{ text('weather_location', 'Location', hint='e.g. spring%20valley,nv,us') }}
+              <div class="field">
+                <label for="temp_units">Units</label>
+                <select id="temp_units">
+                  <option value="imperial">Imperial (&deg;F)</option>
+                  <option value="metric">Metric (&deg;C)</option>
+                </select>
+              </div>
+              {{ secret('ow_key', 'OpenWeather API key') }}
+              {{ toggle('rainfall_enabled', 'Rainfall', 'Show the rainfall overlay on the weather screen') }}
+            </div>
+          </section>
 
-        <div id="sb-body" style="display:none;grid-column:1/-1">
-        <div class="field-grid" style="padding:0;gap:inherit">
+          <section class="card" id="sec-scoreboard" aria-labelledby="sec-scoreboard-h">
+            <header class="card-head">
+              <div><h2 id="sec-scoreboard-h">Scoreboard</h2><p>Live scores replace the idle screen while your teams play. Flights always take priority.</p></div>
+            </header>
 
-        <div class="field" style="grid-column:1/-1">
-          <label>Sports &amp; Teams</label>
-          <div class="hint" style="margin-bottom:10px">Enable the sports you want to follow. When a game is live the idle display switches to a live scoreboard; flights always take priority. Use the links to find your team's numeric ID.</div>
-          <table class="sb-table">
-            <thead>
-              <tr>
-                <th style="width:18px"></th>
-                <th>League</th>
-                <th>Enable</th>
-                <th>Team ID</th>
-                <th>Abbr <span style="font-weight:400;font-size:10px">(≤4 ch)</span></th>
-                <th>Find Team ID</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr draggable="true" data-league="NHL">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league nhl">NHL</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_nhl_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_nhl_team_id"></td>
-                <td><input type="text" id="sb_nhl_team_name" maxlength="4"></td>
-                <td><a href="https://api-web.nhle.com/v1/standings/now" target="_blank" class="sb-find-link">NHL standings API ↗</a></td>
-              </tr>
-              <tr draggable="true" data-league="NFL">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league nfl">NFL</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_nfl_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_nfl_team_id"></td>
-                <td><input type="text" id="sb_nfl_team_name" maxlength="4"></td>
-                <td><a href="https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams" target="_blank" class="sb-find-link">ESPN NFL teams ↗</a></td>
-              </tr>
-              <tr draggable="true" data-league="MLB">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league mlb">MLB</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_mlb_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_mlb_team_id"></td>
-                <td><input type="text" id="sb_mlb_team_name" maxlength="4"></td>
-                <td><a href="https://statsapi.mlb.com/api/v1/teams?sportId=1" target="_blank" class="sb-find-link">MLB Stats API ↗</a></td>
-              </tr>
-              <tr draggable="true" data-league="NBA">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league nba">NBA</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_nba_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_nba_team_id"></td>
-                <td><input type="text" id="sb_nba_team_name" maxlength="4"></td>
-                <td><a href="https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams" target="_blank" class="sb-find-link">ESPN NBA teams ↗</a></td>
-              </tr>
-              <tr draggable="true" data-league="WNBA">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league wnba">WNBA</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_wnba_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_wnba_team_id"></td>
-                <td><input type="text" id="sb_wnba_team_name" maxlength="4"></td>
-                <td><a href="https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams" target="_blank" class="sb-find-link">ESPN WNBA teams ↗</a></td>
-              </tr>
-              <tr draggable="true" data-league="MLS">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league mls">MLS</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_mls_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_mls_team_id"></td>
-                <td><input type="text" id="sb_mls_team_name" maxlength="4"></td>
-                <td><a href="https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/teams" target="_blank" class="sb-find-link">ESPN MLS teams ↗</a></td>
-              </tr>
-              <tr draggable="true" data-league="FIFA">
-                <td><span class="sb-drag" title="Drag to reorder priority">⠿</span></td>
-                <td><span class="sb-league fifa">FIFA</span></td>
-                <td><label class="toggle"><input type="checkbox" id="sb_fifa_enabled"><span class="toggle-slider"></span></label></td>
-                <td><input type="number" min="1" id="sb_fifa_team_id"></td>
-                <td><input type="text" id="sb_fifa_team_name" maxlength="4"></td>
-                <td><a href="https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/teams" target="_blank" class="sb-find-link">ESPN World Cup teams ↗</a></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+            <div class="live-game" id="sb-live-field" hidden>
+              <span class="live-dot" id="sb-live-dot" aria-hidden="true"></span>
+              <div class="live-game-text">
+                <span class="live-game-kicker">On the board now</span>
+                <span class="live-game-score" id="sb-live-text">&mdash;</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="sb-hide-btn" data-action="hide-game">Hide this game</button>
+              <p class="hint live-game-hint">Hiding swaps the scoreboard for the idle screen. It comes back on its own for the next game.</p>
+            </div>
 
-        <div class="field"><label>Post-Game Display <span style="font-size:10px;color:var(--muted)">(minutes)</span></label>
-          <input type="number" min="0" max="120" id="scoreboard_post_game_minutes">
-          <div class="hint">How long to show the final score after the game ends (0 = hide immediately)</div>
-        </div>
-        <div class="field"><label>Score Celebration <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
-          <input type="number" min="0" max="120" id="scoreboard_goal_celebration_seconds">
-          <div class="hint">Score celebration animation duration — flights suppressed during this window</div>
-        </div>
+            <div class="fields">
+              {{ toggle('scoreboard_enabled', 'Live scoreboard', 'Show live scores on the idle display when a followed team plays') }}
+            </div>
 
-        </div><!-- /.field-grid inner -->
-        </div><!-- /#sb-body -->
+            <div id="sb-body" hidden>
+              <div class="subsection">
+                <h3 class="subhead">Sports and teams</h3>
+                <p class="hint">Top to bottom is priority order: drag a row, or use the arrows. Use the links to look up your team's numeric ID.</p>
+                <table class="sb-table">
+                  <thead>
+                    <tr><th class="col-order"><span class="sr-only">Order</span></th><th>League</th><th>Follow</th><th>Team ID</th><th>Abbr <span class="label-note">max 4</span></th><th>Find team ID</th></tr>
+                  </thead>
+                  <tbody>
+                    {%- for name, key, url, link in leagues %}
+                    <tr draggable="true" data-league="{{ name }}">
+                      <td class="col-order">
+                        <span class="drag-handle" title="Drag to reorder">{{ ico('grip') }}</span>
+                        <span class="move-btns">
+                          <button type="button" class="icon-btn icon-btn-sm" data-action="sb-move" data-dir="-1" aria-label="Move {{ name }} up">{{ ico('up') }}</button>
+                          <button type="button" class="icon-btn icon-btn-sm" data-action="sb-move" data-dir="1" aria-label="Move {{ name }} down">{{ ico('down') }}</button>
+                        </span>
+                      </td>
+                      <td class="col-league"><span class="league league-{{ key }}">{{ name }}</span></td>
+                      <td class="col-enable">
+                        <label class="switch-field"><input type="checkbox" role="switch" id="sb_{{ key }}_enabled" aria-label="Follow {{ name }}"><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></label>
+                      </td>
+                      <td class="col-id"><input type="number" min="1" inputmode="numeric" id="sb_{{ key }}_team_id" aria-label="{{ name }} team ID" placeholder="ID"></td>
+                      <td class="col-abbr"><input type="text" class="upper" maxlength="4" autocapitalize="characters" spellcheck="false" id="sb_{{ key }}_team_name" aria-label="{{ name }} team abbreviation" placeholder="ABBR"></td>
+                      <td class="col-link"><a href="{{ url }}" target="_blank" rel="noopener" class="ext-link">{{ link }}{{ ico('external', 'icon icon-xs') }}</a></td>
+                    </tr>
+                    {%- endfor %}
+                  </tbody>
+                </table>
+              </div>
+              <div class="fields fields-3">
+                {{ num('scoreboard_post_game_minutes', 'Post-game display <span class="label-note">minutes</span>', hint='How long the final score stays up after the game (0 hides it at once)', min=0, max=120) }}
+                {{ num('scoreboard_goal_celebration_seconds', 'Score celebration <span class="label-note">seconds</span>', hint='How long the GOAL! / SCORE! scroll runs (0 turns it off). A flight overhead pauses it.', min=0, max=120) }}
+                {{ num('scoreboard_win_celebration_seconds', 'Win celebration <span class="label-note">seconds</span>', hint='How long "TEAM WINS!" scrolls at the final horn (0 turns it off). Default 180.', min=0, max=600) }}
+              </div>
+            </div>
+          </section>
 
-      </div>
-    </div>
+          <section class="card" id="sec-receiver" aria-labelledby="sec-receiver-h">
+            <header class="card-head">
+              <div><h2 id="sec-receiver-h">Receiver</h2><p>Where live ADS-B positions come from.</p></div>
+            </header>
+            <div class="fields fields-2">
+              {{ text('receiver_host', 'Receiver host', hint='IP of the fr24feed / dump1090 / VRS host. Add the port if it isn\'t standard, e.g. 192.168.1.50:8090') }}
+              <div class="field">
+                <label for="receiver_type">Receiver type</label>
+                <select id="receiver_type" aria-describedby="receiver_type-hint">
+                  <option value="dump1090">dump1090 / fr24feed (default)</option>
+                  <option value="vrs">Virtual Radar Server (VRS)</option>
+                </select>
+                <p class="hint" id="receiver_type-hint">Pick VRS if Virtual Radar Server is your ADS-B source</p>
+              </div>
+              {{ num('poll_interval', 'Poll interval <span class="label-note">seconds</span>', hint='How often to check the receiver. Default 15. Lower finds flights sooner; higher saves CPU. Applies after Save &amp; restart.', min=5, max=120) }}
+              {{ num('data_check_interval', 'Data check interval <span class="label-note">seconds</span>', hint='How quickly the display picks up finished lookups. Default 2. Applies after Save &amp; restart.', min=1, max=10) }}
+            </div>
+          </section>
 
-    <div class="section">
-      <div class="section-header">Receiver</div>
-      <div class="field-grid">
-        <div class="field"><label>Receiver Host</label><input type="text" id="receiver_host"><div class="hint">IP of fr24feed / dump1090 / VRS host. Include port if non-standard, e.g. 192.168.1.50:8090</div></div>
-        <div class="field"><label>Receiver Type</label>
-          <select id="receiver_type" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:13px">
-            <option value="dump1090">dump1090 / fr24feed (default)</option>
-            <option value="vrs">Virtual Radar Server (VRS)</option>
-          </select>
-          <div class="hint">Switch to VRS if you run Virtual Radar Server as your ADS-B source</div>
-        </div>
-        <div class="field"><label>Poll Interval <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
-          <input type="number" min="5" max="120" id="poll_interval">
-          <div class="hint">How often to check the receiver for new flights. Default 15 s — lower means faster detection, higher saves CPU. Takes effect after Save &amp; Restart.</div>
-        </div>
-        <div class="field"><label>Data Check Interval <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
-          <input type="number" min="1" max="10" id="data_check_interval">
-          <div class="hint">How quickly the display picks up results once a lookup finishes. Default 2 s. Takes effect after Save &amp; Restart.</div>
-        </div>
+          <section class="card" id="sec-keys" aria-labelledby="sec-keys-h">
+            <header class="card-head">
+              <div><h2 id="sec-keys-h">API keys</h2><p>Stored on the Pi. Masked here until you reveal them.</p></div>
+            </header>
+            <div class="fields fields-2">
+              {{ secret('airlabs_key', 'AirLabs API key', hint='Free tier: 1,000 calls/month &middot; <a href="https://airlabs.co" target="_blank" rel="noopener">airlabs.co</a>') }}
+              {{ secret('airlabs_key2', 'AirLabs API key 2 <span class="label-note">backup</span>', hint='Used automatically once key 1 hits its monthly limit') }}
+              {{ secret('fa_key', 'FlightAware AeroAPI key', hint='$0.005 per call; the feeder credit applies') }}
+              {{ text('opensky_id', 'OpenSky client ID', hint='Free with an account &middot; <a href="https://opensky-network.org" target="_blank" rel="noopener">opensky-network.org</a>') }}
+              {{ secret('opensky_secret', 'OpenSky client secret') }}
+            </div>
+          </section>
+
+          <section class="card" id="sec-billing" aria-labelledby="sec-billing-h">
+            <header class="card-head">
+              <div><h2 id="sec-billing-h">API billing</h2><p>Limits and reset days for the usage meters on the APIs page.</p></div>
+            </header>
+            <div class="fields fields-3">
+              {{ num('feeder_monthly_credit', 'FlightAware feeder credit <span class="label-note">$/month</span>', hint='Default $10.00', min=0, step='0.01', mode='decimal') }}
+              {{ num('aeroapi_reset_day', 'AeroAPI reset day', hint='Day of the month the FlightAware period resets (1&ndash;28)', min=1, max=28) }}
+              {{ num('airlabs_monthly_limit', 'AirLabs monthly limit', hint='Free tier: 1,000 calls', min=1) }}
+              {{ num('airlabs_reset_day', 'AirLabs reset day', hint='1&ndash;28', min=1, max=28) }}
+              {{ num('airlabs2_monthly_limit', 'AirLabs 2 monthly limit', hint='Free tier: 1,000 calls', min=1) }}
+              {{ num('airlabs2_reset_day', 'AirLabs 2 reset day', hint='1&ndash;28', min=1, max=28) }}
+            </div>
+          </section>
+
+          <section class="card" id="sec-cache" aria-labelledby="sec-cache-h">
+            <header class="card-head">
+              <div><h2 id="sec-cache-h">Cache lifetimes</h2><p>In seconds. Applies after Save &amp; restart.</p></div>
+            </header>
+            <div class="fields fields-3">
+              {{ num('adsbdb_cache_ttl', 'adsbdb', hint='Last-resort route results. Default 3600 (1 hour)', min=60) }}
+              {{ num('opensky_cache_ttl', 'OpenSky', hint='Default 3600 (1 hour)', min=60) }}
+              {{ num('route_ttl_scheduled', 'Scheduled routes', hint='Resolved airline routes. Default 604800 (7 days)', min=60) }}
+              {{ num('route_ttl_default', 'GA and other routes', hint='GA, charter and unknown. Default 3600 (1 hour)', min=60) }}
+              {{ num('route_miss_ttl', 'Miss retry', hint='Wait before re-asking an API that returned nothing. Default 300 (5 min)', min=30) }}
+              {{ num('route_paid_miss_ttl', 'Paid miss suppression', hint='Skip AirLabs and AeroAPI after both came back empty. Default 7200 (2 hours)', min=60) }}
+            </div>
+          </section>
+
+          <p class="credit">
+            <a href="https://github.com/dalarso/FlightTracker" target="_blank" rel="noopener">github.com/dalarso/FlightTracker</a>
+            &middot; based on <a href="https://github.com/ColinWaddell/FlightTracker" target="_blank" rel="noopener">Colin Waddell's FlightTracker</a>
+          </p>
+        </form>
       </div>
     </div>
 
-    <div class="section">
-      <div class="section-header">API Keys</div>
-      <div class="field-grid">
-        <div class="field"><label>AirLabs API Key</label>
-          <div class="input-wrap"><input type="password" id="airlabs_key"><button class="eye-btn" onclick="toggleEye('airlabs_key',this)">👁</button></div>
-          <div class="hint">Free — 1,000 calls/month · <a href="https://airlabs.co" target="_blank" style="color:var(--accent)">airlabs.co</a></div>
+    <div class="savebar" id="savebar" data-state="clean">
+      <span class="save-status" id="save-status" role="status" aria-live="polite"></span>
+      <div class="savebar-actions">
+        <button type="button" class="btn btn-secondary" data-action="save-restart">{{ ico('refresh') }}<span>Save &amp; restart<span class="hide-sm"> display</span></span></button>
+        <button type="button" class="btn btn-primary" data-action="save">{{ ico('check') }}Save</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════════════ MAP ═════════════════════════════ -->
+  <section class="panel panel-full" id="map-tab" data-panel="map" aria-label="Zone map" hidden>
+    <div class="map-wrap">
+      <div id="map" aria-label="Zone map"></div>
+      <div class="map-state" id="map-state" hidden></div>
+      <div class="map-sheet">
+        <div class="map-sheet-head">
+          <h2>Zone bounds</h2>
+          <button type="button" class="icon-btn" data-action="map-fit" aria-label="Fit the zone in view" title="Fit zone">{{ ico('target') }}</button>
         </div>
-        <div class="field"><label>AirLabs API Key 2 <span style="font-size:10px;color:var(--muted)">(backup)</span></label>
-          <div class="input-wrap"><input type="password" id="airlabs_key2"><button class="eye-btn" onclick="toggleEye('airlabs_key2',this)">👁</button></div>
-          <div class="hint">Secondary key — used automatically when Key 1 hits its monthly limit</div>
-        </div>
-        <div class="field"><label>FlightAware AeroAPI Key</label>
-          <div class="input-wrap"><input type="password" id="fa_key"><button class="eye-btn" onclick="toggleEye('fa_key',this)">👁</button></div>
-          <div class="hint">$0.005/call · feeder credit applies</div>
-        </div>
-        <div class="field"><label>OpenSky Client ID</label><input type="text" id="opensky_id">
-          <div class="hint">Free with account · <a href="https://opensky-network.org" target="_blank" style="color:var(--accent)">opensky-network.org</a></div>
-        </div>
-        <div class="field"><label>OpenSky Client Secret</label>
-          <div class="input-wrap"><input type="password" id="opensky_secret"><button class="eye-btn" onclick="toggleEye('opensky_secret',this)">👁</button></div>
+        <dl class="coords">
+          <div><dt>N</dt><dd id="m-tl-y">&mdash;</dd></div>
+          <div><dt>S</dt><dd id="m-br-y">&mdash;</dd></div>
+          <div><dt>W</dt><dd id="m-tl-x">&mdash;</dd></div>
+          <div><dt>E</dt><dd id="m-br-x">&mdash;</dd></div>
+        </dl>
+        <p class="hint">Drag the corner handles to resize the zone.</p>
+        <div class="map-sheet-actions">
+          <button type="button" class="btn btn-secondary" data-action="map-discard">Discard</button>
+          <button type="button" class="btn btn-primary" data-action="map-save">{{ ico('check') }}Save zone</button>
         </div>
       </div>
     </div>
+  </section>
 
-    <div class="section">
-      <div class="section-header">API Billing</div>
-      <div class="field-grid">
-        <div class="field"><label>FlightAware Feeder Credit ($)</label>
-          <input type="number" step="0.01" min="0" id="feeder_monthly_credit">
-          <div class="hint">Monthly credit from being a feeder (default $10.00)</div>
-        </div>
-        <div class="field"><label>AirLabs Monthly Call Limit</label>
-          <input type="number" min="1" id="airlabs_monthly_limit">
-          <div class="hint">Free tier: 1,000 calls/month</div>
-        </div>
-        <div class="field"><label>AirLabs Billing Reset Day</label>
-          <input type="number" min="1" max="28" id="airlabs_reset_day">
-          <div class="hint">Day of month your AirLabs period resets (1–28)</div>
-        </div>
-        <div class="field"><label>AirLabs 2 Monthly Call Limit</label>
-          <input type="number" min="1" id="airlabs2_monthly_limit">
-          <div class="hint">Free tier: 1,000 calls/month</div>
-        </div>
-        <div class="field"><label>AirLabs 2 Billing Reset Day</label>
-          <input type="number" min="1" max="28" id="airlabs2_reset_day">
-          <div class="hint">Day of month your AirLabs 2 period resets (1–28)</div>
-        </div>
-        <div class="field"><label>AeroAPI Billing Reset Day</label>
-          <input type="number" min="1" max="28" id="aeroapi_reset_day">
-          <div class="hint">Day of month your FlightAware period resets (1–28)</div>
-        </div>
+  <!-- ═════════════════════════════ APIS ═════════════════════════════ -->
+  <section class="panel" id="apis-tab" data-panel="apis" aria-labelledby="apis-title" hidden>
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title" id="apis-title">APIs</h1>
+        <p class="page-sub" id="apis-month">Loading usage&hellip;</p>
       </div>
+
+      <div class="grid grid-3">
+        {%- for key, prefix, title, sub in [('airlabs', 'al', 'AirLabs 1', 'Route data'), ('airlabs2', 'al2', 'AirLabs 2', 'Backup key')] %}
+        <article class="card usage-card" id="usage-{{ key }}">
+          <header class="card-head">
+            <div><h2>{{ title }}</h2><p>{{ sub }}</p></div>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="adjust" data-api="{{ key }}">{{ ico('edit') }}Adjust</button>
+          </header>
+          <div class="meter-head"><span class="meter-big" id="{{ prefix }}-calls">&mdash;</span><span class="meter-unit">calls used</span><span class="meter-pct" id="{{ prefix }}-pct"></span></div>
+          <div class="meter" role="presentation"><div class="meter-bar" id="{{ prefix }}-bar"></div></div>
+          <dl class="kv">
+            <div><dt>Remaining</dt><dd id="{{ prefix }}-remaining">&mdash;</dd></div>
+            <div><dt>Period limit</dt><dd id="{{ prefix }}-limit">&mdash;</dd></div>
+            <div><dt>Period</dt><dd id="{{ prefix }}-period">&mdash;</dd></div>
+          </dl>
+          <form class="adjust" id="adjust-{{ key }}" data-submit="adjust" data-api="{{ key }}" hidden>
+            <label for="adjust-{{ key }}-val">Correct the call count for this period</label>
+            <div class="inline-form">
+              <input type="number" id="adjust-{{ key }}-val" min="0" step="1" inputmode="numeric" placeholder="calls used">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="adjust" data-api="{{ key }}">Cancel</button>
+            </div>
+          </form>
+        </article>
+        {%- endfor %}
+        <article class="card usage-card" id="usage-flightaware">
+          <header class="card-head">
+            <div><h2>FlightAware AeroAPI</h2><p>Paid lookups against the feeder credit</p></div>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="adjust" data-api="flightaware">{{ ico('edit') }}Adjust</button>
+          </header>
+          <div class="meter-head"><span class="meter-big" id="fa-spend">&mdash;</span><span class="meter-unit">est. spend</span><span class="meter-pct" id="fa-pct"></span></div>
+          <div class="meter" role="presentation"><div class="meter-bar" id="fa-bar"></div></div>
+          <dl class="kv">
+            <div><dt>Est. calls</dt><dd id="fa-calls">&mdash;</dd></div>
+            <div><dt>Monthly credit</dt><dd id="fa-credit">&mdash;</dd></div>
+            <div><dt>Remaining</dt><dd id="fa-remaining">&mdash;</dd></div>
+            <div><dt>Period</dt><dd id="fa-period">&mdash;</dd></div>
+          </dl>
+          <form class="adjust" id="adjust-flightaware" data-submit="adjust" data-api="flightaware" hidden>
+            <label for="adjust-flightaware-val">Correct the spend ($) for this period</label>
+            <div class="inline-form">
+              <input type="number" id="adjust-flightaware-val" min="0" step="0.001" inputmode="decimal" placeholder="e.g. 4.253">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="adjust" data-api="flightaware">Cancel</button>
+            </div>
+          </form>
+        </article>
+      </div>
+
+      <section class="card" aria-labelledby="stack-h">
+        <header class="card-head">
+          <div><h2 id="stack-h">Route data stack</h2><p>Sources are tried in priority order until one returns a route.</p></div>
+        </header>
+        <div class="stack-list" id="stack-rows"><div class="empty">Loading&hellip;</div></div>
+      </section>
+
+      <section class="card" aria-labelledby="cache-entry-h">
+        <header class="card-head">
+          <div><h2 id="cache-entry-h">Clear one cache entry</h2><p>Drop a single aircraft type (by tail number) or route (by callsign) without wiping the whole cache.</p></div>
+        </header>
+        <form class="inline-form" data-submit="clear-cache-entry">
+          <label for="cache-entry-input" class="sr-only">Tail number or callsign</label>
+          <input type="text" id="cache-entry-input" class="upper mono" placeholder="N9003B or SWA1230" autocapitalize="characters" spellcheck="false" autocomplete="off" enterkeyhint="done">
+          <button type="submit" class="btn btn-primary">{{ ico('trash') }}Clear entry</button>
+        </form>
+        <p class="form-result" id="cache-entry-result" role="status" aria-live="polite"></p>
+      </section>
     </div>
+  </section>
 
-    <div class="section">
-      <div class="section-header">Cache TTLs <span style="font-weight:400;font-size:10px;color:var(--muted);margin-left:8px">takes effect after Save &amp; Restart</span></div>
-      <div class="field-grid">
-        <div class="field"><label>adsbdb Cache (seconds)</label>
-          <input type="number" min="60" id="adsbdb_cache_ttl">
-          <div class="hint">How long adsbdb route results are cached (default 3600 = 1 hr)</div>
-        </div>
-        <div class="field"><label>OpenSky Cache (seconds)</label>
-          <input type="number" min="60" id="opensky_cache_ttl">
-          <div class="hint">How long OpenSky results are cached (default 3600 = 1 hr)</div>
-        </div>
-        <div class="field"><label>Scheduled Route Cache (seconds)</label>
-          <input type="number" min="60" id="route_ttl_scheduled">
-          <div class="hint">How long resolved commercial airline routes are cached (default 604800 = 7 days)</div>
-        </div>
-        <div class="field"><label>GA / Default Route Cache (seconds)</label>
-          <input type="number" min="60" id="route_ttl_default">
-          <div class="hint">How long GA, charter, and unknown routes are cached (default 3600 = 1 hr)</div>
-        </div>
-        <div class="field"><label>Miss Cache / Retry (seconds)</label>
-          <input type="number" min="30" id="route_miss_ttl">
-          <div class="hint">How long to suppress re-queries after an API returns no data (default 300 = 5 min)</div>
-        </div>
-        <div class="field"><label>Paid API Miss Suppression (seconds)</label>
-          <input type="number" min="60" id="route_paid_miss_ttl">
-          <div class="hint">How long to suppress both AirLabs &amp; AeroAPI after both return empty (default 7200 = 2 hr)</div>
-        </div>
-      </div>
-    </div>
-
-  </div>
-  <div class="config-footer">
-    <button class="btn btn-primary" onclick="saveConfig(false)">Save</button>
-    <button class="btn btn-danger" onclick="saveConfig(true)">Save &amp; Restart Display</button>
-    <span class="save-status" id="save-status"></span>
-    <span class="footer-credit">
-      <a href="https://github.com/dalarso/FlightTracker" target="_blank" rel="noopener">github.com/dalarso/FlightTracker</a>
-      &nbsp;·&nbsp; based on
-      <a href="https://github.com/ColinWaddell/FlightTracker" target="_blank" rel="noopener">Colin Waddell's FlightTracker</a>
-    </span>
-  </div>
-</div>
-
-<!-- MAP TAB -->
-<div class="tab-content" id="map-tab">
-  <div id="map"></div>
-  <div class="map-overlay">
-    <div class="map-card">
-      <h3>Zone Bounds</h3>
-      <div class="coord-row"><span>N</span><span id="m-tl-y">—</span></div>
-      <div class="coord-row"><span>S</span><span id="m-br-y">—</span></div>
-      <div class="coord-row"><span>W</span><span id="m-tl-x">—</span></div>
-      <div class="coord-row"><span>E</span><span id="m-br-x">—</span></div>
-    </div>
-    <div class="map-card">
-      <h3>Instructions</h3>
-      <div style="color:var(--muted);line-height:1.7;font-size:12px">Drag corner handles<br>to resize the zone.<br><br>
-        <button class="btn btn-primary" style="width:100%;font-size:12px" onclick="saveFromMap()">Save Zone</button>
-        <button class="btn" style="width:100%;font-size:12px;margin-top:6px" onclick="discardMapChanges()">Discard Changes</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- APIS TAB -->
-<div class="tab-content" id="apis-tab">
-  <div class="apis-scroll">
-    <div class="apis-month" id="apis-month">Loading…</div>
-
-    <div class="usage-grid">
-      <div class="usage-card" id="usage-airlabs">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h3 style="margin-bottom:0">AirLabs 1 — Route Data</h3>
-          <button class="btn" onclick="toggleAdjust('airlabs')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
-        </div>
-        <div class="usage-stat"><span class="label">Calls used</span><span class="value" id="al-calls">—</span></div>
-        <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="al-remaining">—</span></div>
-        <div class="usage-bar-wrap"><div class="usage-bar" id="al-bar" style="width:0%"></div></div>
-        <div class="usage-pct" id="al-pct">—</div>
-        <div class="usage-stat" style="margin-top:8px"><span class="label">Period limit</span><span class="value" id="al-limit">—</span></div>
-        <div class="usage-stat"><span class="label">Period</span><span class="value" id="al-period" style="font-size:11px">—</span></div>
-        <div id="adjust-airlabs" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Correct call count for this billing period:</div>
-          <div style="display:flex;gap:6px;align-items:center">
-            <input type="number" id="adjust-airlabs-val" min="0" step="1" placeholder="calls used" style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:12px">
-            <button class="btn btn-primary" onclick="saveAdjust('airlabs')" style="font-size:11px;padding:4px 10px">Save</button>
-            <button class="btn" onclick="toggleAdjust('airlabs')" style="font-size:11px;padding:4px 10px">Cancel</button>
-          </div>
-        </div>
-      </div>
-      <div class="usage-card" id="usage-airlabs2">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h3 style="margin-bottom:0">AirLabs 2 — Backup Key</h3>
-          <button class="btn" onclick="toggleAdjust('airlabs2')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
-        </div>
-        <div class="usage-stat"><span class="label">Calls used</span><span class="value" id="al2-calls">—</span></div>
-        <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="al2-remaining">—</span></div>
-        <div class="usage-bar-wrap"><div class="usage-bar" id="al2-bar" style="width:0%"></div></div>
-        <div class="usage-pct" id="al2-pct">—</div>
-        <div class="usage-stat" style="margin-top:8px"><span class="label">Period limit</span><span class="value" id="al2-limit">—</span></div>
-        <div class="usage-stat"><span class="label">Period</span><span class="value" id="al2-period" style="font-size:11px">—</span></div>
-        <div id="adjust-airlabs2" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Correct call count for this billing period:</div>
-          <div style="display:flex;gap:6px;align-items:center">
-            <input type="number" id="adjust-airlabs2-val" min="0" step="1" placeholder="calls used" style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:12px">
-            <button class="btn btn-primary" onclick="saveAdjust('airlabs2')" style="font-size:11px;padding:4px 10px">Save</button>
-            <button class="btn" onclick="toggleAdjust('airlabs2')" style="font-size:11px;padding:4px 10px">Cancel</button>
-          </div>
-        </div>
-      </div>
-      <div class="usage-card" id="usage-flightaware">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h3 style="margin-bottom:0">FlightAware AeroAPI</h3>
-          <button class="btn" onclick="toggleAdjust('flightaware')" style="font-size:10px;padding:2px 8px;line-height:1.6">✏️ Adjust</button>
-        </div>
-        <div class="usage-stat"><span class="label">Est. calls</span><span class="value" id="fa-calls">—</span></div>
-        <div class="usage-stat"><span class="label">Est. spend</span><span class="value" id="fa-spend">—</span></div>
-        <div class="usage-bar-wrap"><div class="usage-bar" id="fa-bar" style="width:0%"></div></div>
-        <div class="usage-pct" id="fa-pct">—</div>
-        <div class="usage-stat" style="margin-top:8px"><span class="label">Monthly credit</span><span class="value" id="fa-credit">—</span></div>
-        <div class="usage-stat"><span class="label">Remaining</span><span class="value" id="fa-remaining">—</span></div>
-        <div class="usage-stat"><span class="label">Period</span><span class="value" id="fa-period" style="font-size:11px">—</span></div>
-        <div id="adjust-flightaware" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-          <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Correct spend ($) for this billing period:</div>
-          <div style="display:flex;gap:6px;align-items:center">
-            <input type="number" id="adjust-flightaware-val" min="0" step="0.001" placeholder="e.g. 4.253" style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:inherit;font-size:12px">
-            <button class="btn btn-primary" onclick="saveAdjust('flightaware')" style="font-size:11px;padding:4px 10px">Save</button>
-            <button class="btn" onclick="toggleAdjust('flightaware')" style="font-size:11px;padding:4px 10px">Cancel</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="stack-table">
-      <div class="stack-table-header">Route Data API Stack — priority order</div>
-      <div id="stack-rows">
-        <div class="stack-row"><div class="stack-priority">—</div><div style="color:var(--muted);font-size:12px">Loading…</div><div></div></div>
-      </div>
-    </div>
-
-    <div class="usage-card" style="margin-top:16px">
-      <h3 style="margin-bottom:6px">Clear Specific Cache Entry</h3>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
-        Clear a single aircraft type (by tail #) or route (by callsign) without wiping the full cache.
-      </div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input type="text" id="cache-entry-input" placeholder="e.g. N9003B or SWA1230"
-               style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:4px;
-                      background:var(--bg);color:inherit;font-size:13px;text-transform:uppercase"
-               onkeydown="if(event.key==='Enter') clearCacheEntry()">
-        <button class="btn btn-primary" onclick="clearCacheEntry()" style="white-space:nowrap">Clear Entry</button>
-      </div>
-      <div id="cache-entry-result" style="font-size:11px;margin-top:8px;min-height:16px"></div>
-    </div>
-  </div>
-</div>
-
-<!-- STATS TAB -->
-<div class="tab-content" id="stats-tab">
-  <div class="apis-scroll">
-
-    <!-- ── Today card ───────────────────────────────────────────────────── -->
-    <div class="usage-card" style="margin-bottom:16px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
-        <h3 id="stats-today-heading">Flights Seen Today</h3>
-        <span id="stats-api-calls" style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
-        <span id="stats-total" style="font-size:36px;font-weight:700;font-family:monospace">—</span>
-        <span style="font-size:13px;color:var(--muted)" id="stats-date">—</span>
-      </div>
-      <div id="stats-top" style="margin-bottom:14px"></div>
-      <!-- 7-day sparkline -->
-      <div style="display:flex;align-items:flex-end;gap:3px;height:40px" id="stats-sparkline"></div>
-    </div>
-
-    <!-- ── Recent Flights card ───────────────────────────────────────────── -->
-    <div class="usage-card" style="margin-bottom:16px">
-      <h3 style="margin-bottom:12px">Recent Flights</h3>
-      <div id="recent-flights-list"></div>
-    </div>
-
-    <!-- ── Free API Accuracy card ───────────────────────────────────────── -->
-    <div class="usage-card" style="margin-bottom:16px" id="free-api-card">
-      <h3 style="margin-bottom:12px">Free API Accuracy <span style="font-weight:400;font-size:10px;color:var(--muted);margin-left:6px">adsbdb vs. paid APIs · commercial flights only</span></h3>
-      <div id="free-api-content"><span style="font-size:11px;color:var(--muted)">Loading…</span></div>
-    </div>
-
-    <!-- ── GA Free API Accuracy card ─────────────────────────────────────── -->
-    <div class="usage-card" style="margin-bottom:16px" id="ga-accuracy-card">
-      <h3 style="margin-bottom:12px">GA Free API Accuracy <span style="font-weight:400;font-size:10px;color:var(--muted);margin-left:6px">adsbdb &amp; OpenSky vs. FR24 · N-number aircraft</span></h3>
-      <div id="ga-accuracy-content"><span style="font-size:11px;color:var(--muted)">Loading…</span></div>
-    </div>
-
-    <!-- ── Period / date-range card ─────────────────────────────────────── -->
-    <div class="usage-card" style="margin-bottom:16px">
-      <!-- Header row: title + date picker -->
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
-        <h3 id="period-title" style="flex-shrink:0">90-Day Summary</h3>
-        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <button onclick="quickPeriod('yesterday')"
-            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
-            Yesterday
-          </button>
-          <button onclick="quickPeriod('7d')"
-            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
-            Last 7 Days
-          </button>
-          <button onclick="quickPeriod('30d')"
-            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
-            Last 30 Days
-          </button>
-          <button onclick="quickPeriod('90d')"
-            style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;color:var(--muted);cursor:pointer">
-            Last 90 Days
-          </button>
-          <span style="color:var(--border);font-size:12px">|</span>
-          <input type="date" id="period-from"
-            style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;cursor:pointer"
-            onchange="onPeriodChange()">
-          <span style="color:var(--muted);font-size:12px">→</span>
-          <input type="date" id="period-to"
-            style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;cursor:pointer"
-            onchange="onPeriodChange()">
-          <button id="period-apply-btn" onclick="applyStatsPeriod()"
-            style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer;display:none">
-            Apply
-          </button>
-        </div>
-      </div>
-
-      <!-- Period total + api calls -->
-      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
-        <span id="period-total" style="font-size:24px;font-weight:700;font-family:monospace;color:var(--accent)">—</span>
-        <span style="font-size:12px;color:var(--muted)">flights</span>
-        <span id="period-api-calls" style="font-size:11px;color:var(--muted);margin-left:auto"></span>
-      </div>
-
-      <!-- History table -->
-      <div id="stats-history" style="margin:12px 0 16px"></div>
-
-      <!-- Rollup grids -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
+  <!-- ═════════════════════════════ STATS ═════════════════════════════ -->
+  <section class="panel" id="stats-tab" data-panel="stats" aria-labelledby="stats-title">
+    <div class="page">
+      <div class="page-head page-head-split">
         <div>
-          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Airlines</div>
-          <div id="rollup-airlines"></div>
+          <h1 class="page-title" id="stats-title">Stats</h1>
+          <p class="page-sub"><span id="stats-date">Today</span> <span class="updated" id="stats-updated" data-state="idle"></span></p>
         </div>
-        <div>
-          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Tail #s</div>
-          <div id="rollup-tails"></div>
+        <form class="search-bar" role="search" data-submit="stats-search">
+          <label class="sr-only" for="stats-search-input">Search flight history</label>
+          <span class="search-field">{{ ico('search') }}<input type="search" id="stats-search-input" class="mono" placeholder="Flight, tail or airport" autocapitalize="characters" spellcheck="false" autocomplete="off" enterkeyhint="search"></span>
+          <button type="submit" class="btn btn-primary">Search</button>
+        </form>
+      </div>
+
+      <article class="card" id="search-card" aria-labelledby="search-h" hidden>
+        <header class="card-head">
+          <div><h2 id="search-h">Search results</h2><p id="search-summary"></p></div>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="search-clear">{{ ico('x') }}Clear</button>
+        </header>
+        <div id="stats-search-results" class="search-results"></div>
+      </article>
+
+      <div class="kpis" aria-label="Today at a glance">
+        <div class="kpi-tile">
+          <span class="kpi-label">Flights today</span>
+          <span class="kpi-num" id="stats-total">&mdash;</span>
+          <span class="kpi-sub" id="kpi-today-vs">&nbsp;</span>
+        </div>
+        <div class="kpi-tile">
+          <span class="kpi-label">Unique aircraft today</span>
+          <span class="kpi-num" id="kpi-unique">&mdash;</span>
+          <span class="kpi-sub">distinct tail numbers</span>
+        </div>
+        <div class="kpi-tile">
+          <span class="kpi-label">7-day average</span>
+          <span class="kpi-num" id="kpi-avg7">&mdash;</span>
+          <span class="kpi-sub" id="kpi-avg7-sub">flights per day</span>
+        </div>
+        <div class="kpi-tile">
+          <span class="kpi-label">Paid lookups today</span>
+          <span class="kpi-num" id="kpi-calls">&mdash;</span>
+          <span class="kpi-sub" id="stats-api-calls">&nbsp;</span>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
-        <div>
-          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Routes</div>
-          <div id="rollup-routes"></div>
-        </div>
-        <div>
-          <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Top Aircraft Types</div>
-          <div id="rollup-types"></div>
-        </div>
+
+      <div class="grid grid-feature">
+        <article class="card" aria-labelledby="recent-h">
+          <header class="card-head"><div><h2 id="recent-h">Recent flights</h2><p>Newest first, refreshed every minute</p></div></header>
+          <div id="recent-flights-list"><p class="empty">Loading&hellip;</p></div>
+        </article>
+        <article class="card" aria-labelledby="stats-today-heading">
+          <header class="card-head"><div><h2 id="stats-today-heading">Today by hour</h2><p id="today-peak">&nbsp;</p></div></header>
+          <div class="bar-chart bar-chart-hours" id="today-hours" role="img" aria-label="Flights per hour today"></div>
+          <h3 class="subhead">Top airlines today</h3>
+          <div class="rank-list" id="stats-top"></div>
+        </article>
       </div>
-      <div>
-        <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">Route Source Efficiency</div>
-        <div id="rollup-sources"></div>
-      </div>
+
+      <article class="card" id="period-card" aria-labelledby="period-title">
+        <header class="card-head card-head-wrap">
+          <div><h2 id="period-title">Last 90 days</h2><p id="period-range">&nbsp;</p></div>
+          <div class="period-controls">
+            <div class="segmented" role="group" aria-label="Quick date ranges" id="period-presets">
+              <button type="button" class="seg" data-action="period" data-preset="yesterday" aria-pressed="false">Yesterday</button>
+              <button type="button" class="seg" data-action="period" data-preset="7d" aria-pressed="false">7d</button>
+              <button type="button" class="seg" data-action="period" data-preset="30d" aria-pressed="false">30d</button>
+              <button type="button" class="seg" data-action="period" data-preset="90d" aria-pressed="true">90d</button>
+            </div>
+            <form class="date-range" data-submit="period-apply">
+              <label class="sr-only" for="period-from">From</label>
+              <input type="date" id="period-from" data-change="period-dirty">
+              <span class="date-sep" aria-hidden="true">to</span>
+              <label class="sr-only" for="period-to">To</label>
+              <input type="date" id="period-to" data-change="period-dirty">
+              <button type="submit" class="btn btn-primary btn-sm" id="period-apply-btn" hidden>Apply</button>
+            </form>
+          </div>
+        </header>
+
+        <div class="period-body" id="period-body">
+          <div class="period-kpis">
+            <div><span class="pk-num" id="period-total">&mdash;</span><span class="pk-label">flights</span></div>
+            <div><span class="pk-num" id="period-avg">&mdash;</span><span class="pk-label">per day</span></div>
+            <div><span class="pk-num" id="period-busiest">&mdash;</span><span class="pk-label" id="period-busiest-label">busiest day</span></div>
+            <div><span class="pk-num" id="period-unique">&mdash;</span><span class="pk-label">unique aircraft</span></div>
+            <div><span class="pk-num" id="period-calls">&mdash;</span><span class="pk-label" id="period-api-calls">paid lookups</span></div>
+          </div>
+
+          <div class="bar-chart bar-chart-days" id="day-chart" role="img" aria-label="Flights per day"></div>
+          <p class="chart-legend"><span class="lg-bar" aria-hidden="true"></span>Flights per day<span class="lg-avg"><span class="lg-line" aria-hidden="true"></span>7-day average</span></p>
+
+          <div class="rollups">
+            <div class="rollup"><h3 class="subhead">Top airlines</h3><div class="rank-list" id="rollup-airlines"></div></div>
+            <div class="rollup"><h3 class="subhead">Top tail numbers</h3><div class="rank-list" id="rollup-tails"></div></div>
+            <div class="rollup"><h3 class="subhead">Top routes</h3><div class="rank-list" id="rollup-routes"></div></div>
+            <div class="rollup"><h3 class="subhead">Top aircraft types</h3><div class="rank-list" id="rollup-types"></div></div>
+          </div>
+
+          <div class="rollups rollups-2">
+            <div class="rollup"><h3 class="subhead">Busiest hours <span class="label-note" id="period-peak"></span></h3><div class="bar-chart bar-chart-hours" id="period-hours" role="img" aria-label="Flights per hour of the day"></div></div>
+            <div class="rollup"><h3 class="subhead">Where routes came from</h3><div id="rollup-sources"></div></div>
+          </div>
+
+          <details class="explain daily-table">
+            <summary>Daily table</summary>
+            <div class="history" id="stats-history"></div>
+          </details>
+        </div>
+      </article>
+
+      <article class="card" id="fr24-agree-card">
+        <header class="card-head"><div><h2>FR24 vs paid APIs</h2><p>The same flight: FR24's route against AirLabs, AeroAPI or the 7-day route cache</p></div></header>
+        <div id="fr24-agree-content"><p class="empty">Loading&hellip;</p></div>
+      </article>
     </div>
+  </section>
 
-    <!-- ── Search card ───────────────────────────────────────────────────── -->
-    <div class="usage-card" style="margin-bottom:16px">
-      <h3 style="margin-bottom:12px">Search History</h3>
-      <div style="display:flex;gap:6px">
-        <input id="stats-search-input" type="text" placeholder="Flight #, tail, origin/dest (e.g. SWA123, N8862Q, DEN)"
-          style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 10px;color:var(--text);font-size:12px;outline:none"
-          onkeydown="if(event.key==='Enter')doStatsSearch()">
-        <button onclick="doStatsSearch()"
-          style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap">
-          Search
-        </button>
+  <!-- ═════════════════════════════ RULES ═════════════════════════════ -->
+  <section class="panel" id="rules-tab" data-panel="rules" aria-labelledby="rules-title" hidden>
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title" id="rules-title">Rules</h1>
+        <p class="page-sub">Test a lookup end to end, and pin routes the APIs get wrong.</p>
       </div>
-      <div id="stats-search-results" style="margin-top:10px"></div>
+
+      <article class="card" aria-labelledby="test-h">
+        <header class="card-head">
+          <div><h2 id="test-h">Test a flight lookup</h2><p>Runs the full live pipeline for a callsign or tail number, with the same trust rules and LOCAL_AIRPORTS filter as a real flight. The result shows on the matrix for 30 seconds; its log lines are tagged <code>[TEST:]</code>.</p></div>
+        </header>
+        <form class="test-form" data-submit="test-flight">
+          <label class="sr-only" for="test-callsign">Callsign or tail number</label>
+          <input type="text" id="test-callsign" class="upper mono" placeholder="MXY527, SWA1234, N530JL" maxlength="20" autocapitalize="characters" spellcheck="false" autocomplete="off" enterkeyhint="go">
+          <label class="check"><input type="checkbox" id="test-use-cache" checked> Use cached data</label>
+          <div class="test-actions">
+            <button type="submit" class="btn btn-primary" id="test-run-btn">{{ ico('play') }}<span>Run test</span></button>
+            <button type="button" class="btn btn-secondary" id="test-clear-btn" data-action="test-clear" hidden>{{ ico('x') }}Clear display</button>
+            <button type="button" class="btn btn-ghost" id="test-reset-btn" data-action="test-reset" hidden>{{ ico('reset') }}Reset</button>
+          </div>
+        </form>
+        <details class="explain">
+          <summary>What "Use cached data" changes</summary>
+          <p>Checked, the test calls the real <code>get_route()</code> and <code>get_aircraft_type()</code>, cache reads included, exactly as a live flight would. Unchecked, it skips the cache and asks every API fresh.</p>
+        </details>
+        <div id="test-result" class="test-result" hidden></div>
+      </article>
+
+      <article class="card" aria-labelledby="rules-h">
+        <header class="card-head">
+          <div><h2 id="rules-h">Override rules <span class="count-badge" id="rules-count"></span></h2><p>A matching callsign or tail skips every API lookup and uses the route below, saving AirLabs and FlightAware quota.</p></div>
+          <span id="rules-save-status" class="save-status" role="status" aria-live="polite"></span>
+        </header>
+        <div id="rules-table-wrap"><p class="empty">Loading&hellip;</p></div>
+        <details class="explain">
+          <summary>Pattern tips</summary>
+          <p><code>*</code> matches any characters: <code>JANET*</code> matches JANET42 and JANET99; <code>N9*WY</code> matches N911WY and N9WY. Leave the origin or destination blank if it's unknown and the display shows <code>?</code>. Rules are checked top to bottom.</p>
+        </details>
+      </article>
+
+      <article class="card" aria-labelledby="add-rule-h">
+        <header class="card-head"><div><h2 id="add-rule-h">Add a rule</h2></div></header>
+        <form id="rule-form" data-submit="add-rule" autocomplete="off">
+          <div class="fields fields-3">
+            <div class="field">
+              <label for="rule-pattern">Pattern <span class="req" aria-hidden="true">*</span></label>
+              <input type="text" id="rule-pattern" class="upper mono" placeholder="JANET* or N911WY" autocapitalize="characters" spellcheck="false" required aria-describedby="rule-pattern-hint">
+              <p class="hint" id="rule-pattern-hint">Callsign or tail number; * matches anything</p>
+            </div>
+            <div class="field">
+              <label for="rule-origin">Origin <span class="label-note">optional</span></label>
+              <input type="text" id="rule-origin" class="upper mono" placeholder="LAS" maxlength="4" autocapitalize="characters" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="rule-dest">Destination <span class="label-note">optional</span></label>
+              <input type="text" id="rule-dest" class="upper mono" placeholder="&mdash;" maxlength="4" autocapitalize="characters" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="rule-display">Display name <span class="label-note">optional</span></label>
+              <input type="text" id="rule-display" placeholder="LVMPD AIR 2" aria-describedby="rule-display-hint">
+              <p class="hint" id="rule-display-hint">Shown on the display; the real type is still logged</p>
+            </div>
+            <div class="field">
+              <label for="rule-plane">Type override <span class="label-note">optional</span></label>
+              <input type="text" id="rule-plane" placeholder="AIRBUS A220-300" aria-describedby="rule-plane-hint">
+              <p class="hint" id="rule-plane-hint">Leave blank to let the APIs fill it in</p>
+            </div>
+            <div class="field">
+              <label for="rule-note">Note <span class="label-note">optional</span></label>
+              <input type="text" id="rule-note" placeholder="Janet Airlines, classified destination">
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">{{ ico('plus') }}Add rule</button>
+          </div>
+        </form>
+      </article>
     </div>
+  </section>
 
-  </div>
-</div>
-
-<!-- RULES TAB -->
-<div class="tab-content" id="rules-tab">
-  <div class="rules-scroll">
-
-    <!-- Test Flight section -->
-    <div class="section">
-      <div class="section-header">🧪 Test Flight Lookup</div>
-      <div style="padding:14px 18px 12px">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.7">
-          Enter any callsign or tail number to run a full live lookup — same API pipeline as a real overhead flight.
-          The same trust rules as a live flight apply, including the LOCAL_AIRPORTS filter.
-          Logs are prefixed <code style="color:#22d3ee">[TEST:]</code> and the flight shows on the matrix for 30 seconds.<br>
-          <strong style="color:var(--text)">Use cached data</strong> checked: calls the real <code>get_route()</code> / <code>get_aircraft_type()</code> — exact same code path including cache reads. Unchecked: skips cache, hits every API fresh.
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <input type="text" id="test-callsign"
-                 placeholder="e.g. MXY527  SWA1234  N530JL  AAL123"
-                 style="flex:1;min-width:200px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:7px 11px;border-radius:6px;font-size:13px;font-family:'SFMono-Regular',monospace;text-transform:uppercase;outline:none;transition:border-color .15s"
-                 maxlength="20" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor=''"
-                 onkeydown="if(event.key==='Enter')runTestFlight()">
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none">
-            <input type="checkbox" id="test-use-cache" checked style="cursor:pointer;accent-color:var(--accent)">
-            Use cached data
-          </label>
-          <button class="btn btn-primary" id="test-run-btn" onclick="runTestFlight()" style="white-space:nowrap;min-width:100px">▶ Run Test</button>
-          <button class="btn btn-secondary" id="test-clear-btn" onclick="clearTestDisplay()" style="display:none;white-space:nowrap">✕ Clear Display</button>
-          <button class="btn btn-secondary" id="test-reset-btn" onclick="resetTestFlight()" style="display:none;white-space:nowrap">↺ Reset</button>
-        </div>
-      </div>
-      <div id="test-result" style="display:none;border-top:1px solid var(--border)"></div>
+  <!-- ═════════════════════════════ LOG ═════════════════════════════ -->
+  <section class="panel panel-full" id="log-tab" data-panel="log" aria-label="Live log" hidden>
+    <div class="log-toolbar">
+      <span class="chip" id="log-status" data-state="offline"><span class="chip-dot" aria-hidden="true"></span><span id="log-status-text">Offline</span></span>
+      <label class="sr-only" for="log-filter">Filter log lines</label>
+      <input type="search" id="log-filter" class="log-filter" placeholder="Filter" autocomplete="off" spellcheck="false" data-input="log-filter">
+      <label class="switch-field switch-sm">
+        <input type="checkbox" role="switch" id="autoscroll" checked>
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span>Auto-scroll</span>
+      </label>
+      <span class="log-stats" id="log-stats">0 lines</span>
+      <button type="button" class="btn btn-ghost btn-sm" data-action="log-clear">{{ ico('trash') }}Clear</button>
     </div>
+    <div id="log-output" role="log" aria-label="Log output" tabindex="0"></div>
+  </section>
 
-    <div class="section">
-      <div class="section-header">
-        Override Rules
-        <span id="rules-count" style="margin-left:8px;font-size:11px;background:rgba(88,166,255,.12);color:var(--accent);padding:2px 8px;border-radius:10px;font-weight:600"></span>
-      </div>
-      <div id="rules-table-wrap">
-        <div class="rules-empty">Loading…</div>
-      </div>
-      <div class="rules-hint">
-        <strong style="color:var(--text)">How it works:</strong> When a flight's callsign or tail number matches a rule, all API lookups are skipped and the defined origin/destination is used directly — saving your AirLabs and FlightAware quota.<br>
-        <strong style="color:var(--text)">Wildcards:</strong> Use <code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--accent)">*</code> to match any characters.
-        &nbsp;<code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--accent)">JANET*</code> matches JANET42, JANET99, etc.
-        &nbsp;<code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--accent)">N9*WY</code> matches N911WY, N9WY, etc.<br>
-        <strong style="color:var(--text)">Tip:</strong> Leave origin or destination blank if unknown — the display will show <code style="background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--muted)">?</code>.
-      </div>
-    </div>
+</main>
 
-    <div class="section">
-      <div class="section-header">Add Rule</div>
-      <div class="field-grid">
-        <div class="field">
-          <label>Pattern <span style="color:var(--red)">*</span></label>
-          <input type="text" id="rule-pattern" placeholder="JANET* or N911WY" style="text-transform:uppercase">
-          <div class="hint">Callsign or tail number — * matches anything</div>
-        </div>
-        <div class="field">
-          <label>Origin <span style="color:var(--muted)">(optional)</span></label>
-          <input type="text" id="rule-origin" placeholder="LAS" maxlength="4" style="text-transform:uppercase">
-          <div class="hint">Departure airport IATA code</div>
-        </div>
-        <div class="field">
-          <label>Destination <span style="color:var(--muted)">(optional)</span></label>
-          <input type="text" id="rule-dest" placeholder="—" maxlength="4" style="text-transform:uppercase">
-          <div class="hint">Arrival airport IATA code</div>
-        </div>
-        <div class="field">
-          <label>Display Name <span style="color:var(--muted)">(optional)</span></label>
-          <input type="text" id="rule-display" placeholder="LVMPD AIR 2">
-          <div class="hint">Label shown on the flight display — real aircraft type still logged in stats</div>
-        </div>
-        <div class="field">
-          <label>Type Override <span style="color:var(--muted)">(optional)</span></label>
-          <input type="text" id="rule-plane" placeholder="AIRBUS A220-300">
-          <div class="hint">Overrides the stored aircraft type — leave blank to let APIs fill it in</div>
-        </div>
-        <div class="field">
-          <label>Note <span style="color:var(--muted)">(optional)</span></label>
-          <input type="text" id="rule-note" placeholder="Janet Airlines — classified destination">
-        </div>
-      </div>
-      <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px">
-        <button class="btn btn-primary" onclick="addRule()">+ Add Rule</button>
-        <span id="rules-save-status" class="save-status"></span>
-      </div>
-    </div>
-
-  </div>
-</div>
-
-<!-- LOG TAB -->
-<div class="tab-content" id="log-tab">
-  <div class="log-toolbar">
-    <span class="chip green" id="log-status">● LIVE</span>
-    <label class="toggle-small">
-      <label class="toggle" style="width:32px;height:18px"><input type="checkbox" id="autoscroll" checked><span class="toggle-slider"></span></label>
-      Auto-scroll
-    </label>
-    <button class="btn btn-secondary" style="padding:4px 12px;font-size:11px" onclick="clearLog()">Clear</button>
-    <span class="log-stats" id="log-stats">0 lines</span>
-  </div>
-  <div id="log-output"></div>
-</div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

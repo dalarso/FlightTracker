@@ -33,7 +33,12 @@ def _get_session() -> requests.Session:
     return _session
 
 
-# ── ESPN status name → normalised game state ───────────────────────────────────
+# ── ESPN status → normalised game state ────────────────────────────────────────
+# Status NAMES that need an explicit mapping.  Anything not listed is classified by the
+# provider-neutral status.type.state ("pre" | "in" | "post") + completed flag (_classify), so a
+# name we've never seen can't silently fall through to "FUT" and hide the game — the 2026 World
+# Cup final came back as STATUS_FINAL_AET, which the old name-only table didn't know, and live
+# soccer reports per-half names rather than STATUS_IN_PROGRESS.
 _STATE_MAP: dict[str, str] = {
     "STATUS_SCHEDULED":        "FUT",
     "STATUS_IN_PROGRESS":      "LIVE",
@@ -43,10 +48,15 @@ _STATE_MAP: dict[str, str] = {
     "STATUS_FINAL":            "FINAL",
     "STATUS_FULL_TIME":        "FINAL",
     "STATUS_FINAL_OVERTIME":   "FINAL",
+    "STATUS_FINAL_AET":        "FINAL",
     "STATUS_FINAL_PEN":        "FINAL",
-    "STATUS_POSTPONED":        "OFF",
-    "STATUS_CANCELED":         "OFF",
-    "STATUS_SUSPENDED":        "OFF",
+    # Not going to be played (today): "PPD" is in neither the LIVE nor the FINAL tier, so the
+    # board never shows it.  These used to map to "OFF" — which the scoreboard treats as a
+    # finished game, so a postponement painted a phantom "FINAL 0-0" for the post-game window.
+    "STATUS_POSTPONED":        "PPD",
+    "STATUS_CANCELED":         "PPD",
+    "STATUS_SUSPENDED":        "PPD",
+    "STATUS_ABANDONED":        "PPD",
     "STATUS_RAIN_DELAY":       "PRE",   # game suspended — not actively in progress
 }
 
@@ -54,7 +64,27 @@ _INTERMISSION_STATUSES: frozenset[str] = frozenset({
     "STATUS_HALFTIME",
     "STATUS_END_PERIOD",
     "STATUS_END_OF_EXTRATIME",
+    "STATUS_END_OF_REGULATION",
 })
+
+# Soccer statuses with their own final/period wording ("FINAL AET", "FINAL PEN").
+_SOCCER_AET = "STATUS_FINAL_AET"
+_SOCCER_PEN = frozenset({"STATUS_FINAL_PEN", "STATUS_SHOOTOUT"})
+
+
+def _classify(stype: dict) -> str:
+    """Normalised state for an ESPN status.type: explicit name first, else the pre/in/post phase."""
+    name = stype.get("name") or ""
+    if name in _STATE_MAP:
+        return _STATE_MAP[name]
+    phase = stype.get("state")
+    if phase == "in":
+        return "LIVE"
+    if phase == "post":
+        # "post" without completed=True is a game that ended without a result (abandoned,
+        # forfeited-pending, …) — keep it off the board rather than show a misleading FINAL.
+        return "FINAL" if stype.get("completed") else "PPD"
+    return "FUT"
 
 
 # ── Per-sport period label builders ───────────────────────────────────────────
@@ -78,11 +108,15 @@ def _label_nba(period: int, status: str) -> str:
     elif period == 5:
         base = "OT"
     else:
-        base = f"OT{period - 4}"
+        base = f"{period - 4}OT"     # "2OT", "3OT" — same style as the NHL board and ESPN's own
     return f"{base} END" if status == "STATUS_END_PERIOD" else base
 
 
 def _label_mls(period: int, status: str) -> str:
+    if status == _SOCCER_AET:
+        return "AET"                 # → "FINAL AET"
+    if status in _SOCCER_PEN:
+        return "PEN"                 # live shootout / "FINAL PEN"
     if status in _INTERMISSION_STATUSES:
         return "HLF"
     return {1: "1st", 2: "2nd"}.get(period, "ET")
@@ -95,6 +129,16 @@ _PERIOD_LABEL_FN: dict = {
     "soccer/usa.1":    _label_mls,   # _label_mls is a generic soccer labeler (1st/2nd/HLF/ET)
     "soccer/fifa.world": _label_mls,  # FIFA World Cup — same period labels as any soccer match
 }
+
+# Regulation periods per sport (anything past this is overtime / extra time).  Soccer has two
+# halves, so its extra time (periods 3-4) is "OT"; the generic 4 suits football/basketball.
+_REG_PERIODS: dict = {"soccer/usa.1": 2, "soccer/fifa.world": 2}
+
+
+def _period_type(sport_path: str, period: int, status: str) -> str:
+    if status in _SOCCER_PEN:
+        return "SO"                  # decided on penalties
+    return "REG" if period <= _REG_PERIODS.get(sport_path, 4) else "OT"
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -151,24 +195,30 @@ def fetch_espn_game(sport_path: str, team_id: int, tz: ZoneInfo = None) -> dict 
             stype     = status.get("type", {})
             sname     = stype.get("name", "STATUS_SCHEDULED")
             period    = int(status.get("period") or 0)
-            state     = _STATE_MAP.get(sname, "FUT")
+            state     = _classify(stype)
             in_int    = sname in _INTERMISSION_STATUSES
             team_home = team_c.get("homeAway") == "home"
 
-            return {
+            game = {
                 "state":           state,
                 "team_score":      int(team_c.get("score") or 0),
                 "opp_score":       int(opp_c.get("score") or 0),
                 "opp_abbr":        opp_c.get("team", {}).get("abbreviation", "???"),
                 "team_home":       team_home,
                 "period":          period,
-                "period_type":     "REG" if period <= 4 else "OT",
+                "period_type":     _period_type(sport_path, period, sname),
                 "period_label":    label_fn(period, sname),
                 "time_remaining":  status.get("displayClock", ""),
                 "in_intermission": in_int,
                 "start_time_utc":  event.get("date", ""),
                 "game_id":         int(event.get("id") or 0),
             }
+            # ESPN flags the winner on a finished game.  Carry it so a penalty-shootout win
+            # (level score, e.g. 1-1 → won 4-3 on pens) still counts as a WIN; the scene
+            # falls back to comparing scores when the flag is absent.
+            if state == "FINAL" and "winner" in team_c:
+                game["team_won"] = bool(team_c.get("winner"))
+            return game
 
         return None
 
