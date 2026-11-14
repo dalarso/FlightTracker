@@ -10,4 +10,4 @@
 #   python -m unittest discover -s tests      # stdlib runner
 #   pytest                                    # picks up pytest.ini (testpaths = tests)
 -r requirements.txt
-pytest>=8.0
+pytest>=9.0

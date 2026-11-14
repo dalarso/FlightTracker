@@ -71,7 +71,9 @@ _HARNESS = textwrap.dedent(r"""
         removeChild(c){ const i=children.indexOf(c); if(i>=0) children.splice(i,1); el.firstChild = children[0]||null; return c; },
         querySelector(){ return null; }, querySelectorAll(){ return []; },
         addEventListener(){}, remove(){}, setLatLng(){}, bindTooltip(){ return el; },
-        getAttribute(){ return ''; }, isConnected: true,
+        attrs: {},
+        getAttribute(k){ return k in el.attrs ? el.attrs[k] : ''; },
+        setAttribute(k, v){ el.attrs[k] = String(v); }, isConnected: true,
       };
       return el;
     }
@@ -299,6 +301,50 @@ _HARNESS = textwrap.dedent(r"""
       },
     };
 
+    // 2026-11 review: the "On the board now" line reads like the LED board.
+    scenarios.scoreboardLineOrientation = async () => {
+      const game = { state:'LIVE', team_score:2, opp_score:1, opp_abbr:'NSH', game_id:7,
+                     period_label:'2nd', time_remaining:'04:10', in_intermission:false };
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK',
+                             game:{ ...game, team_home:true } });
+      let txt = getEl('sb-live-text').textContent;
+      assert(txt === 'NSH 1–2 VGK · 2nd 4:10', 'home game: away first + clock, got ' + txt);
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK',
+                             game:{ ...game, team_home:false } });
+      txt = getEl('sb-live-text').textContent;
+      assert(txt === 'VGK 2–1 NSH · 2nd 4:10', 'road game: team first, got ' + txt);
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK',
+                             game:{ ...game, team_home:true, period_label:'2nd INT', in_intermission:true } });
+      txt = getEl('sb-live-text').textContent;
+      assert(txt.endsWith('· 2nd INT'), 'no clock in an intermission, got ' + txt);
+    };
+
+    scenarios.scoreboardOnBoardWindow = async () => {
+      const fin = { state:'FINAL', team_score:5, opp_score:3, opp_abbr:'UTA', game_id:9, team_home:true };
+      sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK', game:fin });
+      assert(getEl('sb-live-field').style.display === '', 'final inside the window is shown');
+      sandbox.renderSbLive({ enabled:true, on_board:false, team_name:'VGK', game:fin });
+      assert(getEl('sb-live-field').style.display === 'none', 'final past the window must hide');
+      // An older server (no on_board key) falls back to the state check.
+      sandbox.renderSbLive({ enabled:true, team_name:'VGK', game:fin });
+      assert(getEl('sb-live-field').style.display === '', 'fallback shows a FINAL');
+    };
+
+    scenarios.headerSwitchAria = async () => {
+      sandbox.updateNightBtn(true);
+      assert(getEl('night-toggle').getAttribute('aria-checked') === 'true', 'night on → aria-checked true');
+      sandbox.updateDisplayBtn(false);
+      assert(getEl('display-toggle').getAttribute('aria-checked') === 'false', 'display off → aria-checked false');
+      // Enter on a focused switch activates it (keyboard access).
+      let clicked = 0;
+      const sw = getEl('apis-toggle');
+      sw.classList.add('display-toggle');
+      sw.closest = sel => (sel.startsWith('.display-toggle') ? sw : null);
+      sw.click = () => { clicked++; };
+      (documentStub._listeners.keydown || []).forEach(fn => fn({ target: sw, key: 'Enter', preventDefault(){} }));
+      assert(clicked === 1, 'Enter must activate the focused switch');
+    };
+
     (async () => {
       const fn = scenarios[SCENARIO];
       if (!fn) throw new Error('unknown scenario ' + SCENARIO);
@@ -353,6 +399,18 @@ class FrontendAppJs(unittest.TestCase):
     def test_check_initial_status_exhausted_retry(self):
         # Finding 6: exhausted retries must not reveal default-state toggles; must re-poll.
         self._assert_scenario("checkInitialStatusExhausted")
+
+    def test_scoreboard_line_away_home_and_clock(self):
+        # 2026-11: away first / home second like the LED board, plus the game clock.
+        self._assert_scenario("scoreboardLineOrientation")
+
+    def test_scoreboard_line_follows_post_game_window(self):
+        # 2026-11: a FINAL leaves "On the board now" when on_board says the board dropped it.
+        self._assert_scenario("scoreboardOnBoardWindow")
+
+    def test_header_switches_are_keyboard_accessible(self):
+        # 2026-11: role="switch" toggles keep aria-checked in sync and respond to Enter.
+        self._assert_scenario("headerSwitchAria")
 
 
 if __name__ == "__main__":

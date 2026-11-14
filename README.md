@@ -152,8 +152,10 @@ When no aircraft is overhead, the panel can show a **live sports scoreboard** in
 
 - **Free data sources, no keys** — NHL (`api-web.nhle.com`), MLB (`statsapi.mlb.com`), and NFL / NBA / WNBA / MLS / **FIFA World Cup** (ESPN's public API — e.g. `basketball/wnba`, `soccer/fifa.world`; follow any team or nation).
 - **Priority** — if several configured teams are live at once, `SCOREBOARD_PRIORITY` decides which is shown; a LIVE game always beats a finished one. The LED scene and the web `/api/scoreboard` endpoint pick the game through one shared selector, so they can't disagree.
-- **Celebrations** — a full-screen scroll on a goal/score, and a one-shot "{TEAM} WINS!" at the final. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board — for your NHL team only (other sports celebrate on the panel but never sound the horn).
-- **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume.
+- **Standard layout** — away team on the left, home team on the right (as on any broadcast scoreboard), with your team highlighted in gold on whichever side it plays. The bottom line shows the period plus the game clock while play is live (`2nd 14:32`, `Q4 0:45`, `2nd 67'`), the period alone during breaks, and `FINAL` / `FINAL OT` / `FINAL 2OT` / `FINAL SO` / `FINAL AET` / `FINAL PEN` / `F/10` at the end. The web UI's "On the board now" line and the desktop goal-horn app use the same away-left / home-right order.
+- **Celebrations** — a full-screen scroll on a goal/score (`SCOREBOARD_GOAL_CELEBRATION_SECONDS`), and a one-shot "{TEAM} WINS!" at the final (`SCOREBOARD_WIN_CELEBRATION_SECONDS`; both editable in the web UI, 0 = off). A plane overhead still wins — the scroll pauses and resumes after it. Optionally fires a fire-and-forget **LAN goal-horn** UDP packet (`SCOREBOARD_GOAL_HORN_HOST`) to a desktop listener that plays a horn in sync with the board — for your NHL team only (other sports celebrate on the panel but never sound the horn).
+- **Final at the horn** — the NHL API reports a "soft final" (`OVER`) for a few minutes before `FINAL`; it is treated as final, so the score and WIN celebration appear at the horn instead of after a detour back to the idle screens. Postponed / cancelled / suspended games (and MLB warmups) never take over the board.
+- **Post-game** — stays up for `SCOREBOARD_POST_GAME_MINUTES` after the final, then idle scenes resume. The web UI follows the same window (`on_board` in `/api/scoreboard`).
 
 Enable with `SCOREBOARD_ENABLED = True` and set each sport's team ID/name — see the config block below.
 
@@ -254,7 +256,7 @@ Two flag-file controls let you manage the display without restarting the service
 | `/tmp/ft_paused` | Blanks the matrix (brightness → 0) while the file exists |
 | `/tmp/ft_night` | Drops brightness to `NIGHT_BRIGHTNESS` while the file exists |
 
-The web UI's Display tab has toggle buttons for both. Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
+The web UI header has Display and Night toggle switches for both (keyboard-accessible: Tab to one, Enter or Space flips it). Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
 
 ---
 

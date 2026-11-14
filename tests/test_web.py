@@ -438,6 +438,16 @@ class ConfigWriteRoundTrip(unittest.TestCase):
         self.assertEqual(cfg["SCOREBOARD_POST_GAME_MINUTES"], 0)            # int0: 0 survives
         self.assertEqual(cfg["SCOREBOARD_GOAL_CELEBRATION_SECONDS"], 0)     # int0: 0 survives
 
+    def test_win_celebration_seconds_managed(self):
+        # New UI field (2026-11): absent → the 180 s default the display already used; a set
+        # value (incl. 0 = WIN scroll off) round-trips.
+        self._write()
+        self.assertEqual(self.srv.read_config()["SCOREBOARD_WIN_CELEBRATION_SECONDS"], 180)
+        self._write(SCOREBOARD_WIN_CELEBRATION_SECONDS=0)
+        self.assertEqual(self.srv.read_config()["SCOREBOARD_WIN_CELEBRATION_SECONDS"], 0)
+        self._write(SCOREBOARD_WIN_CELEBRATION_SECONDS=90)
+        self.assertEqual(self.srv.read_config()["SCOREBOARD_WIN_CELEBRATION_SECONDS"], 90)
+
     def test_zero_feeder_credit_preserved(self):
         # A real 0.0 feeder credit (e.g. a non-feeding user) must round-trip to 0.0, not
         # silently coerce to the 10.0 default — the float0 kind preserves a meaningful 0.0.

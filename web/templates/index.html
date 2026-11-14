@@ -8,8 +8,12 @@
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=swap">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- Leaflet 1.9.4 is still the newest stable release (2.0 is in beta). Pinned with Subresource
+     Integrity so a tampered CDN copy is refused instead of run on the LAN dashboard. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
@@ -25,19 +29,19 @@
     <button onclick="showTab('rules',this)">✏️ Rules</button>
     <button onclick="showTab('log',this)">📋 Log</button>
     <div class="nav-sep"></div>
-    <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Dim/undim LED display (service keeps running)" style="display:none">
+    <div class="display-toggle" id="display-toggle" onclick="toggleDisplay()" title="Dim/undim LED display (service keeps running)" role="switch" tabindex="0" aria-checked="true" style="display:none">
       <div class="dot"></div>
       <span id="display-label">Display On</span>
     </div>
-    <div class="display-toggle off" id="night-toggle" onclick="toggleNight()" title="Dim display to night brightness without turning it off" style="display:none">
+    <div class="display-toggle off" id="night-toggle" onclick="toggleNight()" title="Dim display to night brightness without turning it off" role="switch" tabindex="0" aria-checked="false" style="display:none">
       <div class="dot"></div>
       <span id="night-label">Night Off</span>
     </div>
-    <div class="display-toggle" id="service-toggle" onclick="toggleService()" title="Stop/start FlightTracker service (stops API polling)" style="display:none">
+    <div class="display-toggle" id="service-toggle" onclick="toggleService()" title="Stop/start FlightTracker service (stops API polling)" role="switch" tabindex="0" aria-checked="true" style="display:none">
       <div class="dot"></div>
       <span id="service-label">Service On</span>
     </div>
-    <div class="display-toggle" id="apis-toggle" onclick="toggleAPIs()" title="Enable/disable limited APIs: AirLabs + FlightAware (falls back to OpenSky + adsbdb)" style="display:none">
+    <div class="display-toggle" id="apis-toggle" onclick="toggleAPIs()" title="Enable/disable limited APIs: AirLabs + FlightAware (falls back to OpenSky + adsbdb)" role="switch" tabindex="0" aria-checked="true" style="display:none">
       <div class="dot"></div>
       <span id="apis-label">APIs On</span>
     </div>
@@ -267,7 +271,11 @@
         </div>
         <div class="field"><label>Score Celebration <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
           <input type="number" min="0" max="120" id="scoreboard_goal_celebration_seconds">
-          <div class="hint">Score celebration animation duration — flights suppressed during this window</div>
+          <div class="hint">How long the "GOAL!" / "SCORE!" scroll runs (0 = off). A flight overhead still takes priority — the scroll pauses and resumes after it.</div>
+        </div>
+        <div class="field"><label>Win Celebration <span style="font-size:10px;color:var(--muted)">(seconds)</span></label>
+          <input type="number" min="0" max="600" id="scoreboard_win_celebration_seconds">
+          <div class="hint">How long "{team} WINS!" scrolls at the final horn (0 = off). Default 180.</div>
         </div>
 
         </div><!-- /.field-grid inner -->

@@ -122,11 +122,23 @@ async function checkDisplayStatus() {
   } catch(e) {}
 }
 
+// Header toggles are <div role="switch" tabindex="0">: keep aria-checked in step with the
+// visual state, and let Enter / Space activate them like a real button for keyboard users.
+function _setSwitch(el, on) { el.setAttribute('aria-checked', on ? 'true' : 'false'); }
+
+document.addEventListener('keydown', e => {
+  const sw = e.target && e.target.closest && e.target.closest('.display-toggle[role="switch"]');
+  if (!sw || (e.key !== 'Enter' && e.key !== ' ')) return;
+  e.preventDefault();
+  if (!sw.classList.contains('disabled')) sw.click();
+});
+
 function updateDisplayBtn(on) {
   displayOn = on;
   const el = document.getElementById('display-toggle');
   const lbl = document.getElementById('display-label');
   el.classList.toggle('off', !on);
+  _setSwitch(el, on);
   lbl.textContent = on ? 'Display On' : 'Display Off';
 }
 
@@ -150,6 +162,7 @@ function updateServiceBtn(running) {
   const el = document.getElementById('service-toggle');
   const lbl = document.getElementById('service-label');
   el.classList.toggle('off', !running);
+  _setSwitch(el, running);
   lbl.textContent = running ? 'Service On' : 'Service Off';
   // Grey out display/night/FA toggles when service is not running
   document.getElementById('display-toggle').classList.toggle('disabled', !running);
@@ -192,6 +205,7 @@ function updateAPIsBtn(enabled) {
   const el = document.getElementById('apis-toggle');
   const lbl = document.getElementById('apis-label');
   el.classList.toggle('off', !enabled);
+  _setSwitch(el, enabled);
   lbl.textContent = enabled ? 'APIs On' : 'APIs Off';
 }
 
@@ -215,6 +229,7 @@ function updateNightBtn(active) {
   const el = document.getElementById('night-toggle');
   const lbl = document.getElementById('night-label');
   el.classList.toggle('off', !active);
+  _setSwitch(el, active);
   lbl.textContent = active ? 'Night On' : 'Night Off';
 }
 
@@ -245,7 +260,13 @@ function _sbStatusLabel(g) {
     if (pt === 'OT' || pt === 'SO') return 'Final ' + (g.period_label || pt); // OT/SO final
     return 'Final';
   }
-  return g.period_label || 'Live';
+  // Live: period + game clock, like the LED board ("2nd 14:32"); no clock in an
+  // intermission / period break or when it's stopped at zero.
+  const label = g.period_label || 'Live';
+  let clock = String(g.time_remaining || '').trim();
+  if (/^0\d:\d\d$/.test(clock)) clock = clock.slice(1);
+  if (!clock || g.in_intermission || clock.replace(/[0:.]/g, '') === '') return label;
+  return `${label} ${clock}`;
 }
 
 function renderSbLive(d) {
@@ -483,6 +504,7 @@ function populateForm() {
   });
   document.getElementById('scoreboard_post_game_minutes').value = config.SCOREBOARD_POST_GAME_MINUTES ?? 30;
   document.getElementById('scoreboard_goal_celebration_seconds').value = config.SCOREBOARD_GOAL_CELEBRATION_SECONDS ?? 30;
+  document.getElementById('scoreboard_win_celebration_seconds').value = config.SCOREBOARD_WIN_CELEBRATION_SECONDS ?? 180;
   document.getElementById('receiver_host').value = config.RECEIVER_HOST || '';
   document.getElementById('receiver_type').value = config.RECEIVER_TYPE || 'dump1090';
   document.getElementById('poll_interval').value = config.POLL_INTERVAL ?? 15;
@@ -559,8 +581,11 @@ function buildConfigPayload() {
     SCOREBOARD_FIFA_ENABLED:  document.getElementById('sb_fifa_enabled').checked,
     SCOREBOARD_FIFA_TEAM_ID:  parseInt(document.getElementById('sb_fifa_team_id').value)  || 0,
     SCOREBOARD_FIFA_TEAM_NAME: (document.getElementById('sb_fifa_team_name').value || '').toUpperCase().slice(0, 4),
-    SCOREBOARD_POST_GAME_MINUTES: parseInt(document.getElementById('scoreboard_post_game_minutes').value) || 30,
-    SCOREBOARD_GOAL_CELEBRATION_SECONDS: parseInt(document.getElementById('scoreboard_goal_celebration_seconds').value) || 30,
+    // `|| 30` used to turn a deliberate 0 ("hide immediately", per the field's hint) into 30.
+    SCOREBOARD_POST_GAME_MINUTES: (v => isNaN(v) || v < 0 ? 30 : v)(parseInt(document.getElementById('scoreboard_post_game_minutes').value)),
+    // 0 is meaningful for both (= celebration off), so only an empty/invalid field falls back.
+    SCOREBOARD_GOAL_CELEBRATION_SECONDS: (v => isNaN(v) || v < 0 ? 30 : v)(parseInt(document.getElementById('scoreboard_goal_celebration_seconds').value)),
+    SCOREBOARD_WIN_CELEBRATION_SECONDS:  (v => isNaN(v) || v < 0 ? 180 : v)(parseInt(document.getElementById('scoreboard_win_celebration_seconds').value)),
     TIMEZONE: document.getElementById('timezone').value.trim(),
     RECEIVER_HOST: document.getElementById('receiver_host').value.trim(),
     RECEIVER_TYPE: document.getElementById('receiver_type').value,
@@ -647,8 +672,12 @@ function initMap() {
     return;
   }
   map = L.map('map').setView([config.LOCATION_HOME[0], config.LOCATION_HOME[1]], 13);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap', maxZoom: 18
+  // OSM retired the a/b/c "{s}." tile subdomains — tile.openstreetmap.org is the supported host
+  // (HTTP/2 makes domain sharding pointless).  Attribution links to the copyright page, as the
+  // OSM tile usage policy asks.
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxZoom: 19
   }).addTo(map);
 
   const z = config.ZONE_HOME;

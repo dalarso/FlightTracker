@@ -400,6 +400,28 @@ def _team_won(game: dict) -> bool:
     return game.get("team_score", 0) > game.get("opp_score", 0)
 
 
+_STATUS_MAX_CHARS = 64 // 6   # the 6×12 status font fits 10 chars across the 64 px panel
+
+
+def _live_status(game: dict) -> str:
+    """Status line for a LIVE/CRIT game: the period plus the game clock when there is one —
+    "2nd 14:32", "OT 3:12", "Q4 0:45", "2nd 67'".  Falls back to the bare period label in an
+    intermission / at a period break (the label already says "1st INT", "HALF", "Q2 END"),
+    when the clock is stopped at zero (period over, shootout), for clockless sports (MLB),
+    or when the combined text wouldn't fit the panel.  The clock refreshes with the 10 s live
+    poll, so it steps rather than ticks — the period alone used to be all the board showed."""
+    label = game.get("period_label", "") or ""
+    clock = str(game.get("time_remaining") or "").strip()
+    if not clock or game.get("in_intermission"):
+        return label
+    if len(clock) == 5 and clock[0] == "0" and clock[2] == ":":
+        clock = clock[1:]                       # NHL "04:10" → "4:10"
+    if clock.strip("0:.") == "":
+        return label                            # "00:00" / "0:00" / "0.0" — nothing to add
+    text = f"{label} {clock}" if label else clock
+    return text if len(text) <= _STATUS_MAX_CHARS else label
+
+
 def _final_status(game: dict) -> str:
     """Status line for a FINAL/OFF game: "FINAL", "FINAL OT", "FINAL 2OT", "FINAL SO",
     "FINAL AET", "FINAL PEN", or MLB's extra-inning "F/10".
@@ -599,7 +621,7 @@ class SportScoreScene(object):
         graphics.DrawText(self.canvas, font,      _score_x(left[1],  True,  char_px), _SCORE_Y, left[3],      left[1])
         graphics.DrawText(self.canvas, _SEP_FONT, _SEP_X,                             _SCORE_Y, colours.GREY, "-")
         graphics.DrawText(self.canvas, font,      _score_x(right[1], False, char_px), _SCORE_Y, right[3],     right[1])
-        status = game.get("period_label", "") if live else _final_status(game)
+        status = _live_status(game) if live else _final_status(game)
         graphics.DrawText(self.canvas, _ABBR_FONT, _center_x(status), _STATUS_Y, colours.GREY, status)
 
     def _reset_sport_draws(self) -> None:
@@ -950,6 +972,7 @@ class SportScoreScene(object):
             game.get("period_type", ""),
             game.get("period_label", ""),   # needed: NFL/NBA "Q2 END"→"HALF" share same period+in_int
             game.get("in_intermission", False),
+            _live_status(game) if state in ("LIVE", "CRIT") else "",   # game clock on the status line
         )
 
         slot_changed = (active_slot is not self._active_slot)

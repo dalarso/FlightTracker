@@ -1,12 +1,15 @@
-flask>=3.0
-waitress>=3.0
-certifi==2025.7.9
-charset-normalizer==3.4.2
-idna==3.10
-requests==2.32.4
+flask>=3.1.3
+waitress>=3.0.2
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20
+requests==2.34.2
 # FlightRadar24 unofficial API — GA (N-number) + commercial route fallback in overhead.py
 # (imported behind try/except; absent → those route sources silently disabled).
-FlightRadarAPI>=1.3.34
+# >=1.7.0: 1.5.2 added the degraded-backend retry (a session pinned to a bad FR24 backend
+# used to return zero flights for its whole lifetime); 1.6.0 dropped the old FlightRadar24
+# import alias (we import FlightRadarAPI).  Only get_flights(registration=…) is used.
+FlightRadarAPI>=1.7.0
 RPi.GPIO==0.7.1
-typing_extensions==4.14.1
-urllib3==2.5.0
+typing_extensions==4.16.0
+urllib3==2.8.0

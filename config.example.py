@@ -58,9 +58,10 @@ LOADING_LED_GPIO_PIN = 25   # BCM pin number
 RAINFALL_ENABLED = False
 
 # ── Scoreboard display ────────────────────────────────────────────────────────
-# When any configured team has a game today the idle display is replaced with
-# a live scoreboard. Flights always take priority. When your team scores, a
-# full-screen celebration scrolls for SCOREBOARD_GOAL_CELEBRATION_SECONDS.
+# When any configured team's game is live the idle display is replaced with a
+# live scoreboard (away team left, home team right; your team in gold). Flights
+# always take priority. When your team scores, a full-screen celebration
+# scrolls for SCOREBOARD_GOAL_CELEBRATION_SECONDS.
 # If multiple sports are live simultaneously, the first in SCOREBOARD_PRIORITY
 # wins the display.
 #
@@ -77,10 +78,12 @@ SCOREBOARD_ENABLED = False   # master switch — set True to activate
 # How long to keep showing the final score after the game ends (minutes)
 SCOREBOARD_POST_GAME_MINUTES = 30
 
-# Duration of the score celebration animation (seconds; flights suppressed)
+# Duration of the score celebration animation (seconds; 0 = off).  A flight
+# overhead still wins — the scroll pauses while it's up.
 SCOREBOARD_GOAL_CELEBRATION_SECONDS = 30
 
-# Duration of the WIN celebration ("{team} WINS!") shown when a game goes final (seconds)
+# Duration of the WIN celebration ("{team} WINS!") shown when a game goes final
+# (seconds; 0 = off).  Editable in the web UI.
 SCOREBOARD_WIN_CELEBRATION_SECONDS = 180
 
 # Priority order — when multiple sports are live, the first entry wins

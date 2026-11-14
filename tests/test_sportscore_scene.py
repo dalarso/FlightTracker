@@ -918,6 +918,31 @@ class HomeAwayLayout(unittest.TestCase):
         abbr = self._row(self._draw(g), sportscore._ABBR_Y)
         self.assertEqual(abbr[0][3], "VGK")
 
+    def test_live_status_shows_game_clock(self):
+        ls = sportscore._live_status
+        self.assertEqual(ls({"period_label": "2nd", "time_remaining": "14:32"}), "2nd 14:32")
+        self.assertEqual(ls({"period_label": "3rd", "time_remaining": "04:10"}), "3rd 4:10")
+        self.assertEqual(ls({"period_label": "Q4", "time_remaining": "0:45.3"}), "Q4 0:45.3")
+        self.assertEqual(ls({"period_label": "2nd", "time_remaining": "90'+3'"}), "2nd 90'+3'")
+        # No clock: intermission / break, stopped at zero, clockless sport, or too wide.
+        self.assertEqual(ls({"period_label": "1st INT", "time_remaining": "12:41",
+                             "in_intermission": True}), "1st INT")
+        self.assertEqual(ls({"period_label": "SO", "time_remaining": "00:00"}), "SO")
+        self.assertEqual(ls({"period_label": "BOT 7", "time_remaining": ""}), "BOT 7")
+        self.assertEqual(ls({"period_label": "Q2 END", "time_remaining": "15:00:00"}), "Q2 END")
+
+    def test_clock_change_triggers_a_redraw(self):
+        slot = _make_slot()
+        with _SceneHarness([slot]) as h:
+            h.set_game(slot, dict(_game("LIVE", period_label="2nd"), game_id=5,
+                                  time_remaining="14:32"))
+            h.tick()
+            first = slot["last_draw"]
+            h.set_game(slot, dict(_game("LIVE", period_label="2nd"), game_id=5,
+                                  time_remaining="14:22"))
+            h.tick()
+            self.assertNotEqual(slot["last_draw"], first)
+
     def test_final_status_lines(self):
         fs = sportscore._final_status
         self.assertEqual(fs({"period_label": "3rd", "period_type": "REG"}), "FINAL")
