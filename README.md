@@ -193,7 +193,7 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
 **Trust model (read this):** the dashboard is single-user, **LAN-only, and has no authentication** by design. The header/Origin checks below are **anti-CSRF, not a login** — anyone who can reach `:5000` on your network has full control (toggle night mode, edit config, restart the service). That's an acceptable model for a home LAN behind a router; it is **not** safe to expose to the internet. Harden it for your network:
 
 - **Binds `0.0.0.0:5000`** (reachable from any device on your LAN). Keep the Pi behind your router/firewall — do **not** port-forward `:5000` to the internet.
-- **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The dashboard's 👁 button reveals one key on demand (one request per field).
+- **API keys are masked by default:** `GET /api/config` returns placeholders, not the real keys — they're never auto-loaded into the page. The eye button next to a key reveals that one key on demand (one request per field).
 - **CSRF-guarded, two layers:** every state-changing request must carry an `X-Requested-With: FlightTracker` header (the dashboard sends it automatically), so a malicious page you happen to visit can't drive the dashboard through your browser. In addition, a request whose browser `Origin` resolves to a **non-LAN** host is rejected — this blocks DNS-rebinding (where a public name is rebound to the Pi's LAN IP), which the static header alone can't catch. LAN/loopback/`*.local`/bare-hostname origins (and header-less clients like `curl`) are allowed. **Tailscale is fully supported** for remote access — both the CGNAT IP range (`100.64.0.0/10`) and MagicDNS names (`*.ts.net`) pass, so you can reach the dashboard from anywhere on your tailnet.
 - **Health endpoint:** `GET /api/health` returns a liveness snapshot the display process writes each poll — `last_poll_age_sec`, `processing`, `active_threads`, `cache_write_failures`, `uptime_sec`, and an `ok` flag. Point an uptime monitor at it to catch a wedged poll or a failing SD card (rising `cache_write_failures`) before the panel visibly goes stale.
 - **Production server:** served by [`waitress`](https://pypi.org/project/waitress/) when installed (it's in `requirements.txt`); falls back to the Flask dev server otherwise.
@@ -203,47 +203,34 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
   pi ALL=(root) NOPASSWD: /usr/bin/systemctl start FlightTracker, /usr/bin/systemctl stop FlightTracker, /usr/bin/systemctl restart FlightTracker
   ```
 
-### Live Display Tab
-- Current overhead flights with route, aircraft type, and registration
-- Leaflet map showing the configured zone
-- Manual route test: enter any callsign to run the full resolution stack and see exactly which APIs returned what
+### Layout
+- One responsive page with no build step: tabs across the top on a desktop, a bottom tab bar on a phone, light and dark themes (follows the OS; the sun/moon button overrides it). Icons are an inline SVG sprite, so there are no emoji and no icon font.
+- **Header:** a connection badge (green when the Pi answers, amber when the display self-check in `/api/health` reports a problem, red when the Pi is unreachable) and the Display / Night / Service / APIs switches, inline on wide screens and under the power button on smaller ones. The switches stay disabled until the Pi has reported their real state.
+- The open tab is kept in the URL (`#stats`, `#map`, …) so a reload or a bookmark lands on it. Polling pauses while the page is hidden.
 
-### Stats Tab
-- **Today**: flights seen, unique airlines, API calls used
-- **Top Airlines**: sorted by sighting count, with N-number registrations (private / GA) grouped into a single "N-reg" row
-- **Top Tail #s**: 25 most-seen registrations, each annotated with airline name and aircraft type where known
-- **Recent Flights**: last 20 sightings with origin → destination and aircraft type
-- **Free API Accuracy**: 30-day adsbdb vs. paid API match rate with mismatch history
-- **90-Day Period**: rolling totals with per-day sparklines, filterable by custom date range
+### Settings
+Live editing of `config.py` without SSH, in cards with a section index: zone, altitude filter, home location and timezone, display hardware, weather, scoreboard, receiver, API keys (masked), billing limits and reset days, and cache lifetimes. A sticky save bar shows when the form differs from what's saved, the browser warns before you leave with unsaved edits, and impossible values (an upside-down zone, minimum altitude above maximum) are flagged before anything is sent. **Save & restart display** applies the settings that need a restart. Footer links go to this repo and Colin Waddell's original project.
 
-### API Management Tab
-Stack of all configured APIs showing:
-- Enable/disable toggles (flag files in `/tmp/` — auto-cleared on reboot)
-- Monthly usage with progress bars and billing period dates
-- Manual usage adjustment (correct the counter if a period was mis-counted)
-- Per-API notes explaining trust rules and caching behavior
+### Map
+A Leaflet map (loaded the first time the tab opens, pinned with Subresource Integrity) showing the zone rectangle and home. Drag the corner handles to resize the zone, then **Save zone**.
 
-### Config Tab
-Live editing of `config.py` without SSH:
-- Location and zone settings
-- Timezone (IANA name)
-- API keys (masked by default)
-- Billing limits and reset days for AirLabs and AeroAPI
-- Cache TTL overrides
-- Display options: brightness, night brightness, poll intervals, time/date format
-- Save & Restart button
-- Footer links to this repo and Colin Waddell's original project
+### APIs
+- Usage meters for AirLabs 1, AirLabs 2 and FlightAware AeroAPI with billing periods, plus a manual correction if a period was mis-counted
+- The route data stack in priority order, with per-source enable/disable (flag files in `/tmp/`, cleared on reboot), cache entry counts and per-source cache clearing
+- Clear a single cache entry by tail number or callsign
 
-### Overrides Tab
-Full CRUD for the override rule table:
-- Add/edit/delete/reorder rules
-- Wildcard patterns (e.g. `JANET*`)
-- Per-flight display name (shown on LED), aircraft type, origin, destination, note
-- Changes take effect on the next poll via version-counter cache invalidation
+### Stats
+- **Today:** flights seen, a 14-day sparkline, API calls, and the top airlines (N-number registrations grouped into one "N-reg" row)
+- **Recent flights** with route and tail number, and **history search** by flight number, tail or airport
+- **Free API accuracy** (adsbdb vs. the paid APIs) and **GA accuracy** (adsbdb and OpenSky vs. FR24), each with recent overrides
+- **Period summary** for a preset (yesterday, 7, 30 or 90 days) or a custom date range: daily history, top airlines, tails, routes and aircraft types, and where routes came from
 
-### Cache Management
-- Clear cache by source (adsbdb, opensky, airlabs-1, airlabs-2, aeroapi, resolved, paid-miss)
-- Live cache statistics: entry counts by source
+### Rules
+- **Test a flight lookup:** run the full resolution stack for any callsign or tail (cached, or live-only) and see what each API returned and what the display shows
+- **Override rules:** add, edit, delete and reorder (drag on a desktop, arrow buttons anywhere); wildcard patterns (e.g. `JANET*`); per-flight display name, aircraft type, origin, destination and note. Changes take effect on the next poll via version-counter cache invalidation.
+
+### Log
+The live log stream with a text filter, an auto-scroll that stops following while you're scrolled up, and a line count.
 
 ---
 
@@ -256,7 +243,7 @@ Two flag-file controls let you manage the display without restarting the service
 | `/tmp/ft_paused` | Blanks the matrix (brightness → 0) while the file exists |
 | `/tmp/ft_night` | Drops brightness to `NIGHT_BRIGHTNESS` while the file exists |
 
-The web UI header has Display and Night toggle switches for both (keyboard-accessible: Tab to one, Enter or Space flips it). Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
+The web UI header has Display and Night switches for both (real buttons: Tab to one, Enter or Space flips it). Flag files are in `/tmp/` so they auto-clear on reboot — the display always comes back at full brightness after a power cycle.
 
 ---
 

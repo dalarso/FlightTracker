@@ -105,7 +105,7 @@ _HARNESS = textwrap.dedent(r"""
       getBounds(){ return { getNorth:()=>0,getSouth:()=>0,getWest:()=>0,getEast:()=>0 }; },
       addTo(){ return r; } }; rects.push(r); return r; }
     const L = {
-      map(){ return { setView(){ return this; }, invalidateSize(){}, }; },
+      map(){ return { setView(){ return this; }, invalidateSize(){}, fitBounds(){ return this; } }; },
       tileLayer(){ return { addTo(){ return this; } }; },
       rectangle(bounds){ return LRect(bounds); },
       circleMarker(){ return { addTo(){ return { bindTooltip(){ return {}; } }; } }; },
@@ -275,26 +275,26 @@ _HARNESS = textwrap.dedent(r"""
       },
 
       async checkInitialStatusExhausted() {
-        // Every /api/status fetch fails.  After retries are exhausted the toggles must stay
-        // hidden (no removeProperty('display')) and a slow re-poll must be scheduled.
+        // Every /api/status fetch fails.  After retries are exhausted the header switches must
+        // be disabled (never left usable in an unconfirmed HTML-default state), the connection
+        // badge must say offline, and a slow re-poll must be scheduled.
         sandbox.updateServiceBtn=()=>{}; sandbox.updateDisplayBtn=()=>{};
         sandbox.updateNightBtn=()=>{}; sandbox.updateAPIsBtn=()=>{};
         // Make all status fetches fail, then drain the checkInitialStatus() call app.js fires at
-        // module load (its default-fetch success would otherwise reveal the toggles and pollute
-        // this assertion) before resetting our observation state.
+        // module load (its default-fetch success enables the switches) before observing.
         sandbox.__fetch = ()=>Promise.reject(new Error('down'));
         await flush(); await flush();
         const toggles = ['display-toggle','night-toggle','service-toggle','apis-toggle'];
-        toggles.forEach(id=>{ const e=getEl(id); e.style._removed = {}; });
+        toggles.forEach(id=>{ getEl(id).disabled = false; });
 
         sandbox.__timeouts.length = 0;
         await sandbox.checkInitialStatus(0);   // 0 retries -> straight to exhausted branch
         await flush();
 
         toggles.forEach(id=>{
-          const rm = getEl(id).style._removed || {};
-          assert(!rm.display, id + ' must NOT be revealed on exhausted retry');
+          assert(getEl(id).disabled === true, id + ' must be disabled after exhausted retries');
         });
+        assert(getEl('conn-status').dataset.state === 'offline', 'connection badge must read offline');
         // a re-poll must be scheduled (~10s)
         const repoll = sandbox.__timeouts.find(t=>t.ms === 10000);
         assert(repoll, 'a slow (10s) re-poll must be scheduled after exhausted retries');
@@ -322,27 +322,56 @@ _HARNESS = textwrap.dedent(r"""
     scenarios.scoreboardOnBoardWindow = async () => {
       const fin = { state:'FINAL', team_score:5, opp_score:3, opp_abbr:'UTA', game_id:9, team_home:true };
       sandbox.renderSbLive({ enabled:true, on_board:true, team_name:'VGK', game:fin });
-      assert(getEl('sb-live-field').style.display === '', 'final inside the window is shown');
+      assert(getEl('sb-live-field').hidden === false, 'final inside the window is shown');
       sandbox.renderSbLive({ enabled:true, on_board:false, team_name:'VGK', game:fin });
-      assert(getEl('sb-live-field').style.display === 'none', 'final past the window must hide');
+      assert(getEl('sb-live-field').hidden === true, 'final past the window must hide');
       // An older server (no on_board key) falls back to the state check.
       sandbox.renderSbLive({ enabled:true, team_name:'VGK', game:fin });
-      assert(getEl('sb-live-field').style.display === '', 'fallback shows a FINAL');
+      assert(getEl('sb-live-field').hidden === false, 'fallback shows a FINAL');
     };
 
     scenarios.headerSwitchAria = async () => {
+      // The header switches are <button role="switch">: Enter / Space come from the browser,
+      // so what the script owns is keeping aria-checked in step with the real state...
       sandbox.updateNightBtn(true);
       assert(getEl('night-toggle').getAttribute('aria-checked') === 'true', 'night on → aria-checked true');
       sandbox.updateDisplayBtn(false);
       assert(getEl('display-toggle').getAttribute('aria-checked') === 'false', 'display off → aria-checked false');
-      // Enter on a focused switch activates it (keyboard access).
-      let clicked = 0;
-      const sw = getEl('apis-toggle');
-      sw.classList.add('display-toggle');
-      sw.closest = sel => (sel.startsWith('.display-toggle') ? sw : null);
-      sw.click = () => { clicked++; };
-      (documentStub._listeners.keydown || []).forEach(fn => fn({ target: sw, key: 'Enter', preventDefault(){} }));
-      assert(clicked === 1, 'Enter must activate the focused switch');
+      // ...and ignoring a second activation while the first request is still in flight
+      // (a double tap used to fire two toggles and flip the setting back).
+      let posts = 0, release;
+      sandbox.__fetch = (url, init) => {
+        if (init && init.method === 'POST') posts++;
+        return new Promise(r => { release = r; });
+      };
+      const p1 = sandbox.toggleAPIs();
+      const p2 = sandbox.toggleAPIs();
+      release({ ok:true, json:()=>Promise.resolve({ ok:true, apis_disabled:true }) });
+      await flush(); await p1; await p2;
+      assert(posts === 1, 'a second toggle while busy must be ignored, got ' + posts + ' POSTs');
+      assert(getEl('apis-toggle').getAttribute('aria-checked') === 'false', 'APIs switch reflects the server state');
+      assert(getEl('apis-toggle').dataset.busy === '', 'busy flag cleared after the request');
+    };
+
+    scenarios.dirtyMeansDifferent = async () => {
+      // "Unsaved changes" tracks a real difference from what was loaded: an edit sets it,
+      // reverting the edit clears it again.
+      sandbox.showToast = ()=>{};
+      documentStub.querySelectorAll = ()=>[];
+      const cfg = { LOCATION_HOME:[36.1,-115.3,0.8717], ZONE_HOME:{tl_y:36.2,tl_x:-115.3,br_y:36.1,br_x:-115.2},
+                    MIN_ALTITUDE:100, MAX_ALTITUDE:15000, BRIGHTNESS:80, NIGHT_BRIGHTNESS:20, GPIO_SLOWDOWN:2 };
+      sandbox.__fetch = ()=>jsonResp(cfg);
+      await sandbox.loadConfig(); await flush();
+      assert(getEl('savebar').dataset.state === 'clean', 'a freshly loaded form is clean');
+      getEl('brightness').value = '55'; sandbox._refreshDirty();
+      assert(getEl('savebar').dataset.state === 'dirty', 'an edit makes the form dirty');
+      getEl('brightness').value = '80'; sandbox._refreshDirty();
+      assert(getEl('savebar').dataset.state === 'clean', 'reverting the edit makes it clean again');
+      // Whole-foot altitudes survive a ft -> m/km -> ft round trip (integer metres lost 2 ft).
+      [0, 100, 1234, 15000, 45000].forEach(ft => ['m', 'km'].forEach(u => {
+        const back = sandbox.unitToFt(sandbox.ftToUnit(ft, u), u);
+        assert(back === ft, `${ft} ft via ${u} came back as ${back}`);
+      }));
     };
 
     (async () => {
@@ -408,8 +437,12 @@ class FrontendAppJs(unittest.TestCase):
         # 2026-11: a FINAL leaves "On the board now" when on_board says the board dropped it.
         self._assert_scenario("scoreboardOnBoardWindow")
 
-    def test_header_switches_are_keyboard_accessible(self):
-        # 2026-11: role="switch" toggles keep aria-checked in sync and respond to Enter.
+    def test_unsaved_changes_track_real_differences(self):
+        # 2026-11: dirty = differs from the loaded config; unit switches round-trip exactly.
+        self._assert_scenario("dirtyMeansDifferent")
+
+    def test_header_switches_aria_and_busy_guard(self):
+        # 2026-11: switches keep aria-checked in sync and ignore a second tap mid-request.
         self._assert_scenario("headerSwitchAria")
 
 

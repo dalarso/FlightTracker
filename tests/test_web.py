@@ -893,5 +893,58 @@ class ScoreboardDismiss(unittest.TestCase):
         self.assertFalse(self.srv.DISMISS_FLAG.exists())
 
 
+class DashboardPage(unittest.TestCase):
+    """The dashboard template renders, carries every element id app.js looks up by name, and
+    stays emoji-free (2026-11 refresh: emoji were replaced by an inline SVG icon sprite)."""
+
+    # Elements app.js creates at runtime, so they are legitimately absent from the template.
+    _RUNTIME_IDS = {"edit-pattern", "edit-origin", "edit-dest", "edit-display", "edit-plane",
+                    "edit-note", "search-more-btn", "search-table", "test-countdown",
+                    "test-countdown-num"}
+    _EMOJI = ("[\U0001F000-\U0001FAFF☀-➿⬀-⯿⌀-⏿"
+              "■-◿⠀-⣿️]")
+
+    @classmethod
+    def setUpClass(cls):
+        resp = _load_server().app.test_client().get("/")
+        cls.status = resp.status_code
+        cls.html = resp.get_data(as_text=True)
+        cls.js = (_WEB / "static" / "js" / "app.js").read_text(encoding="utf-8")
+        cls.css = (_WEB / "static" / "css" / "app.css").read_text(encoding="utf-8")
+
+    def test_page_renders(self):
+        self.assertEqual(self.status, 200)
+        self.assertIn("<!DOCTYPE html>", self.html)
+        self.assertIn('id="config-form"', self.html)
+
+    def test_every_id_app_js_looks_up_exists(self):
+        import re
+        ids = set(re.findall(r"\$\('([A-Za-z0-9_-]+)'\)", self.js))
+        ids |= set(re.findall(r"getElementById\('([A-Za-z0-9_-]+)'\)", self.js))
+        missing = sorted(i for i in ids - self._RUNTIME_IDS if f'id="{i}"' not in self.html)
+        self.assertEqual(missing, [], "app.js looks up ids the page doesn't have")
+
+    def test_every_icon_used_is_in_the_sprite(self):
+        import re
+        defined = set(re.findall(r'<symbol id="i-([a-z-]+)"', self.html))
+        used = set(re.findall(r'href="#i-([a-z-]+)"', self.html))
+        used |= set(re.findall(r"icon\('([a-z-]+)'", self.js))
+        used |= set(re.findall(r"'#i-([a-z-]+)'", self.js))
+        self.assertEqual(sorted(used - defined), [])
+
+    def test_no_emoji_anywhere_in_the_ui(self):
+        import re
+        pat = re.compile(self._EMOJI)
+        for name, text in (("index.html", self.html), ("app.js", self.js), ("app.css", self.css)):
+            with self.subTest(file=name):
+                self.assertEqual(pat.findall(text), [])
+
+    def test_leaflet_is_lazy_and_pinned(self):
+        # Leaflet loads with the Map tab, not in <head>, and stays pinned with SRI.
+        self.assertNotIn("leaflet.js", self.html)
+        self.assertIn("sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=", self.js)
+        self.assertIn("sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=", self.js)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
