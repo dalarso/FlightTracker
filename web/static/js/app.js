@@ -22,8 +22,9 @@ const FT_TO_M  = 0.3048;
 const FT_TO_KM = 0.0003048;
 const KM_TO_FT = 3280.84;
 const KM_TO_M  = 1000;
-const TABS = ['config', 'map', 'apis', 'stats', 'rules', 'log'];
-const TAB_TITLES = { config: 'Settings', map: 'Map', apis: 'APIs', stats: 'Stats', rules: 'Rules', log: 'Log' };
+const TABS = ['stats', 'map', 'apis', 'rules', 'config', 'log'];   // the first is home
+const HOME_TAB = TABS[0];
+const TAB_TITLES = { stats: 'Stats', map: 'Map', apis: 'APIs', rules: 'Rules', config: 'Settings', log: 'Log' };
 const LOG_MAX_LINES = 2000;
 
 // ── State ──────────────────────────────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ let nightActive = false;
 let map, zoneRect, homeMarker, cornerMarkers = [];
 let zoneBounds = {};
 let evtSource = null;
-let _activeTab = 'config';
+let _activeTab = HOME_TAB;
 const _tabScroll = {};
 
 // ── Small helpers ──────────────────────────────────────────────────────────────────────
@@ -142,7 +143,7 @@ function _syncThemeUi() {
 
 // ── Tabs ───────────────────────────────────────────────────────────────────────────────
 function showTab(name) {
-  if (!TABS.includes(name)) name = 'config';
+  if (!TABS.includes(name)) name = HOME_TAB;
   if (name !== _activeTab && typeof window.scrollY === 'number') _tabScroll[_activeTab] = window.scrollY;
   _activeTab = name;
   toggleControls(false);
@@ -151,14 +152,15 @@ function showTab(name) {
     if (b.dataset.tab === name) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
-  document.title = name === 'config' ? 'FlightTracker' : `${TAB_TITLES[name]} \u00b7 FlightTracker`;
+  document.title = name === HOME_TAB ? 'FlightTracker' : `${TAB_TITLES[name]} \u00b7 FlightTracker`;
   _syncHash(name);
   if (typeof window.scrollTo === 'function') window.scrollTo(0, _tabScroll[name] || 0);
 
   if (name === 'map')   initMap();
   if (name === 'log')   initLog();     else stopLog();
   if (name === 'apis')  initAPIsTab(); else stopAPIsTab();
-  if (name === 'stats') loadStatsTab();
+  if (name === 'stats') { loadStatsTab({ quiet: _statsLoaded }); _startStatsRefresh(); }
+  else _stopStatsRefresh();
   if (name === 'rules') initRulesTab();
 }
 
@@ -167,15 +169,15 @@ function goToTab(name) { showTab(name); }
 // The active tab lives in the URL hash so a reload (or a bookmark) lands on it.
 function _syncHash(name) {
   if (typeof location === 'undefined' || typeof history === 'undefined') return;
-  const want = name === 'config' ? '' : '#' + name;
+  const want = name === HOME_TAB ? '' : '#' + name;
   if ((location.hash || '') === want) return;
   try { history.replaceState(null, '', want || location.pathname + location.search); } catch (e) { /* ignore */ }
 }
 
 function _tabFromHash() {
-  if (typeof location === 'undefined') return 'config';
+  if (typeof location === 'undefined') return HOME_TAB;
   const h = (location.hash || '').replace('#', '');
-  return TABS.includes(h) ? h : 'config';
+  return TABS.includes(h) ? h : HOME_TAB;
 }
 
 // ── Display controls (header switches) ─────────────────────────────────────────────────
@@ -1429,10 +1431,20 @@ async function clearCacheEntry() {
   }
 }
 
-// ── Stats tab ──────────────────────────────────────────────────────────────────────────
+// ── Stats tab (the home page) ──────────────────────────────────────────────────────────
+// One /api/stats call (cached on the Pi until the DB changes) feeds the headline tiles, the
+// recent-flights feed, today's hours and, while the 90-day preset is selected, the period
+// card.  It refreshes every minute while the tab is open and the page is visible.
+let _statsSeq = 0;              // newest "today" refresh wins
+let _statsReqSeq = 0;           // newest period request wins: a stale one never repaints it
 let _statsPeriodDirty = false;  // true when the date inputs differ from the loaded range
-let _statsReqSeq = 0;           // monotonic token: only the newest /api/stats fetch renders
-let _serverToday = null;        // set on first stats load; timezone-correct "today"
+let _serverToday = null;        // the Pi's date (timezone-correct "today")
+let _period = { preset: '90d', from: null, to: null };
+let _lastDefault = null;        // the last default-mode /api/stats payload
+let _statsTimer = null;
+let _statsLoaded = false;
+let _seenRecent = null;         // recent-flight keys already shown (new ones flash)
+const _listShown = {};          // "show more" depth per list, kept across refreshes
 
 function _isoToday() {
   const now = new Date();
@@ -1452,39 +1464,117 @@ function _serverOffset(days) {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
+function _presetRange(preset) {
+  const today = _serverToday || _isoToday();
+  const ranges = {
+    yesterday: [_serverOffset(-1), _serverOffset(-1)],
+    '7d':  [_serverOffset(-6), today],
+    '30d': [_serverOffset(-29), today],
+    '90d': [_serverOffset(-89), today],
+  };
+  return ranges[preset] || null;
+}
+
 function _setPeriodPreset(preset) {
   document.querySelectorAll('#period-presets .seg').forEach(b =>
     b.setAttribute('aria-pressed', b.dataset.preset === preset ? 'true' : 'false'));
 }
 
-async function loadStatsTab() {
-  $('period-from').value = _serverOffset(-89);
-  $('period-to').value   = _serverToday || _isoToday();
+function _setPeriodInputs(from, to) {
+  $('period-from').value = from;
+  $('period-to').value = to;
   $('period-apply-btn').hidden = true;
   _statsPeriodDirty = false;
-  _setPeriodPreset('90d');
-  const seq = ++_statsReqSeq;
+}
+
+function _setStatsUpdated(state) {
+  const el = $('stats-updated');
+  if (!el) return;
+  el.dataset.state = state;
+  if (state === 'loading') el.textContent = 'Updating…';
+  else if (state === 'error') el.textContent = 'Can’t reach the Pi';
+  else el.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+function _startStatsRefresh() {
+  if (_statsTimer) return;
+  _statsTimer = setInterval(() => {
+    if (!document.hidden && _activeTab === 'stats') loadStatsTab({ quiet: true });
+  }, 60000);
+}
+
+function _stopStatsRefresh() {
+  clearInterval(_statsTimer);
+  _statsTimer = null;
+}
+
+async function loadStatsTab(opts = {}) {
+  const quiet = !!opts.quiet;
+  if (!_period.from) {
+    const [from, to] = _presetRange(_period.preset) || _presetRange('90d');
+    _period.from = from; _period.to = to;
+    _setPeriodInputs(from, to);
+    _setPeriodPreset(_period.preset);
+  }
+  const seq = ++_statsSeq;
+  const pseq = _period.preset === '90d' ? ++_statsReqSeq : null;
+  if (!quiet) _setStatsUpdated('loading');
   try {
     const [d, acc, gaAcc] = await Promise.all([
       _json('/api/stats?days=90'),
       _json('/api/free-api-accuracy').catch(() => null),
       _json('/api/ga-accuracy').catch(() => null),
     ]);
-    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
+    if (seq !== _statsSeq) return;   // a newer refresh superseded this one
+    let rolled = false;
     if (d.today) {
+      rolled = !!_serverToday && _serverToday !== d.today;
       _serverToday = d.today;
-      $('period-to').value = d.today;
-      $('period-from').value = _serverOffset(-89);
+      // Presets are relative to today: keep them anchored when the date rolls over.
+      const r = _period.preset ? _presetRange(_period.preset) : null;
+      if (r && (rolled || _period.preset === '90d')) {
+        _period.from = r[0]; _period.to = r[1];
+        if (!_statsPeriodDirty) _setPeriodInputs(r[0], r[1]);
+      }
     }
+    _lastDefault = d;
     renderTodayStats(d);
     renderRecentFlights(d);
     if (acc && !acc.error)     renderFreeApiAccuracy(acc);
     if (gaAcc && !gaAcc.error) renderGaAccuracy(gaAcc);
-    renderPeriodStats(d);
+    if (pseq !== null && pseq === _statsReqSeq && _period.preset === '90d') {
+      renderPeriodStats(d);
+    } else if (_period.preset !== '90d' && (rolled || (quiet && _period.to >= (_serverToday || _isoToday())))) {
+      // A 7d / 30d / custom view that includes today stays live too.
+      _loadPeriod(_period.from, _period.to, { quiet: true });
+    }
+    _statsLoaded = true;
+    _setStatsUpdated('ok');
   } catch (e) {
-    if (seq !== _statsReqSeq) return;
-    $('stats-total').textContent = '\u2014';
-    showToast('Could not load stats from the Pi', 'err');
+    if (seq !== _statsSeq) return;
+    _setStatsUpdated('error');
+    if (!quiet) showToast('Could not load stats from the Pi', 'err');
+  }
+}
+
+async function _loadPeriod(from, to, opts = {}) {
+  const seq = ++_statsReqSeq;
+  const btn = opts.button;
+  const body = $('period-body');
+  if (btn) { btn.classList.add('is-loading'); btn.disabled = true; }
+  if (body && !opts.quiet) body.classList.add('is-loading');
+  try {
+    const d = await _json(`/api/stats?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    if (seq !== _statsReqSeq) return;   // a newer period request superseded this one
+    if (d.error) { if (!opts.quiet) showToast(d.error, 'err'); return; }
+    renderPeriodStats(d);
+    if (btn) btn.hidden = true;
+    _statsPeriodDirty = false;
+  } catch (e) {
+    if (seq === _statsReqSeq && !opts.quiet) showToast('Could not load stats for that range', 'err');
+  } finally {
+    if (btn) { btn.classList.remove('is-loading'); btn.disabled = false; }
+    if (body && seq === _statsReqSeq) body.classList.remove('is-loading');
   }
 }
 
@@ -1499,64 +1589,150 @@ async function applyStatsPeriod() {
   let to   = $('period-to').value;
   if (!from || !to) { showToast('Pick a start and an end date', 'err'); return; }
   if (from > to) { [from, to] = [to, from]; $('period-from').value = from; $('period-to').value = to; }
-  const btn = $('period-apply-btn');
-  btn.classList.add('is-loading');
-  btn.disabled = true;
-  const seq = ++_statsReqSeq;
-  try {
-    const d = await _json(`/api/stats?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
-    if (d.error) { showToast(d.error, 'err'); return; }
-    renderRecentFlights(d);
-    renderPeriodStats(d);
-    btn.hidden = true;
-    _statsPeriodDirty = false;
-    _setPeriodPreset(null);
-  } catch (e) {
-    if (seq === _statsReqSeq) showToast('Could not load stats for that range', 'err');
-  } finally {
-    btn.classList.remove('is-loading');
-    btn.disabled = false;
-  }
+  _period = { preset: null, from, to };
+  _setPeriodPreset(null);
+  await _loadPeriod(from, to, { button: $('period-apply-btn') });
 }
 
 async function resetStatsPeriod() { return quickPeriod('90d'); }
 
-async function quickPeriod(preset) {
-  const today = _serverToday || _isoToday();
-  const ranges = {
-    yesterday: [_serverOffset(-1), _serverOffset(-1)],
-    '7d':  [_serverOffset(-6), today],
-    '30d': [_serverOffset(-29), today],
-    '90d': [_serverOffset(-89), today],
-  };
-  if (!ranges[preset]) return;
-  const [from, to] = ranges[preset];
-  $('period-from').value = from;
-  $('period-to').value   = to;
-  $('period-apply-btn').hidden = true;
-  _statsPeriodDirty = false;
+async function quickPeriod(preset, opts = {}) {
+  const r = _presetRange(preset);
+  if (!r) return;
+  const [from, to] = r;
+  _setPeriodInputs(from, to);
+  _period = { preset, from, to };
   _setPeriodPreset(preset);
-  const seq = ++_statsReqSeq;
-  try {
-    const d = await _json(`/api/stats?from=${from}&to=${to}`);
-    if (seq !== _statsReqSeq) return;  // a newer stats request superseded this one
-    if (d.error) { showToast('Could not load stats', 'err'); return; }
-    renderRecentFlights(d);
-    renderPeriodStats(d);
-  } catch (e) {
-    if (seq === _statsReqSeq) showToast('Could not load stats', 'err');
+  // The default payload already holds the 90-day picture: no second request.
+  if (preset === '90d' && _lastDefault && _lastDefault.today === (_serverToday || _isoToday())) {
+    ++_statsReqSeq;   // and no older period request may paint over it
+    renderPeriodStats(_lastDefault);
+    return;
   }
+  await _loadPeriod(from, to, opts);
 }
 
 function fmtDate(dateStr, opts) {
-  if (!dateStr || typeof dateStr !== 'string') return '\u2014';
+  if (!dateStr || typeof dateStr !== 'string') return '—';
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
 }
 
-function _rankRow(label, name, count, idx) {
-  return `<div class="rank-row"><span class="rank-label">${idx != null ? `<span class="rank-num">${idx}</span>` : ''}${escHtml(label)}${name ? `<small>${escHtml(name)}</small>` : ''}</span><span class="rank-count">${_fmtInt(count)}</span></div>`;
+function _fmtAvg(x) {
+  return x >= 100 ? Math.round(x).toLocaleString() : (Math.round(x * 10) / 10).toLocaleString();
+}
+
+const _hh = i => String(i).padStart(2, '0');
+
+function _peakHour(hours) {
+  let best = -1, max = 0;
+  (hours || []).forEach((v, i) => { if (_num(v) > max) { max = _num(v); best = i; } });
+  return best < 0 ? '' : `${_hh(best)}:00–${_hh((best + 1) % 24)}:00 (${_plural(max, 'flight')})`;
+}
+
+// ── Charts: plain HTML bars (crisp at any width), an optional SVG trend line, and one
+// tooltip that follows the pointer or a tap. ───────────────────────────────────────────
+function _barChart(el, o) {
+  if (!el) return;
+  const values = o.values || [];
+  const n = values.length;
+  const max = o.max || Math.max(1, ...values);
+  const bars = values.map((v, i) => {
+    const h = v > 0 ? Math.max(2, v / max * 100) : 0;
+    const cls = (i === o.highlight ? ' is-hi' : '') + (o.barClass ? ' ' + o.barClass(v, i) : '');
+    return `<span class="bc-bar${cls}" style="height:${h.toFixed(1)}%"></span>`;
+  }).join('');
+  let line = '';
+  if (o.line && o.line.some(v => v != null)) {
+    const pts = o.line.map((v, i) => v == null ? null : `${(i + 0.5).toFixed(2)},${(100 - v / max * 100).toFixed(2)}`).filter(Boolean).join(' ');
+    line = `<svg class="bc-line" viewBox="0 0 ${n} 100" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}"/></svg>`;
+  }
+  const yAxis = o.yAxis
+    ? `<div class="bc-y" aria-hidden="true"><span>${_fmtInt(max)}</span><span>${_fmtInt(Math.round(max / 2))}</span><span>0</span></div>`
+    : '';
+  const ticks = (o.ticks || []).map(t =>
+    `<span style="left:${((t.i + 0.5) / Math.max(n, 1) * 100).toFixed(2)}%">${escHtml(t.label)}</span>`).join('');
+  el.classList.toggle('has-y', !!o.yAxis);
+  el.style.setProperty('--bc-gap', n > 60 ? '1px' : n > 30 ? '2px' : '3px');
+  el.innerHTML = `${yAxis}<div class="bc-plot"><div class="bc-bars">${bars}</div>${line}</div>`
+    + `<div class="bc-x" aria-hidden="true">${ticks}</div><div class="bc-tip" hidden></div>`;
+  el._tips = o.tips || [];
+  el._n = n;
+  if (!el._bound && el.addEventListener) {
+    el._bound = true;
+    el.addEventListener('pointermove', _chartHover);
+    el.addEventListener('pointerdown', _chartHover);
+    el.addEventListener('pointerleave', _chartLeave);
+  }
+}
+
+function _chartHover(e) {
+  const el = e.currentTarget;
+  const plot = el.querySelector('.bc-bars');
+  const tip = el.querySelector('.bc-tip');
+  if (!plot || !tip || !el._n) return;
+  const r = plot.getBoundingClientRect();
+  const i = Math.floor((e.clientX - r.left) / r.width * el._n);
+  plot.querySelectorAll('.is-hover').forEach(b => b.classList.remove('is-hover'));
+  if (i < 0 || i >= el._n || !el._tips[i]) { tip.hidden = true; return; }
+  plot.children[i].classList.add('is-hover');
+  tip.textContent = el._tips[i];
+  tip.hidden = false;
+  const box = el.getBoundingClientRect();
+  const x = r.left - box.left + (i + 0.5) / el._n * r.width;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = `${Math.max(half, Math.min(box.width - half, x))}px`;
+}
+
+function _chartLeave(e) {
+  const el = e.currentTarget;
+  const tip = el.querySelector('.bc-tip');
+  if (tip) tip.hidden = true;
+  el.querySelectorAll('.is-hover').forEach(b => b.classList.remove('is-hover'));
+}
+
+function _hoursChart(el, hours, highlight) {
+  const vals = Array.from({ length: 24 }, (_, i) => _num((hours || [])[i]));
+  _barChart(el, {
+    values: vals,
+    highlight,
+    tips: vals.map((v, i) => `${_hh(i)}:00–${_hh((i + 1) % 24)}:00 · ${_plural(v, 'flight')}`),
+    ticks: [0, 6, 12, 18].map(i => ({ i, label: `${_hh(i)}:00` })),
+  });
+}
+
+function _dayChart(el, hist, today) {
+  if (!el) return;
+  const vals = hist.map(h => _num(h.total));
+  const n = vals.length;
+  // Trailing 7-day average, drawn once there's enough history for it to mean something.
+  const showAvg = n >= 14;
+  const avg = showAvg ? vals.map((_, i) => i < 6 ? null : vals.slice(i - 6, i + 1).reduce((a, b) => a + b, 0) / 7) : null;
+  const tickIdx = n <= 8 ? vals.map((_, i) => i) : [0, Math.floor((n - 1) / 2), n - 1];
+  _barChart(el, {
+    values: vals,
+    highlight: hist.findIndex(h => h.date === today),
+    line: avg,
+    yAxis: true,
+    tips: hist.map(h => `${fmtDate(h.date, { weekday: 'short', month: 'short', day: 'numeric' })} · ${_plural(h.total, 'flight')}`
+      + ((h.airlabs || h.aeroapi) ? ` · AirLabs ${_fmtInt(h.airlabs)} · AeroAPI ${_fmtInt(h.aeroapi)}` : '')),
+    ticks: n ? tickIdx.map(i => ({ i, label: fmtDate(hist[i].date, n <= 8 ? { weekday: 'short' } : { month: 'short', day: 'numeric' }) })) : [],
+  });
+  const body = $('period-body');
+  if (body) body.classList.toggle('no-avg', !showAvg);
+  const busiest = hist.reduce((b, h) => (_num(h.total) > _num(b && b.total) ? h : b), null);
+  el.setAttribute('aria-label', n
+    ? `Flights per day, ${fmtDate(hist[0].date, { month: 'short', day: 'numeric' })} to ${fmtDate(hist[n - 1].date, { month: 'short', day: 'numeric' })}`
+      + (busiest && busiest.total ? `; busiest ${fmtDate(busiest.date, { month: 'short', day: 'numeric' })} with ${busiest.total}` : '')
+    : 'No flights in this period');
+}
+
+// ── Lists ──────────────────────────────────────────────────────────────────────────────
+function _rankRow(label, name, count, idx, max) {
+  const pct = max ? Math.max(2, Math.round(_num(count) / max * 100)) : 0;
+  return `<div class="rank-row${pct ? ' has-bar' : ''}"${pct ? ` style="--w:${pct}%"` : ''}>`
+    + `<span class="rank-label">${idx != null ? `<span class="rank-num">${idx}</span>` : ''}${escHtml(label)}${name ? `<small>${escHtml(name)}</small>` : ''}</span>`
+    + `<span class="rank-count">${_fmtInt(count)}</span></div>`;
 }
 
 // Show-more / show-less controls under a list that renders `shown` items.
@@ -1585,39 +1761,75 @@ function _appendMoreLess(el, total, shown, step, init, render, max) {
   el.appendChild(ctrl);
 }
 
+function _fillRankList(elId, items, labelKey, nameKey, step = 5) {
+  const el = $(elId);
+  if (!el) return;
+  const all = items || [];
+  const max = Math.max(0, ...all.map(i => _num(i.count)));
+  const render = shown => {
+    _listShown[elId] = shown;
+    if (!all.length) { el.innerHTML = '<p class="empty">No data yet</p>'; return; }
+    el.innerHTML = all.slice(0, shown)
+      .map((item, i) => _rankRow(item[labelKey], nameKey ? item[nameKey] : '', item.count, i + 1, max)).join('');
+    _appendMoreLess(el, all.length, shown, step, step, render);
+  };
+  render(Math.max(step, _listShown[elId] || step));
+}
+
+// ── Today ──────────────────────────────────────────────────────────────────────────────
 function renderTodayStats(d) {
-  const isRange = d.mode === 'range';
-  $('stats-today-heading').textContent = isRange ? 'Flights in period' : 'Flights seen today';
-  $('stats-total').textContent = d.total != null ? _fmtInt(d.total) : '\u2014';
-  $('stats-date').textContent = isRange
-    ? (d.range_from && d.range_to
-        ? `${fmtDate(d.range_from, { month: 'short', day: 'numeric' })} \u2013 ${fmtDate(d.range_to, { month: 'short', day: 'numeric', year: 'numeric' })}`
-        : '\u2014')
-    : (d.today ? fmtDate(d.today, { weekday: 'long', month: 'short', day: 'numeric' }) : '\u2014');
+  $('stats-date').textContent = d.today ? fmtDate(d.today, { weekday: 'long', month: 'long', day: 'numeric' }) : 'Today';
+  $('stats-total').textContent = d.total != null ? _fmtInt(d.total) : '—';
+
+  // Today so far vs. yesterday up to the same time of day (a fair comparison all day long).
+  const vs = $('kpi-today-vs');
+  const now = d.server_now || '';
+  if (Array.isArray(d.yesterday_times) && now && d.total != null) {
+    const t = now.slice(11, 19);
+    const by = d.yesterday_times.filter(x => x <= t).length;
+    const diff = _num(d.total) - by;
+    vs.innerHTML = diff === 0
+      ? `Same as by now yesterday (${_fmtInt(by)})`
+      : `<span class="delta ${diff > 0 ? 'up' : 'down'}">${icon(diff > 0 ? 'up' : 'down')}${_fmtInt(Math.abs(diff))}</span> vs ${_fmtInt(by)} by now yesterday`;
+  } else {
+    vs.textContent = ' ';
+  }
+
+  $('kpi-unique').textContent = d.today_unique != null ? _fmtInt(d.today_unique) : '—';
+
+  const done = (d.history || []).filter(h => h.date !== d.today).slice(-7);
+  $('kpi-avg7').textContent = done.length ? _fmtAvg(done.reduce((s, h) => s + _num(h.total), 0) / done.length) : '—';
+  $('kpi-avg7-sub').textContent = done.length ? `flights per day, last ${done.length} full days` : 'flights per day';
 
   // 'airlabs' is the combined total of both AirLabs keys (summed server-side).
   const ac = d.api_calls || {};
-  $('stats-api-calls').textContent = `AirLabs ${_fmtInt(ac.airlabs)} \u00b7 AeroAPI ${_fmtInt(ac.aeroapi)} calls`;
+  $('kpi-calls').textContent = _fmtInt(_num(ac.airlabs) + _num(ac.aeroapi));
+  $('stats-api-calls').textContent = `AirLabs ${_fmtInt(ac.airlabs)} · AeroAPI ${_fmtInt(ac.aeroapi)}`;
+
+  const hours = d.today_hourly || [];
+  _hoursChart($('today-hours'), hours, now ? parseInt(now.slice(11, 13), 10) : -1);
+  const peak = _peakHour(hours);
+  $('today-peak').textContent = peak ? `Busiest so far: ${peak}` : 'No flights yet today';
 
   const top = _groupNReg(d.top_today);
+  const max = Math.max(0, ...top.map(i => _num(i.count)));
   $('stats-top').innerHTML = top.length
-    ? top.map(item => _rankRow(item.prefix, item.name, item.count)).join('')
+    ? top.map(item => _rankRow(item.prefix, item.name, item.count, null, max)).join('')
     : '<p class="empty">No flights yet today.</p>';
-
-  // Sparkline: the last 14 days (or every non-empty day in a range).
-  const bars = isRange ? (d.history || []).filter(h => h.total > 0) : (d.history || []).slice(-14);
-  const maxVal = Math.max(1, ...bars.map(h => _num(h.total)));
-  const spark = $('stats-sparkline');
-  spark.innerHTML = bars.map(h => {
-    const pct = Math.max(4, Math.round(_num(h.total) / maxVal * 100));
-    const today = !isRange && h.date === d.today;
-    return `<span class="spark-bar${today ? ' is-today' : ''}" style="height:${pct}%" title="${escHtml(fmtDate(h.date, { month: 'short', day: 'numeric' }))}: ${_plural(h.total, 'flight')}"></span>`;
-  }).join('');
-  spark.setAttribute('aria-label', `Flights per day, last ${bars.length} days`);
 }
 
+// ── Flight tables ──────────────────────────────────────────────────────────────────────
 function _flightHead(withAircraft) {
   return `<thead><tr><th class="c-time">Time</th><th class="c-flight">Flight</th><th class="c-tail">Tail</th><th class="c-route">Route</th>${withAircraft ? '<th class="c-ac">Aircraft</th>' : ''}</tr></thead>`;
+}
+
+// "just now" / "12 min ago" for sightings in the last hour (Pi time on both sides).
+function _ago(seenAt, now) {
+  if (!seenAt || !now || seenAt.slice(0, 10) !== now.slice(0, 10)) return '';
+  const toSec = s => parseInt(s.slice(11, 13), 10) * 3600 + parseInt(s.slice(14, 16), 10) * 60 + (parseInt(s.slice(17, 19), 10) || 0);
+  const mins = Math.round((toSec(now) - toSec(seenAt)) / 60);
+  if (isNaN(mins) || mins < 0 || mins >= 60) return '';
+  return mins < 1 ? 'just now' : `${mins} min ago`;
 }
 
 function _flightRow(s, opts = {}) {
@@ -1628,11 +1840,13 @@ function _flightRow(s, opts = {}) {
   const dest = String(s.destination || '?');
   const hit = v => q.length >= 2 && v.includes(q);
   const mark = v => hit(v) ? `<mark class="hl">${escHtml(v)}</mark>` : escHtml(v);
-  return `<tr>`
-    + `<td class="c-time mono">${escHtml(_formatTime(s.time || ''))}</td>`
+  const ago = opts.now ? _ago(s.seen_at, opts.now) : '';
+  const isNew = opts.fresh && opts.keyOf && opts.fresh.has(opts.keyOf(s));
+  return `<tr${isNew ? ' class="is-new"' : ''}>`
+    + `<td class="c-time mono">${escHtml(_formatTime(s.time || ''))}${ago ? `<span class="ago">${ago}</span>` : ''}</td>`
     + `<td class="c-flight"><span class="mono-strong">${mark(cs)}</span>${s.airline ? `<small>${escHtml(s.airline)}</small>` : ''}</td>`
-    + `<td class="c-tail mono">${reg ? mark(reg) : '<span class="subtle">\u2014</span>'}</td>`
-    + `<td class="c-route route">${mark(orig)}<span class="arrow">\u2192</span>${mark(dest)}</td>`
+    + `<td class="c-tail mono">${reg ? mark(reg) : '<span class="subtle">—</span>'}</td>`
+    + `<td class="c-route route">${mark(orig)}<span class="arrow">→</span>${mark(dest)}</td>`
     + (opts.aircraft ? `<td class="c-ac muted">${escHtml(s.aircraft || '')}</td>` : '')
     + `</tr>`;
 }
@@ -1657,35 +1871,64 @@ function renderRecentFlights(d) {
   const el = $('recent-flights-list');
   if (!el) return;
   const all = d.recent || [];
-  const STEP = 10, INIT = 6, MAX = 50;
+  const STEP = 10, INIT = 8, MAX = 50;
+  const keyOf = s => `${s.seen_at}|${s.callsign}`;
+  // After the first paint, flights that weren't on screen last time get a brief highlight.
+  const fresh = _seenRecent ? new Set(all.filter(s => !_seenRecent.has(keyOf(s))).map(keyOf)) : null;
+  _seenRecent = new Set(all.map(keyOf));
   const render = shown => {
+    _listShown['recent-flights-list'] = shown;
     if (!all.length) { el.innerHTML = '<p class="empty">No flights recorded yet.</p>'; return; }
-    el.innerHTML = `<table class="data-table flight-table">${_flightHead(false)}<tbody>${_flightRows(all.slice(0, shown)).html}</tbody></table>`;
+    el.innerHTML = `<table class="data-table flight-table">${_flightHead(false)}<tbody>`
+      + `${_flightRows(all.slice(0, shown), { now: d.server_now, fresh, keyOf }).html}</tbody></table>`;
     _appendMoreLess(el, all.length, shown, STEP, INIT, render, MAX);
   };
-  render(INIT);
+  render(Math.max(INIT, _listShown['recent-flights-list'] || INIT));
 }
 
+// ── Accuracy ───────────────────────────────────────────────────────────────────────────
 function _stamp(seenAt) {
   const s = String(seenAt || '');
-  if (s.length < 16) return s || '\u2014';
+  if (s.length < 16) return s || '—';
   return `${_formatDate(s.slice(0, 10))} ${_formatTime(s.slice(11, 16))}`;
 }
 
-function _accBlock(stats, title) {
+function _accTone(pct) { return pct >= 90 ? 'good' : pct >= 70 ? 'mid' : 'bad'; }
+
+function _accBlock(stats, title, charts) {
   const head = title ? `<h3 class="subhead">${escHtml(title)}</h3>` : '';
   const total = _num(stats && stats.thirty_day && stats.thirty_day.total);
   if (!total) return `<div class="acc">${head}<p class="empty">No checks recorded yet.</p></div>`;
   const pct = _num(stats.thirty_day.pct);
   const mm = _num(stats.thirty_day.mismatches);
   const todayN = _num(stats.today && stats.today.total);
-  const todayPct = stats.today && stats.today.pct != null ? `${stats.today.pct}%` : '\u2014';
-  const tone = pct >= 90 ? 'good' : pct >= 70 ? 'mid' : 'bad';
+  const todayPct = stats.today && stats.today.pct != null ? `${stats.today.pct}%` : '—';
+  const tone = _accTone(pct);
+  const daily = (stats.daily || []).filter(x => _num(x.total) > 0);
+  let trend = '';
+  if (daily.length >= 2 && charts) {
+    charts.push(daily);
+    trend = `<div class="bar-chart bar-chart-mini acc-trend" data-chart="${charts.length - 1}" role="img" aria-label="Daily match rate over the last 30 days"></div>`;
+  }
   return `<div class="acc">${head}
-    <div class="acc-head"><span class="acc-pct ${tone}">${escHtml(pct)}%</span><span class="acc-meta">match rate, last 30 days \u00b7 ${_plural(total, 'check')} \u00b7 ${_plural(mm, 'override')}</span></div>
+    <div class="acc-head"><span class="acc-pct ${tone}">${escHtml(pct)}%</span><span class="acc-meta">match rate, last 30 days · ${_plural(total, 'check')} · ${_plural(mm, 'override')}</span></div>
     <div class="meter ${tone}" role="presentation"><div class="meter-bar" style="width:${Math.min(100, Math.round(pct))}%"></div></div>
-    <p class="acc-meta">Today: ${_plural(todayN, 'check')} \u00b7 ${escHtml(todayPct)} match</p>
+    ${trend}
+    <p class="acc-meta">Today: ${_plural(todayN, 'check')} · ${escHtml(todayPct)} match</p>
   </div>`;
+}
+
+function _drawAccCharts(el, charts) {
+  el.querySelectorAll('.acc-trend').forEach(c => {
+    const daily = charts[Number(c.dataset.chart)] || [];
+    const pcts = daily.map(x => Math.round(_num(x.matches) / _num(x.total, 1) * 1000) / 10);
+    _barChart(c, {
+      values: pcts,
+      max: 100,
+      barClass: v => 't-' + _accTone(v),
+      tips: daily.map((x, i) => `${fmtDate(x.date, { month: 'short', day: 'numeric' })} · ${pcts[i]}% matched (${_num(x.matches)} of ${_plural(x.total, 'check')})`),
+    });
+  });
 }
 
 function renderFreeApiAccuracy(d) {
@@ -1695,7 +1938,8 @@ function renderFreeApiAccuracy(d) {
     el.innerHTML = '<p class="empty">No cross-checks yet. They build up as commercial flights pass overhead.</p>';
     return;
   }
-  let html = _accBlock(d);
+  const charts = [];
+  let html = _accBlock(d, '', charts);
   const mm = d.last_mismatches || [];
   if (mm.length) {
     html += `<h3 class="subhead">Recent overrides <span class="label-note">what adsbdb had, and the paid API's correction</span></h3>
@@ -1705,6 +1949,7 @@ function renderFreeApiAccuracy(d) {
       </table></div>`;
   }
   el.innerHTML = html;
+  _drawAccCharts(el, charts);
 }
 
 function renderGaAccuracy(d) {
@@ -1715,7 +1960,8 @@ function renderGaAccuracy(d) {
     el.innerHTML = '<p class="empty">No GA cross-checks yet. They build up as N-number aircraft pass overhead with FR24 route data.</p>';
     return;
   }
-  let html = _accBlock(d.adsbdb, 'adsbdb') + _accBlock(d.opensky, 'OpenSky');
+  const charts = [];
+  let html = _accBlock(d.adsbdb, 'adsbdb', charts) + _accBlock(d.opensky, 'OpenSky', charts);
   // Merge both APIs' mismatches, newest first, max 10.
   const all = [];
   ((d.adsbdb && d.adsbdb.last_mismatches) || []).forEach(r => all.push({ ...r, _api: 'adsbdb' }));
@@ -1730,20 +1976,11 @@ function renderGaAccuracy(d) {
       </table></div>`;
   }
   el.innerHTML = html;
+  _drawAccCharts(el, charts);
 }
 
-function _fillRankList(elId, items, labelKey, nameKey, step = 5) {
-  const el = $(elId);
-  if (!el) return;
-  const all = items || [];
-  const render = shown => {
-    if (!all.length) { el.innerHTML = '<p class="empty">No data yet</p>'; return; }
-    el.innerHTML = all.slice(0, shown)
-      .map((item, i) => _rankRow(item[labelKey], nameKey ? item[nameKey] : '', item.count, i + 1)).join('');
-    _appendMoreLess(el, all.length, shown, step, step, render);
-  };
-  render(step);
-}
+// ── Period card ────────────────────────────────────────────────────────────────────────
+const _PRESET_TITLES = { yesterday: 'Yesterday', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days' };
 
 const _SOURCE_BARS = [
   { key: 'free',     label: 'Free APIs',      color: 'var(--ok)' },
@@ -1756,20 +1993,40 @@ const _SOURCE_BARS = [
 function renderPeriodStats(d) {
   const isRange = d.mode === 'range';
   const ru = d.rollup || {};
-  $('period-title').textContent = isRange && d.range_from && d.range_to
-    ? `${fmtDate(d.range_from, { month: 'short', day: 'numeric' })} \u2013 ${fmtDate(d.range_to, { month: 'short', day: 'numeric', year: 'numeric' })}`
-    : '90-day summary';
-  // In the default mode d.total is today's count and the 90-day total lives in
+  const hist = d.history || [];
+  const from = isRange ? d.range_from : ((hist[0] && hist[0].date) || d.range_from);
+  const to = isRange ? d.range_to : d.today;
+  $('period-title').textContent = _PRESET_TITLES[_period.preset] || 'Custom range';
+  $('period-range').textContent = !from || !to ? ' '
+    : from === to ? fmtDate(from, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })
+    : `${fmtDate(from, { month: 'short', day: 'numeric' })} – ${fmtDate(to, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+
+  // In the default mode d.total is today's count and the period total lives in
   // rollup.flights; in range mode d.total is already the range total.  Likewise
-  // d.api_calls is today's calls by default and range_api_calls has the period sums.
-  $('period-total').textContent = _fmtInt(isRange ? d.total : ru.flights);
+  // d.api_calls is today's by default and range_api_calls holds the period sums.
+  const total = isRange ? _num(d.total) : _num(ru.flights);
+  $('period-total').textContent = _fmtInt(total);
+  $('period-avg').textContent = hist.length ? _fmtAvg(total / hist.length) : '—';
+  const busiest = hist.reduce((b, h) => (_num(h.total) > _num(b && b.total) ? h : b), null);
+  $('period-busiest').textContent = busiest && busiest.total ? _fmtInt(busiest.total) : '—';
+  $('period-busiest-label').textContent = busiest && busiest.total
+    ? `busiest day (${fmtDate(busiest.date, { month: 'short', day: 'numeric' })})` : 'busiest day';
+  $('period-unique').textContent = d.range_unique != null ? _fmtInt(d.range_unique) : '—';
   const ac = isRange ? (d.api_calls || {}) : (d.range_api_calls || {});
-  $('period-api-calls').textContent = `AirLabs ${_fmtInt(ac.airlabs)} \u00b7 AeroAPI ${_fmtInt(ac.aeroapi)} calls`;
+  $('period-calls').textContent = _fmtInt(_num(ac.airlabs) + _num(ac.aeroapi));
+  $('period-api-calls').textContent = `paid lookups (AirLabs ${_fmtInt(ac.airlabs)}, AeroAPI ${_fmtInt(ac.aeroapi)})`;
+
+  _dayChart($('day-chart'), hist, d.today);
 
   _fillRankList('rollup-airlines', _groupNReg(ru.airlines), 'prefix', 'name');
   _fillRankList('rollup-tails',    ru.tails,  'reg',   'name');
   _fillRankList('rollup-routes',   ru.routes, 'route', null);
   _fillRankList('rollup-types',    ru.types,  'type',  null);
+
+  const hours = d.hourly || [];
+  _hoursChart($('period-hours'), hours, -1);
+  const peak = _peakHour(hours);
+  $('period-peak').textContent = peak ? `peak ${peak}` : '';
 
   const sp = ru.source_pct || {};
   const sources = _SOURCE_BARS.filter(s => _num(sp[s.key]) > 0);
@@ -1780,11 +2037,11 @@ function renderPeriodStats(d) {
       }).join('')
     : '<p class="empty">No data yet</p>';
 
-  // Daily history, newest first, skipping all-zero days.
+  // Daily table, newest first, skipping all-zero days.
   const histEl = $('stats-history');
-  const rows = [...(d.history || [])].reverse().filter(r => r.total > 0 || r.airlabs > 0 || r.aeroapi > 0);
+  const rows = [...hist].reverse().filter(r => r.total > 0 || r.airlabs > 0 || r.aeroapi > 0);
   if (!rows.length) { histEl.innerHTML = '<p class="empty">No flights in this period.</p>'; return; }
-  const api = (v, r) => (v != null && v !== 0) ? _fmtInt(v) : (r.total > 0 ? '0' : '\u2014');
+  const api = (v, r) => (v != null && v !== 0) ? _fmtInt(v) : (r.total > 0 ? '0' : '—');
   histEl.innerHTML = `<table class="data-table">
     <thead><tr><th>Date</th><th class="num">Flights</th><th class="num">AirLabs</th><th class="num">AeroAPI</th></tr></thead>
     <tbody>${rows.map(r => {
@@ -1829,32 +2086,41 @@ function _updateSeeMoreBtn(resEl) {
 async function doStatsSearch() {
   const input = $('stats-search-input');
   const resEl = $('stats-search-results');
+  const card = $('search-card');
+  const summary = $('search-summary');
   const q = (input.value || '').trim();
-  if (q.length < 2) { resEl.innerHTML = '<p class="empty">Enter at least 2 characters.</p>'; return; }
+  card.hidden = false;
+  if (q.length < 2) {
+    summary.textContent = '';
+    resEl.innerHTML = '<p class="empty">Enter at least 2 characters.</p>';
+    return;
+  }
   _searchQ = q; _searchOffset = 0; _searchTotal = 0; _searchLastDate = null;
   const gen = ++_searchGen;   // invalidates any in-flight search or "Load more" before this one
-  resEl.innerHTML = '<p class="empty">Searching\u2026</p>';
+  summary.textContent = 'Searching…';
+  resEl.innerHTML = '';
   try {
     const d = await _json(`/api/stats/search?q=${encodeURIComponent(q)}&limit=100&offset=0`);
     if (gen !== _searchGen) return;
-    if (d.error) { resEl.innerHTML = `<p class="empty tone-danger">${escHtml(d.error)}</p>`; return; }
+    if (d.error) { summary.textContent = ''; resEl.innerHTML = `<p class="empty tone-danger">${escHtml(d.error)}</p>`; return; }
     const items = d.sightings || [];
-    if (!items.length) { resEl.innerHTML = `<p class="empty">No sightings match \u201c${escHtml(q)}\u201d.</p>`; return; }
+    if (!items.length) { summary.textContent = `No sightings match “${q}”.`; return; }
     _searchTotal  = _num(d.count, items.length);
     _searchOffset = items.length;
-    resEl.innerHTML = `<p class="results-head">${_plural(_searchTotal, 'sighting')} for \u201c${escHtml(q)}\u201d</p>`
-      + `<table class="data-table flight-table" id="search-table">${_flightHead(true)}<tbody></tbody></table>`;
+    summary.textContent = `${_plural(_searchTotal, 'sighting')} for “${q}”, newest first`;
+    resEl.innerHTML = `<table class="data-table flight-table" id="search-table">${_flightHead(true)}<tbody></tbody></table>`;
     _appendSearchRows(items, resEl.querySelector('#search-table tbody'), q.toUpperCase());
     _updateSeeMoreBtn(resEl);
   } catch (e) {
     if (gen !== _searchGen) return;
+    summary.textContent = '';
     resEl.innerHTML = '<p class="empty tone-danger">Search failed.</p>';
   }
 }
 
 async function loadMoreSearchResults() {
   const btn = $('search-more-btn');
-  if (btn) { btn.textContent = 'Loading\u2026'; btn.disabled = true; btn.classList.add('is-loading'); }
+  if (btn) { btn.textContent = 'Loading…'; btn.disabled = true; btn.classList.add('is-loading'); }
   const gen = _searchGen;   // tie this page to the search that spawned the button
   const q = _searchQ;
   try {
@@ -1869,6 +2135,14 @@ async function loadMoreSearchResults() {
     if (gen !== _searchGen) return;
     if (btn) { btn.textContent = 'Load failed. Tap to retry'; btn.disabled = false; btn.classList.remove('is-loading'); }
   }
+}
+
+function clearStatsSearch() {
+  _searchGen++;   // drop any search still in flight
+  $('stats-search-input').value = '';
+  $('search-card').hidden = true;
+  $('stats-search-results').innerHTML = '';
+  $('search-summary').textContent = '';
 }
 
 function _formatTime(hhmm) {
@@ -2557,6 +2831,7 @@ const _ACTIONS = {
   'api-toggle':      el => toggleApi(el.dataset.api),
   'api-clear-cache': el => clearApiCache(el.dataset.api),
   'period':          el => quickPeriod(el.dataset.preset),
+  'search-clear':    () => clearStatsSearch(),
   'test-clear':      () => clearTestDisplay(),
   'test-reset':      () => resetTestFlight(),
   'rule-edit':       el => editRule(Number(el.dataset.idx)),
@@ -2626,6 +2901,7 @@ document.addEventListener('visibilitychange', () => {
     stopLog();
     stopAPIsTab();
     stopScoreboardPoll();
+    _stopStatsRefresh();
     clearTimeout(_statusTimer);
     _statusTimer = null;
   } else {
@@ -2633,6 +2909,7 @@ document.addEventListener('visibilitychange', () => {
     checkInitialStatus(1);
     if (_activeTab === 'apis') initAPIsTab();
     else if (_activeTab === 'log') initLog();
+    else if (_activeTab === 'stats') { loadStatsTab({ quiet: true }); _startStatsRefresh(); }
   }
 });
 
@@ -2659,8 +2936,7 @@ function _init() {
       if (mq && mq.addEventListener) mq.addEventListener('change', _syncThemeUi);
     }
   }
-  const first = _tabFromHash();
-  if (first !== 'config') showTab(first);
+  showTab(_tabFromHash());   // also loads the home tab's data
 }
 
 _init();

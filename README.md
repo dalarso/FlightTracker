@@ -206,7 +206,7 @@ A Flask application running as a separate systemd service (`FlightTrackerWeb.ser
 ### Layout
 - One responsive page with no build step: tabs across the top on a desktop, a bottom tab bar on a phone, light and dark themes (follows the OS; the sun/moon button overrides it). Icons are an inline SVG sprite, so there are no emoji and no icon font.
 - **Header:** a connection badge (green when the Pi answers, amber when the display self-check in `/api/health` reports a problem, red when the Pi is unreachable) and the Display / Night / Service / APIs switches, inline on wide screens and under the power button on smaller ones. The switches stay disabled until the Pi has reported their real state.
-- The open tab is kept in the URL (`#stats`, `#map`, …) so a reload or a bookmark lands on it. Polling pauses while the page is hidden.
+- Tabs: Stats (home), Map, APIs, Rules, Settings, Log. The open tab is kept in the URL (`#map`, `#config`, …) so a reload or a bookmark lands on it. Polling pauses while the page is hidden.
 
 ### Settings
 Live editing of `config.py` without SSH, in cards with a section index: zone, altitude filter, home location and timezone, display hardware, weather, scoreboard, receiver, API keys (masked), billing limits and reset days, and cache lifetimes. A sticky save bar shows when the form differs from what's saved, the browser warns before you leave with unsaved edits, and impossible values (an upside-down zone, minimum altitude above maximum) are flagged before anything is sent. **Save & restart display** applies the settings that need a restart. Footer links go to this repo and Colin Waddell's original project.
@@ -219,11 +219,14 @@ A Leaflet map (loaded the first time the tab opens, pinned with Subresource Inte
 - The route data stack in priority order, with per-source enable/disable (flag files in `/tmp/`, cleared on reboot), cache entry counts and per-source cache clearing
 - Clear a single cache entry by tail number or callsign
 
-### Stats
-- **Today:** flights seen, a 14-day sparkline, API calls, and the top airlines (N-number registrations grouped into one "N-reg" row)
-- **Recent flights** with route and tail number, and **history search** by flight number, tail or airport
-- **Free API accuracy** (adsbdb vs. the paid APIs) and **GA accuracy** (adsbdb and OpenSky vs. FR24), each with recent overrides
-- **Period summary** for a preset (yesterday, 7, 30 or 90 days) or a custom date range: daily history, top airlines, tails, routes and aircraft types, and where routes came from
+### Stats (the home tab)
+Refreshed every minute while it's open:
+- **Today:** flights so far against the same time yesterday, distinct aircraft, the 7-day daily average, paid lookups, flights by hour, and the top airlines (N-number registrations grouped into one "N-reg" row)
+- **Recent flights**, newest first ("12 min ago" within the last hour; new arrivals flash), and **history search** by flight number, tail or airport
+- **Period:** a preset (yesterday, 7, 30 or 90 days) or a custom range, with a daily chart (7-day average line, tap or hover for the day's numbers), totals, the busiest day, distinct aircraft, top airlines, tails, routes and aircraft types, busiest hours, where routes came from, and a daily table
+- **Free API accuracy** (adsbdb vs. the paid APIs) and **GA accuracy** (adsbdb and OpenSky vs. FR24), each with a 30-day daily trend and recent overrides
+
+The data stays in SQLite (`ft_flights.db`, WAL mode). Days before today never change, so the server aggregates them once and caches the result; each request re-reads only today's rows, and a whole response is reused until the database changes. On the Pi Zero 2 W that took the 90-day view from about 0.75 s to about 60 ms, and search from 0.34 s to 0.14 s (with a `seen_at` index the web service adds at start-up).
 
 ### Rules
 - **Test a flight lookup:** run the full resolution stack for any callsign or tail (cached, or live-only) and see what each API returned and what the display shows

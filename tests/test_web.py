@@ -88,6 +88,7 @@ class StatsDataLayer(unittest.TestCase):
         _make_db(self._tmp.name)
         self._orig = stats_data.DB_FILE
         stats_data.DB_FILE = Path(self._tmp.name)
+        stats_data._past_cache.clear()
 
     def tearDown(self):
         stats_data.DB_FILE = self._orig
@@ -110,6 +111,46 @@ class StatsDataLayer(unittest.TestCase):
         stats_data.DB_FILE = Path("/nonexistent/missing.db")
         self.assertIsNone(stats_data._db_stats("2026-06-01", "2026-06-03"))
 
+    def test_db_stats_today_fields(self):
+        # The Stats page's tiles: today's count / tails / hours, and yesterday's times so it
+        # can compare with "by now yesterday".
+        d = stats_data._db_stats("2026-06-01", "2026-06-03", today="2026-06-03")
+        self.assertEqual(d["today_total"], 3)
+        self.assertEqual(d["today_unique"], 3)
+        self.assertEqual(d["today_hourly"][10], 3)
+        self.assertEqual(sum(d["today_hourly"]), 3)
+        self.assertEqual(d["yesterday_times"], ["09:00:00"])
+        self.assertEqual({a["prefix"]: a["count"] for a in d["today_top"]}, {"SWA": 2, "AAL": 1})
+        self.assertEqual(d["range_unique"], 4)
+        self.assertEqual((d["hourly"][9], d["hourly"][10]), (1, 3))
+        self.assertEqual([r["callsign"] for r in d["recent"]], ["AAL789", "SWA456", "SWA123", "UAL111"])
+        self.assertEqual(d["rollup"]["source_pct"], {"free": 50.0, "paid": 50.0})
+
+    def test_split_read_matches_a_fresh_read(self):
+        # Finished days come from the cache and the live day is re-read; the numbers must be
+        # exactly what one read of the whole range gives.
+        fresh = stats_data._db_stats("2026-06-01", "2026-06-03")
+        split = stats_data._db_stats("2026-06-01", "2026-06-03", live_date="2026-06-03")
+        for k in ("range_total", "day_counts", "range_api_calls", "range_unique", "hourly", "rollup"):
+            self.assertEqual(fresh[k], split[k], k)
+        self.assertEqual([r["callsign"] for r in fresh["recent"]], [r["callsign"] for r in split["recent"]])
+
+    def test_finished_days_are_cached_and_the_live_day_is_not(self):
+        first = stats_data._db_stats("2026-06-01", "2026-06-03", live_date="2026-06-03")
+        conn = sqlite3.connect(self._tmp.name)
+        conn.executemany(
+            "INSERT INTO sightings (seen_at,date,callsign,registration,origin,destination,"
+            "aircraft,route_source,airline) VALUES (?,?,?,?,?,?,?,?,?)",
+            [("2026-06-03T11:00:00", "2026-06-03", "DAL1", "N5DL", "LAS", "ATL", "A321", "adsbdb", "DAL"),
+             # A row landing in a finished day only happens with a manual backfill.
+             ("2026-06-02T11:00:00", "2026-06-02", "DAL2", "N6DL", "LAS", "ATL", "A321", "adsbdb", "DAL")])
+        conn.commit()
+        conn.close()
+        second = stats_data._db_stats("2026-06-01", "2026-06-03", live_date="2026-06-03")
+        self.assertEqual(second["day_counts"]["2026-06-03"], first["day_counts"]["2026-06-03"] + 1)
+        self.assertEqual(second["day_counts"]["2026-06-02"], first["day_counts"]["2026-06-02"])
+        self.assertEqual(second["recent"][0]["callsign"], "DAL1")
+
     def test_db_recent_newest_first(self):
         rows = stats_data._db_recent("2026-06-01", "2026-06-03", limit=10)
         self.assertEqual(len(rows), 4)
@@ -128,6 +169,69 @@ class StatsDataLayer(unittest.TestCase):
     def test_db_search_missing_db_returns_none(self):
         stats_data.DB_FILE = Path("/nonexistent/missing.db")
         self.assertIsNone(stats_data._db_search("SWA"))
+
+
+class StatsEndpointAndCache(unittest.TestCase):
+    """/api/stats over a seeded DB, and the response cache keyed on the DB's file stats."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = _load_server()
+        cls.client = cls.srv.app.test_client()
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._db = self._dir / "ft_flights.db"
+        _make_db(str(self._db))
+        self._orig = (self.srv.DB_FILE, stats_data.DB_FILE)
+        self.srv.DB_FILE = stats_data.DB_FILE = self._db
+        self.srv._STATS_CACHE.clear()
+        stats_data._past_cache.clear()
+
+    def tearDown(self):
+        self.srv.DB_FILE, stats_data.DB_FILE = self._orig
+        self.srv._STATS_CACHE.clear()
+        stats_data._past_cache.clear()
+        for p in self._dir.glob("*"):
+            p.unlink()
+        self._dir.rmdir()
+
+    def test_range_response_shape(self):
+        d = self.client.get("/api/stats?from=2026-06-01&to=2026-06-03").get_json()
+        self.assertEqual(d["mode"], "range")
+        self.assertEqual(d["total"], 4)
+        self.assertEqual(len(d["history"]), 3)
+        self.assertEqual(d["range_unique"], 4)
+        self.assertEqual(len(d["hourly"]), 24)
+        self.assertEqual(d["recent"][0]["callsign"], "AAL789")
+        self.assertRegex(d["server_now"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_default_window_is_exactly_90_days(self):
+        d = self.client.get("/api/stats?days=90").get_json()
+        self.assertEqual(len(d["history"]), 90)
+        self.assertEqual(d["range_from"], d["history"][0]["date"])
+        self.assertEqual(d["range_to"], d["today"])
+
+    def test_payload_reused_until_the_db_changes(self):
+        builds = []
+
+        def build():
+            builds.append(1)
+            return {"n": len(builds)}
+
+        a = self.srv._cached_stats(("k",), build)
+        b = self.srv._cached_stats(("k",), build)
+        self.assertEqual(len(builds), 1)
+        self.assertIs(a, b)
+        # Any commit rewrites the DB or its WAL; simulate one by moving the mtime forward.
+        st = self._db.stat()
+        os.utime(self._db, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))
+        self.srv._cached_stats(("k",), build)
+        self.assertEqual(len(builds), 2)
+        # A WAL appearing or growing counts as a change too.
+        (self._dir / "ft_flights.db-wal").write_bytes(b"x" * 32)
+        self.srv._cached_stats(("k",), build)
+        self.assertEqual(len(builds), 3)
 
 
 class ParseLogSightings(unittest.TestCase):

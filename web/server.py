@@ -121,7 +121,7 @@ if str(_WEB_DIR) not in sys.path:
 
 from functools import partial as _partial
 import stats_data
-from stats_data import _db_stats, _parse_log_sightings, _db_recent, _db_search
+from stats_data import _db_stats, _parse_log_sightings, _db_search
 from usage_data import _billing_period_start, _billing_period_end, _read_usage_file
 import scoreboard_data
 from scoreboard_data import _fetch_scoreboard_data, _load_persisted_game_ended_at, _persist_game_ended_at, _clear_persisted_game_ended_at
@@ -755,15 +755,134 @@ def combined_status():
     })
 
 
+# /api/stats response cache.  The Stats page is the dashboard's home and re-asks every
+# minute, but the data only changes when the display process commits a write — and every
+# commit appends to the WAL file, so its mtime/size (plus the main file's) is a free
+# change marker.  The TTL is only a safety net.
+_STATS_CACHE: dict = {}
+_STATS_CACHE_LOCK = threading.Lock()
+_STATS_CACHE_TTL = 300   # seconds
+
+
+def _db_marker():
+    try:
+        st = DB_FILE.stat()
+        try:
+            wal = DB_FILE.with_name(DB_FILE.name + "-wal").stat()
+            w = (wal.st_mtime_ns, wal.st_size)
+        except OSError:
+            w = None
+        return (st.st_mtime_ns, st.st_size, w)
+    except OSError:
+        return None
+
+
+def _cached_stats(key, build):
+    """Return build()'s payload, reusing the last one for `key` while the DB is unchanged.
+    The marker is taken before building, so a write that lands mid-build invalidates."""
+    marker = _db_marker()
+    now = time.time()
+    with _STATS_CACHE_LOCK:
+        hit = _STATS_CACHE.get(key)
+        if hit and marker is not None and hit[0] == marker and now - hit[1] < _STATS_CACHE_TTL:
+            return hit[2]
+    payload = build()
+    if payload is not None and marker is not None:
+        with _STATS_CACHE_LOCK:
+            if len(_STATS_CACHE) >= 16:
+                _STATS_CACHE.clear()
+            _STATS_CACHE[key] = (marker, now, payload)
+    return payload
+
+
+def _stats_cutoff(now):
+    """First day of the default 90-day window: today and the 89 days before it, the same
+    span as the page's 90d preset and the 90 bars it draws (it used to reach 91 days back,
+    so the total counted a day the chart never showed)."""
+    return (now - timedelta(days=89)).strftime("%Y-%m-%d")
+
+
+def _warm_stats():
+    """Pre-compute the finished days of the default window so the first visit is fast."""
+    now = datetime.now(_PACIFIC)
+    stats_data.warm(_stats_cutoff(now), (now - timedelta(days=1)).strftime("%Y-%m-%d"))
+
+
+def _stats_history(db, dates):
+    out = []
+    for d in dates:
+        day_ac = db["day_api_calls"].get(d, {})
+        out.append({
+            "date":    d,
+            "total":   db["day_counts"].get(d, 0),
+            "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
+            "aeroapi": day_ac.get("aeroapi", 0),
+        })
+    return out
+
+
+def _paid_calls(calls):
+    return {"airlabs": calls.get("airlabs", 0) + calls.get("airlabs2", 0), "aeroapi": calls.get("aeroapi", 0)}
+
+
+def _range_stats(range_from, range_to, today):
+    db = _db_stats(range_from, range_to, live_date=today)
+    if db is None:
+        return None
+    start = datetime.strptime(range_from, "%Y-%m-%d")
+    n = (datetime.strptime(range_to, "%Y-%m-%d") - start).days + 1
+    return {
+        "mode":         "range",
+        "today":        today,
+        "range_from":   range_from,
+        "range_to":     range_to,
+        "total":        db["range_total"],
+        "api_calls":    _paid_calls(db["range_api_calls"]),
+        "top_today":    db["range_top"],
+        "rollup":       db["rollup"],
+        "history":      _stats_history(db, [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]),
+        "recent":       db["recent"],
+        "hourly":       db["hourly"],
+        "range_unique": db["range_unique"],
+    }
+
+
+def _default_stats(days, today, now):
+    cutoff = _stats_cutoff(now)
+    db = _db_stats(cutoff, today, today=today)
+    if db is None:
+        return None
+    return {
+        "mode":            "default",
+        "today":           today,
+        "range_from":      cutoff,
+        "range_to":        today,
+        "total":           db["today_total"],
+        "api_calls":       _paid_calls(db["today_api_calls"]),
+        "range_api_calls": _paid_calls(db["range_api_calls"]),
+        "top_today":       db["today_top"],
+        "today_unique":    db["today_unique"],
+        "today_hourly":    db["today_hourly"],
+        "yesterday_times": db["yesterday_times"],
+        "rollup":          db["rollup"],
+        "history":         _stats_history(db, [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days - 1, -1, -1)]),
+        "recent":          db["recent"],
+        "hourly":          db["hourly"],
+        "range_unique":    db["range_unique"],
+    }
+
+
 @app.route("/api/stats", methods=["GET"])
 def flight_stats():
     """
     Return flight stats.  Supports two modes:
       Default (?days=N): today card + rolling 90-day period.
       Range   (?from=YYYY-MM-DD&to=YYYY-MM-DD): stats for a custom date range.
-    Source: ft_flights.db (sightings + api_calls tables).
+    Source: ft_flights.db (sightings + api_calls tables), cached until the DB changes.
+    `server_now` (Pi local time) lets the page compare today with "this time yesterday".
     """
-    today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+    now = datetime.now(_PACIFIC)
+    today = now.strftime("%Y-%m-%d")
     try:
         days = min(int(request.args.get("days", 90)), 90)
     except (ValueError, TypeError):
@@ -782,72 +901,14 @@ def flight_stats():
         except ValueError:
             return jsonify({"error": "Invalid date — use YYYY-MM-DD"}), 400
 
-    # ── Range mode ───────────────────────────────────────────────────────────
     if is_range:
-        db = _db_stats(range_from, range_to)
-        if db is None:
-            return jsonify({"error": "Database unavailable"}), 503
-
-        history  = []
-        cur_date = datetime.strptime(range_from, "%Y-%m-%d")
-        end_date = datetime.strptime(range_to,   "%Y-%m-%d")
-        while cur_date <= end_date:
-            d      = cur_date.strftime("%Y-%m-%d")
-            day_ac = db["day_api_calls"].get(d, {})
-            history.append({
-                "date":    d,
-                "total":   db["day_counts"].get(d, 0),
-                "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
-                "aeroapi": day_ac.get("aeroapi", 0),
-            })
-            cur_date += timedelta(days=1)
-
-        return jsonify({
-            "mode":       "range",
-            "today":      today,
-            "range_from": range_from,
-            "range_to":   range_to,
-            "total":      db["range_total"],
-            "api_calls":  {"airlabs": db["range_api_calls"].get("airlabs", 0) + db["range_api_calls"].get("airlabs2", 0),
-                           "aeroapi": db["range_api_calls"].get("aeroapi", 0)},
-            "top_today":  db["range_top"],
-            "rollup":     db["rollup"],
-            "history":    history,
-            "recent":     _db_recent(range_from, range_to),
-        })
-
-    # ── Default mode: today card + 90-day period ─────────────────────────────
-    cutoff = (datetime.now(_PACIFIC) - timedelta(days=90)).strftime("%Y-%m-%d")
-    db = _db_stats(cutoff, today, today=today)
-    if db is None:
+        payload = _cached_stats(("range", range_from, range_to, today),
+                                lambda: _range_stats(range_from, range_to, today))
+    else:
+        payload = _cached_stats(("default", days, today), lambda: _default_stats(days, today, now))
+    if payload is None:
         return jsonify({"error": "Database unavailable"}), 503
-
-    history = []
-    for i in range(days - 1, -1, -1):
-        d      = (datetime.now(_PACIFIC) - timedelta(days=i)).strftime("%Y-%m-%d")
-        day_ac = db["day_api_calls"].get(d, {})
-        history.append({
-            "date":    d,
-            "total":   db["day_counts"].get(d, 0),
-            "airlabs": day_ac.get("airlabs", 0) + day_ac.get("airlabs2", 0),
-            "aeroapi": day_ac.get("aeroapi", 0),
-        })
-
-    ac     = db["today_api_calls"]
-    rac    = db["range_api_calls"]
-    return jsonify({
-        "mode":             "default",
-        "today":            today,
-        "range_from":       cutoff,
-        "range_to":         today,
-        "total":            db["today_total"],
-        "api_calls":        {"airlabs": ac.get("airlabs", 0) + ac.get("airlabs2", 0),  "aeroapi": ac.get("aeroapi", 0)},
-        "range_api_calls":  {"airlabs": rac.get("airlabs", 0) + rac.get("airlabs2", 0), "aeroapi": rac.get("aeroapi", 0)},
-        "top_today":        db["today_top"],
-        "rollup":           db["rollup"],
-        "history":          history,
-        "recent":           _db_recent(cutoff, today),
-    })
+    return jsonify({**payload, "server_now": now.strftime("%Y-%m-%d %H:%M:%S")})
 
 
 @app.route("/api/stats/search", methods=["GET"])
@@ -1889,6 +1950,8 @@ def log_stream():
 
 if __name__ == "__main__":
     _host, _port = "0.0.0.0", 5000
+    stats_data.ensure_indexes()   # one-time: seen_at index for "newest first" queries
+    threading.Thread(target=_warm_stats, name="stats-warm", daemon=True).start()
     try:
         from waitress import serve
         _log("[web] serving via waitress (production WSGI, bounded thread pool)")

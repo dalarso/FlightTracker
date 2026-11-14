@@ -53,11 +53,11 @@
 {%- endmacro %}
 
 {% set tabs = [
-  ('config', 'Settings', 'settings'),
+  ('stats', 'Stats', 'chart'),
   ('map', 'Map', 'map'),
   ('apis', 'APIs', 'api'),
-  ('stats', 'Stats', 'chart'),
   ('rules', 'Rules', 'rules'),
+  ('config', 'Settings', 'settings'),
   ('log', 'Log', 'log'),
 ] %}
 
@@ -180,7 +180,7 @@
 <main id="main">
 
   <!-- ═════════════════════════════ SETTINGS ═════════════════════════════ -->
-  <section class="panel" id="config-tab" data-panel="config" aria-labelledby="config-title">
+  <section class="panel" id="config-tab" data-panel="config" aria-labelledby="config-title" hidden>
     <div class="page">
       <div class="page-head">
         <h1 class="page-title" id="config-title">Settings</h1>
@@ -532,46 +532,67 @@
   </section>
 
   <!-- ═════════════════════════════ STATS ═════════════════════════════ -->
-  <section class="panel" id="stats-tab" data-panel="stats" aria-labelledby="stats-title" hidden>
+  <section class="panel" id="stats-tab" data-panel="stats" aria-labelledby="stats-title">
     <div class="page">
-      <div class="page-head">
-        <h1 class="page-title" id="stats-title">Stats</h1>
-        <p class="page-sub">What flew over, and how well each data source did.</p>
+      <div class="page-head page-head-split">
+        <div>
+          <h1 class="page-title" id="stats-title">Stats</h1>
+          <p class="page-sub"><span id="stats-date">Today</span> <span class="updated" id="stats-updated" data-state="idle"></span></p>
+        </div>
+        <form class="search-bar" role="search" data-submit="stats-search">
+          <label class="sr-only" for="stats-search-input">Search flight history</label>
+          <span class="search-field">{{ ico('search') }}<input type="search" id="stats-search-input" class="mono" placeholder="Flight, tail or airport" autocapitalize="characters" spellcheck="false" autocomplete="off" enterkeyhint="search"></span>
+          <button type="submit" class="btn btn-primary">Search</button>
+        </form>
       </div>
 
-      <div class="grid grid-2">
-        <article class="card">
-          <header class="card-head">
-            <div><h2 id="stats-today-heading">Flights seen today</h2><p id="stats-date">&mdash;</p></div>
-            <span class="card-meta" id="stats-api-calls"></span>
-          </header>
-          <div class="kpi"><span class="kpi-value" id="stats-total">&mdash;</span><span class="kpi-unit">flights</span></div>
-          <div class="sparkline" id="stats-sparkline" role="img" aria-label="Flights per day"></div>
+      <article class="card" id="search-card" aria-labelledby="search-h" hidden>
+        <header class="card-head">
+          <div><h2 id="search-h">Search results</h2><p id="search-summary"></p></div>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="search-clear">{{ ico('x') }}Clear</button>
+        </header>
+        <div id="stats-search-results" class="search-results"></div>
+      </article>
+
+      <div class="kpis" aria-label="Today at a glance">
+        <div class="kpi-tile">
+          <span class="kpi-label">Flights today</span>
+          <span class="kpi-num" id="stats-total">&mdash;</span>
+          <span class="kpi-sub" id="kpi-today-vs">&nbsp;</span>
+        </div>
+        <div class="kpi-tile">
+          <span class="kpi-label">Unique aircraft today</span>
+          <span class="kpi-num" id="kpi-unique">&mdash;</span>
+          <span class="kpi-sub">distinct tail numbers</span>
+        </div>
+        <div class="kpi-tile">
+          <span class="kpi-label">7-day average</span>
+          <span class="kpi-num" id="kpi-avg7">&mdash;</span>
+          <span class="kpi-sub" id="kpi-avg7-sub">flights per day</span>
+        </div>
+        <div class="kpi-tile">
+          <span class="kpi-label">Paid lookups today</span>
+          <span class="kpi-num" id="kpi-calls">&mdash;</span>
+          <span class="kpi-sub" id="stats-api-calls">&nbsp;</span>
+        </div>
+      </div>
+
+      <div class="grid grid-feature">
+        <article class="card" aria-labelledby="recent-h">
+          <header class="card-head"><div><h2 id="recent-h">Recent flights</h2><p>Newest first, refreshed every minute</p></div></header>
+          <div id="recent-flights-list"><p class="empty">Loading&hellip;</p></div>
+        </article>
+        <article class="card" aria-labelledby="stats-today-heading">
+          <header class="card-head"><div><h2 id="stats-today-heading">Today by hour</h2><p id="today-peak">&nbsp;</p></div></header>
+          <div class="bar-chart bar-chart-hours" id="today-hours" role="img" aria-label="Flights per hour today"></div>
+          <h3 class="subhead">Top airlines today</h3>
           <div class="rank-list" id="stats-top"></div>
         </article>
-
-        <article class="card">
-          <header class="card-head"><div><h2>Recent flights</h2><p>Newest first</p></div></header>
-          <div id="recent-flights-list"></div>
-        </article>
-
-        <article class="card" id="free-api-card">
-          <header class="card-head"><div><h2>Free API accuracy</h2><p>adsbdb vs. paid APIs &middot; commercial flights</p></div></header>
-          <div id="free-api-content"><p class="empty">Loading&hellip;</p></div>
-        </article>
-
-        <article class="card" id="ga-accuracy-card">
-          <header class="card-head"><div><h2>GA free API accuracy</h2><p>adsbdb and OpenSky vs. FR24 &middot; N-number aircraft</p></div></header>
-          <div id="ga-accuracy-content"><p class="empty">Loading&hellip;</p></div>
-        </article>
       </div>
 
-      <article class="card" id="period-card">
+      <article class="card" id="period-card" aria-labelledby="period-title">
         <header class="card-head card-head-wrap">
-          <div>
-            <h2 id="period-title">90-day summary</h2>
-            <p class="period-summary"><span class="period-total" id="period-total">&mdash;</span> flights <span class="dot-sep" aria-hidden="true"></span> <span id="period-api-calls"></span></p>
-          </div>
+          <div><h2 id="period-title">Last 90 days</h2><p id="period-range">&nbsp;</p></div>
           <div class="period-controls">
             <div class="segmented" role="group" aria-label="Quick date ranges" id="period-presets">
               <button type="button" class="seg" data-action="period" data-preset="yesterday" aria-pressed="false">Yesterday</button>
@@ -590,27 +611,47 @@
           </div>
         </header>
 
-        <div class="period-body">
-          <div class="history" id="stats-history"></div>
+        <div class="period-body" id="period-body">
+          <div class="period-kpis">
+            <div><span class="pk-num" id="period-total">&mdash;</span><span class="pk-label">flights</span></div>
+            <div><span class="pk-num" id="period-avg">&mdash;</span><span class="pk-label">per day</span></div>
+            <div><span class="pk-num" id="period-busiest">&mdash;</span><span class="pk-label" id="period-busiest-label">busiest day</span></div>
+            <div><span class="pk-num" id="period-unique">&mdash;</span><span class="pk-label">unique aircraft</span></div>
+            <div><span class="pk-num" id="period-calls">&mdash;</span><span class="pk-label" id="period-api-calls">paid lookups</span></div>
+          </div>
+
+          <div class="bar-chart bar-chart-days" id="day-chart" role="img" aria-label="Flights per day"></div>
+          <p class="chart-legend"><span class="lg-bar" aria-hidden="true"></span>Flights per day<span class="lg-avg"><span class="lg-line" aria-hidden="true"></span>7-day average</span></p>
+
           <div class="rollups">
             <div class="rollup"><h3 class="subhead">Top airlines</h3><div class="rank-list" id="rollup-airlines"></div></div>
             <div class="rollup"><h3 class="subhead">Top tail numbers</h3><div class="rank-list" id="rollup-tails"></div></div>
             <div class="rollup"><h3 class="subhead">Top routes</h3><div class="rank-list" id="rollup-routes"></div></div>
             <div class="rollup"><h3 class="subhead">Top aircraft types</h3><div class="rank-list" id="rollup-types"></div></div>
-            <div class="rollup rollup-wide"><h3 class="subhead">Where routes came from</h3><div id="rollup-sources"></div></div>
           </div>
+
+          <div class="rollups rollups-2">
+            <div class="rollup"><h3 class="subhead">Busiest hours <span class="label-note" id="period-peak"></span></h3><div class="bar-chart bar-chart-hours" id="period-hours" role="img" aria-label="Flights per hour of the day"></div></div>
+            <div class="rollup"><h3 class="subhead">Where routes came from</h3><div id="rollup-sources"></div></div>
+          </div>
+
+          <details class="explain daily-table">
+            <summary>Daily table</summary>
+            <div class="history" id="stats-history"></div>
+          </details>
         </div>
       </article>
 
-      <article class="card" aria-labelledby="search-h">
-        <header class="card-head"><div><h2 id="search-h">Search history</h2><p>Flight number, tail number or airport</p></div></header>
-        <form class="inline-form" role="search" data-submit="stats-search">
-          <label class="sr-only" for="stats-search-input">Search sightings</label>
-          <input type="search" id="stats-search-input" class="mono" placeholder="SWA123, N8862Q, DEN" autocapitalize="characters" spellcheck="false" autocomplete="off" enterkeyhint="search">
-          <button type="submit" class="btn btn-primary">{{ ico('search') }}Search</button>
-        </form>
-        <div id="stats-search-results" class="search-results"></div>
-      </article>
+      <div class="grid grid-2">
+        <article class="card" id="free-api-card">
+          <header class="card-head"><div><h2>Free API accuracy</h2><p>adsbdb vs. paid APIs &middot; commercial flights</p></div></header>
+          <div id="free-api-content"><p class="empty">Loading&hellip;</p></div>
+        </article>
+        <article class="card" id="ga-accuracy-card">
+          <header class="card-head"><div><h2>GA free API accuracy</h2><p>adsbdb and OpenSky vs. FR24 &middot; N-number aircraft</p></div></header>
+          <div id="ga-accuracy-content"><p class="empty">Loading&hellip;</p></div>
+        </article>
+      </div>
     </div>
   </section>
 

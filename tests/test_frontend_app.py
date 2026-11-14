@@ -137,10 +137,12 @@ _HARNESS = textwrap.dedent(r"""
 
       async statsReqSeq() {
         // loadStatsTab fires first (slow), applyStatsPeriod second (fast).  The fast/newer
-        // response resolves first; the slow/older one must be discarded by the seq guard.
+        // range resolves first; when the slow/older default response lands it may refresh the
+        // live parts (today, recent flights) but must NOT repaint the period card over the
+        // newer range the user picked.
         let renderCalls = [];
         sandbox.renderTodayStats = ()=>{};
-        sandbox.renderRecentFlights = d => renderCalls.push(d.__tag);
+        sandbox.renderRecentFlights = ()=>{};
         sandbox.renderPeriodStats   = d => renderCalls.push(d.__tag);
         sandbox.renderFreeApiAccuracy = ()=>{}; sandbox.renderGaAccuracy = ()=>{};
         sandbox.showToast = ()=>{};
@@ -353,6 +355,23 @@ _HARNESS = textwrap.dedent(r"""
       assert(getEl('apis-toggle').dataset.busy === '', 'busy flag cleared after the request');
     };
 
+    scenarios.statsTodayTiles = async () => {
+      // "vs by now yesterday" compares today so far with yesterday up to the same Pi time.
+      sandbox.renderTodayStats({
+        today:'2026-11-13', total:10, today_unique:7, api_calls:{ airlabs:3, aeroapi:1 },
+        yesterday_times:['08:00:00', '12:00:00', '23:00:00'], server_now:'2026-11-13 12:30:00',
+        today_hourly:new Array(24).fill(0), top_today:[], history:[],
+      });
+      const vs = getEl('kpi-today-vs').innerHTML;
+      assert(vs.includes('8') && vs.includes('vs 2 by now yesterday'), 'today vs yesterday-by-now, got ' + vs);
+      assert(getEl('kpi-calls').textContent === '4', 'paid lookups = AirLabs + AeroAPI');
+      // "x min ago" only within the last hour of the same Pi day.
+      assert(sandbox._ago('2026-11-13 21:14:05', '2026-11-13 21:34:00') === '20 min ago', 'minutes ago');
+      assert(sandbox._ago('2026-11-13 21:33:40', '2026-11-13 21:34:00') === 'just now', 'just now');
+      assert(sandbox._ago('2026-11-13 20:14:05', '2026-11-13 21:34:00') === '', 'over an hour: no label');
+      assert(sandbox._ago('2026-11-12 21:30:00', '2026-11-13 21:34:00') === '', 'another day: no label');
+    };
+
     scenarios.dirtyMeansDifferent = async () => {
       // "Unsaved changes" tracks a real difference from what was loaded: an edit sets it,
       // reverting the edit clears it again.
@@ -436,6 +455,10 @@ class FrontendAppJs(unittest.TestCase):
     def test_scoreboard_line_follows_post_game_window(self):
         # 2026-11: a FINAL leaves "On the board now" when on_board says the board dropped it.
         self._assert_scenario("scoreboardOnBoardWindow")
+
+    def test_stats_today_tiles(self):
+        # 2026-11: headline tiles compare with "by now yesterday"; feed rows say "x min ago".
+        self._assert_scenario("statsTodayTiles")
 
     def test_unsaved_changes_track_real_differences(self):
         # 2026-11: dirty = differs from the loaded config; unit switches round-trip exactly.
